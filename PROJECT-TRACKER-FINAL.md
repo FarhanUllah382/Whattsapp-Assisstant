@@ -381,14 +381,58 @@ written to any books, and Ahmed still can't ask it anything.**
 - **Ships:** a searchable catalog/FAQ document the bot consults before
   answering. **Not** live stock — that's version 2.
 - **Built from DeskcommCRM:** `agent/search-knowledge.ts` pattern (did not
-  qualify for direct extraction — DB-coupled — but the *shape* is simple
-  enough to re-implement: grounding tool + "don't invent what you didn't
-  find" discipline).
-- **New work:** Ahmed's actual catalog content.
+  qualify for direct extraction — DB-coupled) — the *shape* (grounding tool
+  + "don't invent what you didn't find" discipline) was re-implemented from
+  scratch in this project's own way: plain-markdown file + keyword search,
+  no embeddings/semantic search — that's genuinely more machinery than a
+  single-shop catalog needs right now.
+- **Done — starter `catalog.md` at the project root:** placeholder sections
+  for "What we sell," "Return policy," and "Delivery info," each clearly
+  marked as an example for Ahmed to replace with his real content. One
+  `##` heading = one answerable topic; the search tool matches per-section,
+  not against the whole file. Re-read from disk on every query — Ahmed can
+  edit it live, no restart needed.
+- **Done — new `src/catalog.ts`:** `parseCatalog()` splits the file into
+  `{title, body}` sections; `findBestMatch()` scores each section against
+  the query's keywords (a short built-in stopword list strips filler like
+  "the/is/you" — domain words like "price"/"return"/"delivery" are
+  deliberately kept). Title matches are weighted 3x body matches — needed
+  after a real bug (below) showed plain presence-matching wasn't enough.
+- **Done — 6th tool, `search_catalog`, in `src/tools.ts`:** takes a `query`
+  string, returns `{found: true, title, content}` on a match. On no match,
+  returns `{found: false, instruction: "...don't guess..."}` — never lets
+  the model fall back to inventing an answer. Explicitly scoped separate
+  from `check_stock` (live quantity) in both its description and the system
+  prompt, which also now tells the model to use it for general questions and
+  never guess when it comes back empty.
+- **Bug found and fixed during verification:** the first scoring pass
+  treated every keyword hit as equal, so a query like "how long does
+  delivery take" tied between the *Delivery info* section and the *Return
+  policy* section (whose body happens to mention "delivery" once, in "within
+  7 days of delivery") — and the tie-break silently picked whichever section
+  came first in the file, the wrong one. Fixed by weighting a keyword match
+  in the section's own title far higher than an incidental match in some
+  other section's body. Left in this log because it's a real example of why
+  "simple keyword matching" still needs a real test, not just a glance at
+  the code.
+- **Verified (2026-09-02), local-only — no WAHA/WhatsApp API calls made, not
+  needed for this task:** a manual test script (`npx tsx`, deleted after
+  running) confirmed: a return-policy question finds the *Return policy*
+  section; a delivery question finds *Delivery info* (post-fix); "what do
+  you sell" finds *What we sell*; an out-of-scope question ("do you accept
+  bitcoin payments") correctly returns `found: false` with the
+  don't-guess instruction; an empty query is rejected. `npx tsc --noEmit`
+  passes clean.
 - **Definition of done:** ask about something in the document — correct
-  answer; ask about something not in it — bot says it'll confirm, never
-  guesses.
-- **Status:** 🔲 Not started.
+  answer (✅ verified for all three starter sections); ask about something
+  not in it — bot says it'll confirm, never guesses (✅ verified at the tool
+  level — `found: false` plus the instruction; not yet observed through a
+  live customer conversation, which waits on 1.3 same as every other
+  sub-version here).
+- **Status:** ✅ Done — catalog file, search tool, and the
+  don't-invent-an-answer discipline are all built and verified locally.
+  Content is placeholder text for Ahmed to replace with the real catalog;
+  full proof against a live conversation waits on 1.3.
 
 **v1 exit criteria:** a customer can message the number any time, get a
 fast, safe, on-brand reply that remembers them. No orders, stock, or
