@@ -39,6 +39,12 @@ const SEND_RETRY_WINDOW_MS = 5 * 60 * 1000;
 const DISCLOSURE_TEXT =
   "Just so you know — I'm a virtual assistant helping out with Ahmed's shop. Happy to help!";
 
+// Guaranteed last-resort reply — see the "silent no-reply" note on the LOOP
+// below. Deliberately generic and short enough that it can't itself trip the
+// discount or human-promise guardrails.
+const FALLBACK_REPLY_TEXT =
+  "Sorry, I'm having trouble answering that right now — let me get back to you.";
+
 // How recently notify_owner must have been called for this customer for a
 // "someone will follow up" reply to be allowed to send — long enough to
 // cover the rest of the same turn (notify_owner and send_message are both
@@ -58,6 +64,19 @@ function hasRecentHandoff(customerId: number): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// SQLite's `datetime('now')` (the schema's default for messages.created_at)
+// only stores whole-second precision. getPacingState() below reads that value
+// back as `lastSentAt` — with truncated seconds, the real enforced gap
+// between sends can land up to ~999ms under the configured `throttleMs`,
+// weakening the anti-ban throttle in practice. Found via live burst testing
+// against the real pacing engine (2026-09-04), not the pure-function tests
+// (which used precise injected clocks and never hit this). Same
+// "YYYY-MM-DD HH:MM:SS[.mmm]" shape the existing parse code
+// (`.replace(' ', 'T') + 'Z'`) already expects — just with milliseconds kept.
+function nowSql(): string {
+  return new Date().toISOString().slice(0, 23).replace('T', ' ');
 }
 
 // Pacing and spinning are both about protecting Ahmed's ONE sending number in
@@ -217,8 +236,8 @@ function makeSendMessageTool(
 
         db.prepare(`update send_ledger set status = 'sent' where id = ?`).run(sendId);
         db.prepare(
-          'insert into messages (customer_id, direction, body) values (?, ?, ?)',
-        ).run(ctx.customerId, 'outbound', body);
+          'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
+        ).run(ctx.customerId, 'outbound', body, nowSql());
         if (needsDisclosure) {
           db.prepare("update customers set disclosure_sent_at = datetime('now') where id = ?").run(
             ctx.customerId,
@@ -266,11 +285,9 @@ export async function runTurn(
   const customer = getOrCreateCustomer(phone);
 
   // ── 1. OPEN — save the inbound message, load context ──────────────────
-  db.prepare('insert into messages (customer_id, direction, body) values (?, ?, ?)').run(
-    customer.id,
-    'inbound',
-    incomingText,
-  );
+  db.prepare(
+    'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
+  ).run(customer.id, 'inbound', incomingText, nowSql());
 
   const recentMessages = db
     .prepare(
@@ -317,15 +334,26 @@ export async function runTurn(
   // ── 2. LOOP — let the AI call tools, including send_message, until done ─
   const messages: ModelMessage[] = [{ role: 'user', content: openingText }];
 
+  // Tracked across the whole loop so we can tell, after it ends, whether the
+  // model ever actually replied — see the silent-no-reply guard below.
+  const toolsCalledThisTurn = new Set<string>();
+  let lastAssistantText = '';
+
   for (let step = 0; step < MAX_TOOL_STEPS; step++) {
     const result = await callModel(SYSTEM_PROMPT, messages, tools);
     messages.push({ role: 'assistant', content: result.content });
+
+    const textBlocks = result.content.filter((b: any) => b.type === 'text');
+    if (textBlocks.length > 0) {
+      lastAssistantText = textBlocks.map((b: any) => b.text).join('\n');
+    }
 
     const toolCalls = result.content.filter((b: any) => b.type === 'tool_use');
     if (toolCalls.length === 0) break; // model produced only text (ignored) — nothing left to do
 
     const toolResults = [];
     for (const call of toolCalls) {
+      toolsCalledThisTurn.add(call.name);
       const tool = tools.find((t) => t.name === call.name);
       const output = tool
         ? await tool.execute(call.input, { customerId: customer.id })
@@ -339,6 +367,47 @@ export async function runTurn(
     messages.push({ role: 'user', content: toolResults });
 
     if (result.stop_reason !== 'tool_use') break;
+  }
+
+  // Silent-no-reply guard: a turn can end cleanly — no thrown exception, no
+  // failed tool call — while never once calling send_message, because the
+  // model's raw text is discarded by design (see the loop above) and there's
+  // no other tripwire for "the model just gave up." From the customer's side
+  // that's indistinguishable from the bot being completely broken: zero
+  // reply, zero trace anywhere. This is permanent observability plus a
+  // guaranteed fallback, not a one-off debug print — it fires every time
+  // this condition occurs, not just while chasing this specific bug.
+  if (!toolsCalledThisTurn.has('send_message')) {
+    log.warn('turn ended without ever calling send_message', {
+      phone,
+      customerId: customer.id,
+      toolsCalled: [...toolsCalledThisTurn],
+      discardedModelText: lastAssistantText,
+    });
+
+    const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
+    const fallbackResult = await sendMessageTool.execute(
+      { body: FALLBACK_REPLY_TEXT },
+      { customerId: customer.id },
+    );
+    if (!(fallbackResult as { ok?: boolean })?.ok) {
+      log.error('fallback reply itself failed to send', {
+        phone,
+        customerId: customer.id,
+        fallbackResult,
+      });
+    }
+
+    const notifyOwnerTool = tools.find((t) => t.name === 'notify_owner')!;
+    await notifyOwnerTool.execute(
+      {
+        reason:
+          `Bot failed to reply on its own (no send_message call this turn). ` +
+          `Tools called: ${[...toolsCalledThisTurn].join(', ') || 'none'}. ` +
+          `Discarded model text: "${lastAssistantText}"`,
+      },
+      { customerId: customer.id },
+    );
   }
 
   // ── 3. CLOSE — force a summary + any new durable facts, save both ──────

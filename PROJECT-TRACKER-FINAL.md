@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 
 | Version | Delivers | Status |
 |---|---|---|
-| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ Done (2026-09-04) |
+| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on only 2 of CLAUDE.md §8's 9 checklist items so far |
 | 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
@@ -30,10 +30,21 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
   sub-version below for which extracted files apply to it.
-- **Version 1 is fully built and live-verified as of 2026-09-04** — a real
-  WhatsApp number (`+923128346256`) is linked, running, and has produced a
-  real, correct, on-brand reply to a real, unsolicited customer message. See
-  1.3 below for the verification and the bugs it took to get there.
+- **Correction (2026-09-04, same day this was first written — caught by the
+  user, not self-caught):** this section previously claimed "Version 1 is
+  fully built and live-verified." That overstated it — what's actually true
+  is narrower: all 5 of Version 1's sub-versions (1.1-1.5) are *built*, and
+  a real WhatsApp number (`+923128346256`) is linked and has produced one
+  real, correct reply to one real, unsolicited customer message (see 1.3
+  below). But CLAUDE.md §8's actual Definition of Done for "Version 1
+  complete" has 9 checklist items, and only 2 of them (real-reply, and
+  out-of-scope-question → handoff) have been verified against the real
+  number so far — the rest (crash-and-retry with no duplicate send,
+  malformed-input resilience, cross-conversation memory recall, burst
+  throttling, discount refusal, catalog grounding) remain verified only via
+  earlier mocked-model tests, not live. **Do not mark Version 1 complete
+  until every §8 item is actually checked against the real number** — see
+  1.3's status note below for the full breakdown.
 
 ---
 
@@ -373,14 +384,23 @@ written to any books, and Ahmed still can't ask it anything.**
     repeatedly today, including with zero traffic — most likely a Node
     v24.19.0 / native-binding compatibility issue given the exact crash site,
     not a bug in this project's code (confirmed not load-triggered by direct
-    testing). The user began installing an LTS Node but it wasn't active in
-    this session. **Mitigated, not fixed:** the dev app now runs under a
-    local shell auto-restart loop (not part of the committed project) so it
-    self-recovers within ~1-2s of a crash. **Follow-up still needed:** get a
-    Node LTS actually active for this project, or pin a `better-sqlite3`
-    version confirmed compatible with Node 24, or add a real process
-    supervisor before this is ever treated as production-ready — a shell
-    loop is a today-only stopgap.
+    testing). **Status: MITIGATED, NOT FIXED — root cause still
+    unresolved.** The dev app runs under a local shell auto-restart loop
+    (not part of the committed project, not a code change) so it
+    self-recovers within ~1-2s of a crash; the underlying Node/native-module
+    incompatibility itself has not been touched.
+  - **Node version check (verified by inspection, not assumed):** the user
+    installed Node 22 during this session, but `node --version` and the live
+    app process's own `ExecutablePath` both confirm **`C:\Program
+    Files\nodejs\node.exe`, v24.19.0** — the same install as before, still
+    the only Node found anywhere on this machine (checked `Program Files`,
+    `LOCALAPPDATA\Programs`, `Program Files (x86)`). **The Node 22 install
+    never became active in this session and was NOT what ran today's
+    verified round-trip** — everything today, including the crash and the
+    successful reply, ran on v24.19.0. Whoever picks this up next: find out
+    why the Node 22 install didn't take (wrong install scope, PATH not
+    refreshed, failed install?) and get it actually active before treating
+    the native-crash issue as anything but open.
   - **The actual verification:** an unsolicited real "Hi" from a real
     WhatsApp Business account (`923299144863`, "The Style Vault") produced a
     natural, on-brand, Roman Urdu/English reply — *"Hello! 😅 Teesri baar
@@ -388,6 +408,14 @@ written to any books, and Ahmed still can't ask it anything.**
     **correct, resolved phone-number JID** (`923299144863@c.us`) by reading
     it back directly from WAHA's own message log, not just trusting an
     app-side "success" log line.
+  - **A second, separate real thing got live-verified along the way, on
+    2026-09-03** (real unsolicited traffic, part of this same testing arc,
+    not a fresh test staged today): two different real people messaged
+    about job interviews (unrelated to the shop) and the bot correctly
+    called `notify_owner` both times (`"NEEDS AHMED"` logged,
+    `2026-09-03T15:15:30Z` and `15:17:04Z`) instead of guessing — this is
+    live proof of the CLAUDE.md §8 "genuinely outside its knowledge →
+    handoff, not a guess" requirement specifically, not just of 1.3.
 - **Definition of done:** blast a burst of test messages at the bot — sends
   visibly throttle/space out rather than firing all at once (✅ verified,
   throttle+jitter sleep confirmed bounded and working, against the stub send
@@ -397,15 +425,91 @@ written to any books, and Ahmed still can't ask it anything.**
   queue exists to actually retry later; see judgment-call note above); a real
   WhatsApp message to the actual number produces a real reply (✅ **verified
   2026-09-04** — see above, confirmed via WAHA's own message log).
-- **Status:** ✅ **Done.** Anti-ban send-safety logic and the real WAHA/NOWEB
-  connection are written, working, and now live-verified against a real
-  WhatsApp number with a real, unsolicited customer message and a real
-  reply sent back. Deliberately still not built (unchanged from before,
-  not blocking): per-number health circuit, STOP/opt-out handling — both
-  remain deferred, no current requirement for them yet. Separately open:
-  the Node v24 native-crash issue (mitigated by a dev-only restart loop,
-  not resolved) and the queue-based "actually fire later" half of outside-
-  hours sending.
+- **Status:** ✅ **Done, for this sub-version's own scope.** Anti-ban
+  send-safety logic and the real WAHA/NOWEB connection are written, working,
+  and the specific "real message in → real reply out" requirement above is
+  live-verified. Deliberately still not built (unchanged from before, not
+  blocking): per-number health circuit, STOP/opt-out handling — both remain
+  deferred. Separately open, explicitly **not fixed**: the Node v24 native
+  crash (see the dedicated note above — mitigated by a dev-only restart
+  loop only; confirmed today that Node 22 was NOT what actually ran, so this
+  is still fully unresolved) and the queue-based "actually fire later" half
+  of outside-hours sending.
+  - **This is 1.3's own status, not a Version-1-wide claim.** CLAUDE.md §8's
+    full Definition of Done for "Version 1 complete" has 9 items; as of
+    earlier today, live testing had verified exactly 2 of them against the
+    real number (real-reply, and out-of-scope-question → handoff). **Two
+    more were live-tested later the same day — see the dated entry directly
+    below, which also surfaced a third real bug, not yet fixed.**
+
+- **2026-09-04 (continued) — two more §8 items live-tested against the real
+  number, deliberately one at a time, and a third real bug surfaced along
+  the way:**
+  1. **Crash-and-retry, no duplicate send — ✅ PASS, with a real caveat.**
+     Test: watched the live app log for `"turn starting"` on a real inbound
+     message and killed the process the instant it appeared (same second,
+     `08:18:40.567Z`), simulating a crash before any reply could exist. The
+     auto-restart loop brought the app back in ~7s; WAHA redelivered the
+     same webhook (`"turn starting"` again at `08:18:49.772Z`, same phone);
+     the retry completed and sent **exactly one** reply — confirmed by
+     reading WAHA's own message log directly, not an app-side log line.
+     **What this does NOT prove:** the kill landed at the very start of
+     `runTurn()`, before the first attempt could have reached
+     `send_message` at all — so there was nothing to deduplicate yet, and a
+     naive implementation with no idempotency ledger at all would have
+     passed this exact test too. The narrower, real race — a crash *after*
+     `sendToCustomer()` succeeds but *before* `send_ledger` is marked
+     `'sent'` — is a window of milliseconds that can't be hit reliably by
+     killing a process by hand. That race remains genuinely untested.
+  2. **Unauthorized-discount refusal — ✅ PASS.** Test: a real customer
+     ("The Style Vault") sent *"Could u give me 20% discount kindly?"*
+     (above the confirmed 5% threshold). The model called `notify_owner`
+     first (`"NEEDS AHMED"` logged, reason correctly cites the 20% figure
+     and the 5% limit), and only then sent a reply declining the discount
+     and deferring to Ahmed — *"Bhai, itna bada discount dena mere bas mein
+     nahi hai! 😅 Main Ahmed bhai se baat karke aapko batata hoon..."* — no
+     discount was granted. This also re-confirms the human-promise guardrail
+     (the "I'll check with Ahmed" line only sent because the handoff was
+     logged immediately before it, exactly as designed). **Side note, not a
+     correctness issue:** this turn took ~2 minutes end-to-end (several
+     tool-call round trips against a slow model) — worth flagging as a UX
+     concern for later, separate from whether it was correct.
+  - **A third real bug, found along the way, NOT fixed — same severity as
+    the Gemini-quota silent-failure bug already logged above, and reported
+    separately per explicit instruction, not folded into the two PASS
+    results above:** during this same testing session, a real customer
+    asked *"Do I have shirts or paints in stock?"* — the turn logged
+    `"turn starting"` then, 52 seconds later, `"turn completed"`, with **no
+    error anywhere** — and **no reply was ever sent.** Confirmed by reading
+    WAHA's message log directly: the most recent outbound message was from
+    an earlier, unrelated turn. **Root cause (inferred from the code, not
+    yet directly observed — no per-tool-call tracing exists to confirm it
+    precisely):** `agent.ts`'s tool loop explicitly discards any turn where
+    the model's final output is plain text with no tool call —
+    `if (toolCalls.length === 0) break; // model produced only text
+    (ignored) — nothing left to do` — which is *correct* per this project's
+    core rule that raw model text must never reach a customer, but means
+    that when the model forgets (or chooses not) to call `send_message`,
+    the customer receives **literally nothing, and nothing is logged
+    anywhere to say so.** From the customer's side this is indistinguishable
+    from the bot being completely broken. **Not fixed. Compounding
+    observability gap:** there is currently no per-tool-call log, only
+    whole-turn `turn starting`/`turn completed`/`turn failed` — so there's
+    no way to confirm from logs alone whether `check_stock` was even called
+    before the model gave up, which would matter for actually fixing this.
+    **Suggested next step, not yet done:** log a warning whenever the tool
+    loop exits via the `toolCalls.length === 0` branch on a turn that never
+    called `send_message` at all — turns this from a silent failure into a
+    visible one, without changing what the model itself sees.
+  - **§8 tally after today:** 4 of 9 items now live-verified (real-reply;
+    out-of-scope → handoff; crash-and-retry with the caveat above;
+    discount refusal). The rest — malformed tool input not crashing a turn,
+    cross-conversation memory recall, burst-message throttling, catalog/FAQ
+    grounding — remain verified only via earlier mocked-model, local-only
+    tests. **Version 1 still should not be marked complete** — both because
+    5 of 9 §8 items remain live-unverified, and because this session
+    surfaced a real, unfixed, silent-failure bug that a §8-complete claim
+    would otherwise paper over.
 
 ### 1.4 — Promise & safety guardrails
 - **Goal:** the bot never tells a customer something that costs Ahmed money
