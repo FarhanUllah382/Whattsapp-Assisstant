@@ -21,7 +21,12 @@ import type { ToolDef } from './types';
 // this function still does 100% of the translation on both sides, per the
 // single-seam rule above.
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODEL = 'gemini-2.5-flash';
+// Switched from gemini-2.5-flash (2026-09-04) — its 20-requests/day free-tier
+// quota is exhausted (real traffic + our own testing burned through it, and
+// the cap is per-model, not per-key, so swapping keys under the same GCP
+// project didn't help). gemini-flash-lite-latest is a separate model with
+// its own quota bucket, confirmed working incl. function/tool calling.
+const MODEL = 'gemini-flash-lite-latest';
 
 export interface ModelMessage {
   role: 'user' | 'assistant';
@@ -39,7 +44,12 @@ function toGeminiParts(content: string | unknown[]): any[] {
   return (content as any[]).map((block) => {
     if (block.type === 'text') return { text: block.text };
     if (block.type === 'tool_use') {
-      return { functionCall: { name: block.name, args: block.input ?? {} } };
+      const part: Record<string, unknown> = { functionCall: { name: block.name, args: block.input ?? {} } };
+      // gemini-flash-lite-latest requires the thoughtSignature it attached to a
+      // functionCall to be echoed back on the next turn — omitting it fails with
+      // "Function call is missing a thought_signature" (2026-09-04).
+      if (block.thoughtSignature) part.thoughtSignature = block.thoughtSignature;
+      return part;
     }
     if (block.type === 'tool_result') {
       const name = String(block.tool_use_id).split('::')[0];
@@ -107,7 +117,13 @@ export async function callModel(
 
   const content = parts.map((p, i) => {
     if (p.functionCall) {
-      return { type: 'tool_use', id: `${p.functionCall.name}::${i}`, name: p.functionCall.name, input: p.functionCall.args ?? {} };
+      return {
+        type: 'tool_use',
+        id: `${p.functionCall.name}::${i}`,
+        name: p.functionCall.name,
+        input: p.functionCall.args ?? {},
+        thoughtSignature: p.thoughtSignature,
+      };
     }
     return { type: 'text', text: p.text ?? '' };
   });

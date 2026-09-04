@@ -21,8 +21,11 @@ import { dayStartInTz, decidePacing, type PacingState } from './guardrails/pacin
 import { SPINNING_DEFAULTS } from './guardrails/spinning/defaults';
 import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from './guardrails/spinning/engine';
 import { callModel, type ModelMessage } from './llm';
+import { createLogger } from './obs/logger';
 import { baseTools } from './tools';
 import type { Customer, ToolDef } from './types';
+
+const log = createLogger();
 
 const MAX_TOOL_STEPS = 6; // hard ceiling so a confused AI can't loop forever
 
@@ -223,7 +226,15 @@ function makeSendMessageTool(
         }
 
         return { ok: true };
-      } catch {
+      } catch (err) {
+        // The model only ever sees the teaching-text error below (never a
+        // thrown exception, per this file's own rule) — but a swallowed send
+        // failure with no trace anywhere is a real operational blind spot, so
+        // log the actual cause here even though the tool contract stays the same.
+        log.error('send_message failed', {
+          customerId: ctx.customerId,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return { ok: false, error: 'Could not send the message — please try again.' };
       }
     },

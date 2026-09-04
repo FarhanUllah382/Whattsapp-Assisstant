@@ -28,15 +28,21 @@ const log = createLogger();
 app.post('/webhook/whatsapp', async (req, res) => {
   const inbound = channel.parseInboundWebhook(req.body);
   if (!inbound) {
+    // Was a genuine operational blind spot: this branch never logged anything,
+    // so a webhook silently ignored for the wrong reason (parser bug, unexpected
+    // payload shape, etc.) looked identical to a correctly-ignored status update.
+    log.info('webhook ignored', { event: (req.body as { event?: unknown })?.event });
     res.sendStatus(200); // not a customer text message (status update, our own echo, etc.) — nothing to do
     return;
   }
 
+  log.info('turn starting', { phone: inbound.phone });
   try {
     await runTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
+    log.info('turn completed', { phone: inbound.phone });
     res.sendStatus(200);
   } catch (err) {
-    log.error('turn failed', { error: err instanceof Error ? err.message : String(err) });
+    log.error('turn failed', { phone: inbound.phone, error: err instanceof Error ? err.message : String(err) });
     res.sendStatus(500); // let the provider retry, if it supports that
   }
 });

@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 
 | Version | Delivers | Status |
 |---|---|---|
-| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 Partially built |
+| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ Done (2026-09-04) |
 | 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
@@ -30,7 +30,10 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
   sub-version below for which extracted files apply to it.
-- **Nothing is connected to a real WhatsApp number yet.**
+- **Version 1 is fully built and live-verified as of 2026-09-04** — a real
+  WhatsApp number (`+923128346256`) is linked, running, and has produced a
+  real, correct, on-brand reply to a real, unsolicited customer message. See
+  1.3 below for the verification and the bugs it took to get there.
 
 ---
 
@@ -282,6 +285,109 @@ written to any books, and Ahmed still can't ask it anything.**
   now direct, real evidence of why that safeguard matters for
   reconnect/session-management activity too, not just outbound message
   pacing — not a hypothetical anymore.
+- **2026-09-03 status — escalated, still blocked, do not retry on this number
+  for now:** picked back up after the 01:44 AM PKT timelock expiry. Found
+  three separate problems in sequence, not one:
+  1. The `RESTRICT_ALL_COMPANIONS` timelock itself had genuinely cleared
+     (`reachoutTimelock: null` confirmed via API).
+  2. But the session had *also* taken a `stream:error` /
+     `conflict: device_removed` (401) at the same moment the timelock was
+     applied on 2026-09-02, with WAHA logging "do not reconnect the
+     session." Restarting the session just kept retrying the same dead
+     device credentials and cycling back to `FAILED` — this needed a
+     `POST /api/sessions/default/logout` (clears stored creds) before a
+     fresh `SCAN_QR_CODE` state was reachable at all. Logout worked cleanly.
+  3. From there, a QR code and later a pairing code
+     (`POST /api/{session}/auth/request-code`, phone-number-based, no
+     second device needed) were both generated successfully but expired
+     unused (owner not available to enter them in time), which force-stops
+     the session back to `FAILED` — expected, not alarming on its own.
+     **But after 2-3 restart attempts to regenerate a fresh code in
+     succession, the session stopped reaching `SCAN_QR_CODE` at all:**
+     every subsequent restart now gets as far as "connected to WA" →
+     "logging in..." → an immediate (<1s) `Connection Failure` with
+     `"do not reconnect the session"`, before any QR/code can even be
+     issued. Host and container internet connectivity were independently
+     confirmed fine (`curl`/`wget` to whatsapp.com and google.com both
+     succeed) — this is not a network problem, it is WhatsApp's server
+     rejecting the auth handshake for this specific number
+     (`923128346256`) outright. `reachoutTimelock` still reads `null` (no
+     new *named* restriction surfaced via the API), but the symptom is
+     consistent with an escalating soft-block from repeated
+     reconnect/pairing attempts in a short window — same root cause the
+     2026-09-02 incident already flagged, now recurring and worse.
+  **Decision: stop attempting any restart/logout/pairing-code call against
+  this session for a real cooldown period (hours, not minutes) before
+  trying again** — every additional attempt while it's already refusing
+  the handshake risks lengthening or hardening whatever block this is.
+  Whoever resumes this: check `docker logs waha` for whether it still fails
+  at "logging in..." before touching it again; if so, wait longer, don't
+  retry. Consider testing pairing against a second, never-touched WhatsApp
+  number next time, to isolate whether this is number-specific.
+- **2026-09-04 status — RESOLVED, real round-trip verified end-to-end.**
+  Recovered from the 2026-09-03 "do not reconnect" dead state by fully
+  deleting the session (`DELETE /api/sessions/default`, not just
+  logout/restart) and recreating it from scratch — a genuinely clean session
+  reached `SCAN_QR_CODE` immediately, no lingering-credential issue this
+  time. Paired via WAHA's **phone-number pairing code**
+  (`POST /api/{session}/auth/request-code`, an 8-character code entered
+  under WhatsApp → Linked Devices → Link with phone number), not a QR scan —
+  confirms the earlier "do not reconnect" block was a dead-credential issue,
+  not a permanent restriction on this number (`923128346256` paired
+  successfully on the first attempt against a fresh session).
+  Once linked, the number started receiving **unsolicited real traffic**
+  (a WhatsApp Business account, "The Style Vault," and others) — genuine
+  proof it's a live, reachable number, independent of anything we sent
+  ourselves. That real traffic surfaced four real bugs, all now fixed, that
+  were silently blocking every reply:
+  1. **Gemini free-tier quota exhausted.** `gemini-2.5-flash`'s quota
+     (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, 20/day) is scoped
+     per **project**, not per key — two different API keys from the same
+     project both hit the same exhausted bucket. Fixed by switching
+     `src/llm.ts`'s `MODEL` to `gemini-flash-lite-latest`, a separate model
+     with its own quota, confirmed working including function/tool calling.
+  2. **Missing `thoughtSignature`.** The new model rejects (`400`) any
+     multi-turn tool-call exchange that doesn't echo back the
+     `thoughtSignature` it attached to a prior `functionCall` part.
+     `src/llm.ts` now captures it off the response and replays it on the
+     next request — fixed entirely within this one file, per the project's
+     single-seam rule for model calls.
+  3. **LID-addressed contacts silently failed to send.** WhatsApp's privacy-
+     ID system addresses some contacts as `"<pseudo-id>@lid"` instead of
+     their real phone-number JID. `parseInboundWebhook` was treating that
+     pseudo-id as the customer's phone number, producing a bogus chatId that
+     failed on send — caught by `send_message`'s existing try/catch, so it
+     never surfaced as a visible error anywhere. Fixed in `src/channel/
+     waha.ts`: when `from` ends in `@lid`, resolve the real JID from
+     `_data.key.remoteJidAlt` (which WAHA already provides) instead.
+  4. **Operational blind spot, not a functional bug:** a failed send
+     returning `{ok:false}` to the model (correct, per this file's own
+     "never throw" tool rule) also meant *nothing was ever logged* for that
+     failure — a genuinely silent failure mode that made bugs 1-3 far
+     harder to diagnose than they should have been. Added `log.error` in
+     `send_message`'s catch block (`agent.ts`) and full webhook-lifecycle
+     logging — `webhook ignored` / `turn starting` / `turn completed` — in
+     `server.ts`. Neither change alters what the model itself sees.
+  - **Separately: a random, load-independent native crash** (`better-
+    sqlite3`/Node assertion in `RemoveEnvironmentCleanupHook`) surfaced
+    repeatedly today, including with zero traffic — most likely a Node
+    v24.19.0 / native-binding compatibility issue given the exact crash site,
+    not a bug in this project's code (confirmed not load-triggered by direct
+    testing). The user began installing an LTS Node but it wasn't active in
+    this session. **Mitigated, not fixed:** the dev app now runs under a
+    local shell auto-restart loop (not part of the committed project) so it
+    self-recovers within ~1-2s of a crash. **Follow-up still needed:** get a
+    Node LTS actually active for this project, or pin a `better-sqlite3`
+    version confirmed compatible with Node 24, or add a real process
+    supervisor before this is ever treated as production-ready — a shell
+    loop is a today-only stopgap.
+  - **The actual verification:** an unsolicited real "Hi" from a real
+    WhatsApp Business account (`923299144863`, "The Style Vault") produced a
+    natural, on-brand, Roman Urdu/English reply — *"Hello! 😅 Teesri baar
+    'Hi' agaya hai! Bataiye, kya dikhayen aapko?..."* — confirmed sent to the
+    **correct, resolved phone-number JID** (`923299144863@c.us`) by reading
+    it back directly from WAHA's own message log, not just trusting an
+    app-side "success" log line.
 - **Definition of done:** blast a burst of test messages at the bot — sends
   visibly throttle/space out rather than firing all at once (✅ verified,
   throttle+jitter sleep confirmed bounded and working, against the stub send
@@ -289,13 +395,17 @@ written to any books, and Ahmed still can't ask it anything.**
   configured hours queues instead of firing immediately (⚠️ partially true —
   it does not fire immediately, but "queues" overstates it until a real job
   queue exists to actually retry later; see judgment-call note above); a real
-  WhatsApp message to the actual number produces a real reply (🔲 blocked —
-  see 2026-09-02 status above; no message has round-tripped yet).
-- **Status:** 🔲 **Not done.** Anti-ban send-safety logic and the real
-  WAHA/NOWEB connection code are both written and working, but live
-  verification against a real WhatsApp number is blocked until the
-  WhatsApp-imposed restriction clears (~01:44 AM Sept 3 PKT, see above).
-  1.3 stays not-done until that verification actually happens.
+  WhatsApp message to the actual number produces a real reply (✅ **verified
+  2026-09-04** — see above, confirmed via WAHA's own message log).
+- **Status:** ✅ **Done.** Anti-ban send-safety logic and the real WAHA/NOWEB
+  connection are written, working, and now live-verified against a real
+  WhatsApp number with a real, unsolicited customer message and a real
+  reply sent back. Deliberately still not built (unchanged from before,
+  not blocking): per-number health circuit, STOP/opt-out handling — both
+  remain deferred, no current requirement for them yet. Separately open:
+  the Node v24 native-crash issue (mitigated by a dev-only restart loop,
+  not resolved) and the queue-based "actually fire later" half of outside-
+  hours sending.
 
 ### 1.4 — Promise & safety guardrails
 - **Goal:** the bot never tells a customer something that costs Ahmed money

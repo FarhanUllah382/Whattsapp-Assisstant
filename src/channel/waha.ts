@@ -58,6 +58,19 @@ export const wahaAdapter: ChannelAdapter = {
     if (m.from.endsWith('@g.us')) return null; // group chat — out of scope
     if (m.body.trim() === '') return null; // media/sticker with no caption — nothing to react to yet
 
-    return { phone: phoneFromChatId(m.from), text: m.body };
+    // WhatsApp's privacy-ID system addresses some contacts as "<pseudo-id>@lid"
+    // instead of their real phone-number JID. Treating that pseudo-id as a phone
+    // number produces a bogus chatId that silently fails to send (caught by
+    // send_message's try/catch, never surfacing as a visible error) — WAHA
+    // resolves the real phone-number JID separately, so use that instead.
+    const remoteJidAlt = (m._data as Record<string, unknown> | undefined)?.key as
+      | Record<string, unknown>
+      | undefined;
+    const realJid =
+      m.from.endsWith('@lid') && typeof remoteJidAlt?.remoteJidAlt === 'string'
+        ? (remoteJidAlt.remoteJidAlt as string)
+        : m.from;
+
+    return { phone: phoneFromChatId(realJid), text: m.body };
   },
 };
