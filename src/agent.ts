@@ -66,6 +66,28 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Serializes every guarded send (pacing/spinning decision through the actual
+// send + write) so concurrent turns can't each read the same stale "last
+// sent"/"recent outbound" state before any of them commits. Found live
+// 2026-09-05 (PROJECT-TRACKER-FINAL.md 1.3): server.ts awaits runTurn() per
+// request with no lock, and Node yields at every await (the real LLM call,
+// the pacing sleep below), so a burst of concurrent messages really did blow
+// through the configured throttle instead of visibly spacing out — 5
+// concurrent sends landed within ~230ms of each other against a 1200ms
+// throttle, both in a direct test and live against the real number. A
+// single in-process promise chain is the right scope here: one process, one
+// WhatsApp number, no external queue needed for that.
+let sendQueueTail: Promise<unknown> = Promise.resolve();
+
+function withSendLock<T>(fn: () => Promise<T>): Promise<T> {
+  const result = sendQueueTail.then(fn, fn);
+  sendQueueTail = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
 // SQLite's `datetime('now')` (the schema's default for messages.created_at)
 // only stores whole-second precision. getPacingState() below reads that value
 // back as `lastSentAt` — with truncated seconds, the real enforced gap
@@ -190,86 +212,92 @@ function makeSendMessageTool(
           }
         }
 
-        // Pacing: is Ahmed's number allowed to send right now? Outside the
-        // sending window or over a daily cap, we don't send at all — there's no
-        // real job queue yet to defer to, and literally sleeping for hours would
-        // hang this request. Only the short throttle/jitter gap (at most a couple
-        // seconds by default) is worth actually blocking on.
-        const pacingDecision = decidePacing({
-          now: new Date(),
-          knobs: PACING_DEFAULTS,
-          state: getPacingState(PACING_DEFAULTS.timezone),
-          crmDailyLimit: null,
+        // Everything below reads and then acts on shared, order-sensitive
+        // state (pacing's last-sent tracking, spinning's recent-outbound
+        // window) — serialized through withSendLock so a concurrent turn
+        // can't read the same stale state before this one commits its send.
+        return await withSendLock(async () => {
+          // Pacing: is Ahmed's number allowed to send right now? Outside the
+          // sending window or over a daily cap, we don't send at all — there's no
+          // real job queue yet to defer to, and literally sleeping for hours would
+          // hang this request. Only the short throttle/jitter gap (at most a couple
+          // seconds by default) is worth actually blocking on.
+          const pacingDecision = decidePacing({
+            now: new Date(),
+            knobs: PACING_DEFAULTS,
+            state: getPacingState(PACING_DEFAULTS.timezone),
+            crmDailyLimit: null,
+          });
+          if (!pacingDecision.allow) {
+            return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
+          }
+          if (pacingDecision.waitMs > 0) {
+            await sleep(pacingDecision.waitMs);
+          }
+
+          // Spinning: is this text a near-duplicate of a recent send to someone
+          // else? Unlike pacing, waiting doesn't fix this — the model needs to
+          // vary the wording, so this is a hard refusal with a teaching-text
+          // reason rather than a delay.
+          const spinningDecision = decideSpinning({
+            candidate: body,
+            window: getRecentOutboundWindow(SPINNING_DEFAULTS.windowSize),
+            knobs: SPINNING_DEFAULTS,
+          });
+          if (!spinningDecision.allow) {
+            return { ok: false, error: spinningDecision.reason };
+          }
+
+          // Unauthorized-discount guardrail: block before it ever reaches the
+          // customer. A teaching-text reason, same as every other guardrail
+          // here, so the model can reformulate instead of the turn crashing.
+          const discountCheck = checkDiscountRule(body, getKnownDiscountPercents(ctx.customerId));
+          if (!discountCheck.ok) {
+            return { ok: false, error: discountCheck.reason };
+          }
+
+          // Human-promise guardrail: "someone will follow up" is only allowed
+          // alongside/after an actual handoff — never as an empty reassurance
+          // the model invents on its own to end the conversation politely.
+          if (detectHumanPromise(body) && !hasRecentHandoff(ctx.customerId)) {
+            return {
+              ok: false,
+              error:
+                'This message promises a human (Ahmed/the team) will follow up, but no handoff ' +
+                'was recorded for this customer. Call notify_owner first if this genuinely needs ' +
+                'Ahmed, or rephrase without promising a human follow-up.',
+            };
+          }
+
+          // One-time "I'm a virtual assistant" disclosure on this customer's
+          // first-ever reply. Prepended only to what's actually sent over the
+          // wire — the stored transcript keeps the model's own undecorated text.
+          const customerRow = db
+            .prepare('select disclosure_sent_at from customers where id = ?')
+            .get(ctx.customerId) as { disclosure_sent_at: string | null } | undefined;
+          const needsDisclosure = !customerRow?.disclosure_sent_at;
+          const outgoingBody = needsDisclosure ? `${DISCLOSURE_TEXT}\n\n${body}` : body;
+
+          db.prepare(
+            `insert into send_ledger (id, customer_id, status, created_at)
+             values (?, ?, 'pending', datetime('now'))
+             on conflict(id) do update set status = 'pending', created_at = datetime('now')`,
+          ).run(sendId, ctx.customerId);
+
+          await sendToCustomer(outgoingBody);
+
+          db.prepare(`update send_ledger set status = 'sent' where id = ?`).run(sendId);
+          db.prepare(
+            'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
+          ).run(ctx.customerId, 'outbound', body, nowSql());
+          if (needsDisclosure) {
+            db.prepare("update customers set disclosure_sent_at = datetime('now') where id = ?").run(
+              ctx.customerId,
+            );
+          }
+
+          return { ok: true };
         });
-        if (!pacingDecision.allow) {
-          return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
-        }
-        if (pacingDecision.waitMs > 0) {
-          await sleep(pacingDecision.waitMs);
-        }
-
-        // Spinning: is this text a near-duplicate of a recent send to someone
-        // else? Unlike pacing, waiting doesn't fix this — the model needs to
-        // vary the wording, so this is a hard refusal with a teaching-text
-        // reason rather than a delay.
-        const spinningDecision = decideSpinning({
-          candidate: body,
-          window: getRecentOutboundWindow(SPINNING_DEFAULTS.windowSize),
-          knobs: SPINNING_DEFAULTS,
-        });
-        if (!spinningDecision.allow) {
-          return { ok: false, error: spinningDecision.reason };
-        }
-
-        // Unauthorized-discount guardrail: block before it ever reaches the
-        // customer. A teaching-text reason, same as every other guardrail
-        // here, so the model can reformulate instead of the turn crashing.
-        const discountCheck = checkDiscountRule(body, getKnownDiscountPercents(ctx.customerId));
-        if (!discountCheck.ok) {
-          return { ok: false, error: discountCheck.reason };
-        }
-
-        // Human-promise guardrail: "someone will follow up" is only allowed
-        // alongside/after an actual handoff — never as an empty reassurance
-        // the model invents on its own to end the conversation politely.
-        if (detectHumanPromise(body) && !hasRecentHandoff(ctx.customerId)) {
-          return {
-            ok: false,
-            error:
-              'This message promises a human (Ahmed/the team) will follow up, but no handoff ' +
-              'was recorded for this customer. Call notify_owner first if this genuinely needs ' +
-              'Ahmed, or rephrase without promising a human follow-up.',
-          };
-        }
-
-        // One-time "I'm a virtual assistant" disclosure on this customer's
-        // first-ever reply. Prepended only to what's actually sent over the
-        // wire — the stored transcript keeps the model's own undecorated text.
-        const customerRow = db
-          .prepare('select disclosure_sent_at from customers where id = ?')
-          .get(ctx.customerId) as { disclosure_sent_at: string | null } | undefined;
-        const needsDisclosure = !customerRow?.disclosure_sent_at;
-        const outgoingBody = needsDisclosure ? `${DISCLOSURE_TEXT}\n\n${body}` : body;
-
-        db.prepare(
-          `insert into send_ledger (id, customer_id, status, created_at)
-           values (?, ?, 'pending', datetime('now'))
-           on conflict(id) do update set status = 'pending', created_at = datetime('now')`,
-        ).run(sendId, ctx.customerId);
-
-        await sendToCustomer(outgoingBody);
-
-        db.prepare(`update send_ledger set status = 'sent' where id = ?`).run(sendId);
-        db.prepare(
-          'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
-        ).run(ctx.customerId, 'outbound', body, nowSql());
-        if (needsDisclosure) {
-          db.prepare("update customers set disclosure_sent_at = datetime('now') where id = ?").run(
-            ctx.customerId,
-          );
-        }
-
-        return { ok: true };
       } catch (err) {
         // The model only ever sees the teaching-text error below (never a
         // thrown exception, per this file's own rule) — but a swallowed send
