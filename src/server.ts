@@ -15,9 +15,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import express from 'express';
-import { runTurn } from './agent';
+import { runOwnerTurn, runTurn } from './agent';
 import { wahaAdapter } from './channel/waha';
 import { createLogger } from './obs/logger';
+import { isOwnerPhone } from './owner';
 
 const app = express();
 app.use(express.json());
@@ -36,13 +37,26 @@ app.post('/webhook/whatsapp', async (req, res) => {
     return;
   }
 
-  log.info('turn starting', { phone: inbound.phone });
+  // Version 3.1: the ONLY place this routing decision is made. isOwnerPhone
+  // is fail-closed (see owner.ts) — an unconfigured/misconfigured owner
+  // number just means every sender is treated as a customer, never the
+  // other way around.
+  const isOwner = isOwnerPhone(inbound.phone);
+  log.info('turn starting', { phone: inbound.phone, turnKind: isOwner ? 'owner' : 'customer' });
   try {
-    await runTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
-    log.info('turn completed', { phone: inbound.phone });
+    if (isOwner) {
+      await runOwnerTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
+    } else {
+      await runTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
+    }
+    log.info('turn completed', { phone: inbound.phone, turnKind: isOwner ? 'owner' : 'customer' });
     res.sendStatus(200);
   } catch (err) {
-    log.error('turn failed', { phone: inbound.phone, error: err instanceof Error ? err.message : String(err) });
+    log.error('turn failed', {
+      phone: inbound.phone,
+      turnKind: isOwner ? 'owner' : 'customer',
+      error: err instanceof Error ? err.message : String(err),
+    });
     res.sendStatus(500); // let the provider retry, if it supports that
   }
 });

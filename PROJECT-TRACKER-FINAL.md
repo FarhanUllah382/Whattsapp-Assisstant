@@ -14,7 +14,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
 | 2.x | Promise 3 — keeps the books automatically | 🟡 All 5 sub-versions (2.1-2.5) built and deterministically verified (2026-09-05) — none yet live-tested against a real conversation, see each sub-version's own status |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started, except 3.1/3.2 opened early as an explicit exception (2026-09-05) — see the note directly below the table |
+| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 built and locally verified (2026-09-05) under the explicit early-start exception below; 3.2 not started; 3.3 stays out of scope |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
 **Note on the 3.x exception, so anyone reading this later understands why
@@ -1715,20 +1715,96 @@ the MVP-complete milestone.**
 ### 3.1 — Owner recognition & dedicated owner turn
 - **Goal:** the system knows when the sender is Ahmed himself, not a
   customer, and switches modes.
-- **Depends on:** version 1 complete.
-- **Ships:** sender-identity check (Ahmed's own number), a distinct turn
-  kind for owner messages that never talks to a customer and only reads
-  data.
+- **Depends on:** version 1 complete (✅ satisfied).
+- **Built under the 2026-09-05 exception** (CLAUDE.md §3 — Version 2's own
+  live verification was still pending; this is deliberate, not scope drift,
+  see that section for the full reasoning and boundary).
+- **Verified before starting, not assumed (2026-09-05):** confirmed via
+  `git status` (clean) and a `grep` across `src/` for "owner"-related logic
+  that no sender-identity check or distinct turn kind existed anywhere yet
+  — only unrelated "owner" mentions (the human-promise guardrail's
+  language, a comment in `followups.ts`).
+- **Done (2026-09-05) — sender-identity check:** new `src/owner.ts`,
+  `isOwnerPhone(phone, ownerPhone?)`. Reads `AHMED_OWNER_PHONE` once at
+  module load (same idiom as `PACING_DEFAULTS`), normalizes both sides the
+  same way WAHA's own adapter already normalizes every inbound phone
+  (digits only), and — critically — **fails closed**: if
+  `AHMED_OWNER_PHONE` isn't configured, no phone number is ever recognized
+  as the owner, matching this project's existing fail-closed convention
+  (`warmupCapFor` treats an unknown number's age as the most conservative
+  step, never "no cap"). **Not yet configured in this environment on
+  purpose** — same judgment call as `PACING_TIMEZONE` before Ahmed's real
+  shop timezone was known: don't guess a real value, leave it unset (safe,
+  fail-closed) until Ahmed's actual number is confirmed.
+- **Done (2026-09-05) — the owner turn itself:** new `runOwnerTurn()` in
+  `agent.ts`, routed to from `server.ts`'s webhook handler based purely on
+  `isOwnerPhone()` — the ONLY place this decision is made, checked before
+  either turn kind runs, never by message content. Modeled on the
+  restricted-turn-kind *concept* from `agent/operator-turn.ts` (a turn kind
+  with restricted permissions) — not the Operator/Conversador dual-agent-
+  role *split* itself, which stays permanently excluded (CLAUDE.md §6);
+  `operator-turn.ts` didn't qualify for extraction anyway (DB-coupled).
+  Deliberately minimal, matching this sub-version's own "the owner-turn
+  kind itself, full stop": its own system prompt, its own `send_message`
+  tool, and **no other tools yet** (3.2 adds the real analytics tools) —
+  no checkpoint, no `customer_notes`, no discount/human-promise/spinning
+  guardrails, none of which are customer-conversation concepts.
+  **Deliberately reused, not skipped:** `withSendLock` + `decidePacing`
+  against the same shared `messages` history — anti-ban pacing protects
+  the one shared *number*, not any one conversation, so a message to Ahmed
+  is still an outbound send from that same number; skipping pacing here
+  would have quietly reopened the exact regression Version 1's "no
+  possibility of the number getting banned" guarantee was built to close.
+  Ahmed's own identity still gets an ordinary row in `customers` (same
+  `getOrCreateCustomer`) purely so pacing state can see owner sends too —
+  which turn *kind* runs is decided entirely by `isOwnerPhone()`, never by
+  a row merely existing.
+- **Known, explicitly-flagged gap, not fixed here:** no silent-no-reply
+  safety net (1.3) and no send-ledger idempotency (1.1) for this path yet
+  — a crash between an owner send and the pacing-state write could in
+  theory duplicate or drop a reply to Ahmed. Out of scope for "the
+  owner-turn kind itself, full stop"; revisit if 3.2's real usage makes it
+  a live concern.
+- **Verified locally, deterministically — 19 checks across 3 scripts (split
+  for the same Windows/Node 24/better-sqlite3 native-crash flakiness
+  already on record — not a defect in this code):** exact match, "+"/spaced
+  formatting, a different number, and an empty phone all behave correctly;
+  **fail-closed confirmed directly** — with no owner number configured,
+  even the "right" number and an empty phone are both rejected, never a
+  false match; three routing scenarios including a customer phone asking
+  an overtly owner-style question ("What were sales today?") all route
+  correctly — proving content never drives routing, only the phone number
+  does. Through the real `runOwnerTurn()`: an identity row is created for
+  pacing purposes but **no checkpoint and no `customer_notes` are ever
+  written** for it; the model attempting an unavailable customer-only tool
+  (`record_order`) fails gracefully, no crash, and the turn continues. A
+  genuinely useful accident of timing: today's *real* daily send cap was
+  still exhausted during this test (the same cap this whole session is
+  waiting to reset for the live order-flow test) — so this incidentally
+  proved, against real current state, that the owner turn's reused pacing
+  check actually blocks a send for real, logs nothing fake, and doesn't
+  crash, rather than only being verified against a mocked-allow condition.
+  Finally, confirmed the exact same question from a real customer phone
+  still produces a real checkpoint (proving it took the distinct customer
+  code path, regardless of the shared cap state). Scratch scripts and test
+  rows deleted after use. Live server restarted with the new code
+  (`AHMED_OWNER_PHONE` deliberately left unset, so tonight's planned
+  customer-flow live test is unaffected).
 - **Built from DeskcommCRM:** the *concept* proven by
   `agent/operator-turn.ts` — a turn kind with restricted permissions —
   steered, not reused code (did not qualify for extraction: DB-coupled, and
   even if it had, it's the wrong direction — see permanent exclusions on
   the Operator/Conversador split itself).
-- **New work:** the owner-turn kind itself, full stop.
 - **Definition of done:** message the bot from Ahmed's own number vs. a test
-  customer number — provably different behavior, with no way for a customer
-  message to trigger owner-mode answers.
-- **Status:** 🔲 Not started.
+  customer number — provably different behavior (✅ verified above,
+  deterministically), with no way for a customer message to trigger
+  owner-mode answers (✅ verified above, including the adversarial case of
+  an owner-style question from a customer number).
+- **Status:** ✅ Built and locally verified, deterministically — **not yet
+  live-tested against a real conversation**, same distinction as every
+  other Version 2/3 sub-version in this file. `AHMED_OWNER_PHONE` is not
+  yet configured in this environment; live testing this sub-version needs
+  that set to Ahmed's real number first, a separate, not-yet-made step.
 
 ### 3.2 — Owner analytics Q&A tools
 - **Goal:** Ahmed's four example questions all work, in his own words.

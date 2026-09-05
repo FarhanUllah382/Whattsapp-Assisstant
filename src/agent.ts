@@ -629,3 +629,130 @@ export async function runTurn(
     });
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Version 3.1 — THE OWNER TURN. A genuinely separate turn kind for Ahmed
+// himself, routed here only after `isOwnerPhone()` (owner.ts) confirms the
+// sender — never entered by a customer message, no matter how it's phrased.
+// Deliberately minimal ("the owner-turn kind itself, full stop" — 3.1's own
+// stated scope): no tools yet (3.2 adds the real analytics tools:
+// sales_today, unpaid_customers, top_selling_product, pending_followups),
+// no checkpoint/notes memory, no discount/human-promise/spinning guardrails
+// — none of those are customer-conversation concepts, so none apply here.
+//
+// What it DOES reuse, deliberately, not by oversight: `withSendLock` +
+// `decidePacing` against the SAME shared `messages` history. Anti-ban
+// pacing protects the one shared *number* in aggregate, not any one
+// conversation — a message to Ahmed is still an outbound send from that
+// same number, so skipping pacing here would quietly reopen exactly the
+// regression Version 1's own "no possibility of the number getting banned"
+// guarantee was built to close. Ahmed's own identity still gets a row in
+// `customers` (via the same `getOrCreateCustomer`) purely so this turn's
+// sends land in the same global `messages` log pacing reads from — that
+// table has always really meant "any phone number that has texted this
+// number," customer or owner; which turn KIND runs is decided by
+// `isOwnerPhone()` in server.ts, never by whether a `customers` row exists.
+//
+// Known, explicitly-flagged gap, not fixed here: no silent-no-reply safety
+// net (1.3) and no send-ledger idempotency (1.1) for this path yet — a
+// crash between send and the pacing-state write could in theory duplicate
+// or drop an owner reply. Out of scope for "the owner-turn kind itself,
+// full stop"; revisit if 3.2's real usage makes it a live concern.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const OWNER_SYSTEM_PROMPT = `You are Ahmed's own private assistant. You are talking directly to Ahmed,
+the shop's owner — never to a customer. This conversation is completely separate from any customer
+conversation: you never send anything to a customer, never record an order or payment, and never
+change an order's status from here. Answer Ahmed's questions about his own business honestly, using
+only the tools available to you in this conversation. If you don't have a way to answer something
+yet, say so plainly instead of guessing.`;
+
+function makeOwnerSendTool(sendToOwner: (text: string) => Promise<void>): ToolDef {
+  return {
+    name: 'send_message',
+    description: 'Reply to Ahmed. This is the only way to reply to him.',
+    input_schema: {
+      type: 'object',
+      properties: { body: { type: 'string', description: 'the message text' } },
+      required: ['body'],
+    },
+    execute: async ({ body }, ctx) => {
+      if (typeof body !== 'string' || body.trim() === '') {
+        return { ok: false, error: 'Message text must be a non-empty string.' };
+      }
+      try {
+        return await withSendLock(async () => {
+          const pacingDecision = decidePacing({
+            now: new Date(),
+            knobs: PACING_DEFAULTS,
+            state: getPacingState(PACING_DEFAULTS.timezone),
+            crmDailyLimit: null,
+          });
+          if (!pacingDecision.allow) {
+            return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
+          }
+          if (pacingDecision.waitMs > 0) {
+            await sleep(pacingDecision.waitMs);
+          }
+
+          await sendToOwner(body);
+          db.prepare(
+            'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
+          ).run(ctx.customerId, 'outbound', body, nowSql());
+          return { ok: true };
+        });
+      } catch (err) {
+        log.error('owner send_message failed', {
+          customerId: ctx.customerId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { ok: false, error: 'Could not send the message — please try again.' };
+      }
+    },
+  };
+}
+
+/**
+ * The public entry point for a message already confirmed to be from Ahmed's
+ * own number — server.ts is responsible for that check (`isOwnerPhone`)
+ * before ever calling this, never this function itself.
+ */
+export async function runOwnerTurn(
+  phone: string,
+  incomingText: string,
+  sendToOwner: (text: string) => Promise<void>,
+): Promise<void> {
+  const owner = getOrCreateCustomer(phone);
+  db.prepare(
+    'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
+  ).run(owner.id, 'inbound', incomingText, nowSql());
+
+  const tools = [makeOwnerSendTool(sendToOwner)];
+  const messages: ModelMessage[] = [{ role: 'user', content: incomingText }];
+
+  for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+    const result = await callModel(OWNER_SYSTEM_PROMPT, messages, tools);
+    messages.push({ role: 'assistant', content: result.content });
+
+    const toolCalls = result.content.filter((b: any) => b.type === 'tool_use');
+    if (toolCalls.length === 0) break; // model produced only text — nothing left to do, same discard rule as the customer turn
+
+    const toolResults = [];
+    for (const call of toolCalls) {
+      const tool = tools.find((t) => t.name === call.name);
+      const output = tool
+        ? await tool.execute(call.input, { customerId: owner.id })
+        : { error: `unknown tool ${call.name}` };
+      toolResults.push({
+        type: 'tool_result',
+        tool_use_id: call.id,
+        content: JSON.stringify(output),
+      });
+    }
+    messages.push({ role: 'user', content: toolResults });
+
+    if (result.stop_reason !== 'tool_use') break;
+  }
+
+  log.info('owner turn completed', { phone });
+}
