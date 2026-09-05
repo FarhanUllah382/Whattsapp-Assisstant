@@ -157,10 +157,9 @@ incidentally:**
   marked `'sent'`; and cross-conversation memory recall proven correct
   across a real day boundary, but not yet proven to survive a fact aging
   out of the raw 20-message window `agent.ts` loads per turn.
-- **`catalog.md`'s content is still placeholder text**, not Ahmed's real
-  catalog — a content task for Ahmed, not something to touch as part of
-  this work (unless the user is actively dictating real content, which is
-  its own separate, explicit task).
+- ~~`catalog.md`'s content is still placeholder text~~ — **resolved
+  2026-09-05**: Ahmed provided real content, written in and verified (see
+  `PROJECT-TRACKER-FINAL.md` 1.5's dated entry). No longer an open item.
 
 **Do not begin Version 3.3 or any work beyond 3.1/3.2 under this file's
 authority.** If a task description asks for WhatsApp-delivered alerts or

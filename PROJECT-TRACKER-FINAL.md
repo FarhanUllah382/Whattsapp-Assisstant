@@ -1094,20 +1094,53 @@ written to any books, and Ahmed still can't ask it anything.**
     this bug:** a config/env default fix isn't actually live until the
     running process is restarted — worth remembering for any future
     knob change, not just this one.
-  - **Content caveat, unchanged from 2026-09-02:** `catalog.md`'s three
-    sections are still the placeholder text ("Example entry — replace with
-    your real product lineup," etc.), not Ahmed's actual policies. Today's
-    test proves the *mechanism* (answer correctly from the document;
-    deflect instead of inventing when not covered) works end-to-end against
-    the real number — it does not mean the content customers currently see
-    is Ahmed's real catalog. Filling in real content is a content task for
-    Ahmed, not a code task, and isn't blocking on anything.
+  - **Content caveat, true as of this test (2026-09-02/05), resolved later
+    2026-09-05 — see the dated entry directly below:** `catalog.md`'s three
+    sections were still the placeholder text ("Example entry — replace with
+    your real product lineup," etc.), not Ahmed's actual policies, when
+    this live test ran. The test proved the *mechanism* (answer correctly
+    from the document; deflect instead of inventing when not covered)
+    works end-to-end against the real number — that proof holds regardless
+    of content. Filling in real content was a content task for Ahmed, not
+    a code task, and never blocked anything.
+- **Done (2026-09-05) — real content written in, replacing the
+  placeholder entirely:** Ahmed provided real product lineup (shirts,
+  kurtas, trousers — sizes, price ranges), payment methods (COD, bank
+  transfer, Easypaisa, JazzCash), delivery (nationwide, free, 3-5 business
+  days), and return/exchange policy (7-day window, unworn + tags
+  condition). Written in as 8 `##` sections — one topic each, matching
+  this file's own established convention. **One editorial call made and
+  explained to Ahmed before acting on it, not silently:** his draft also
+  included four sections that were instructions *to the assistant*
+  ("Discounts," "Product Information Rules," "When Information Is
+  Missing," "Catalog Maintenance"), not customer-facing content. Kept as
+  `##` headings, `search_catalog` would have made them independently
+  matchable — a customer's message keyword-matching "Discounts" could have
+  gotten back raw text like *"The assistant must not invent, promise, or
+  authorize a discount..."* verbatim, which would read as broken to a real
+  customer. All four describe behavior the code already enforces
+  elsewhere (the discount threshold is a hard check in
+  `discount-rules.ts`; "don't guess, confirm with Ahmed" is exactly what
+  `search_catalog`'s `found:false` path already does) — so dropping them
+  as searchable sections loses no actual behavior, only a duplicate,
+  riskier description of it.
+  - **Verified directly against the real (unmocked) `catalog.ts` code:**
+    parsed into exactly the 8 intended sections, none of the four dropped
+    meta-sections leaked through; 8 realistic customer questions (shirts,
+    kurtas, trousers, return policy, exchange policy, payment method,
+    delivery, general "what do you sell") each correctly matched their own
+    section; a discount question and a physical-store question both
+    correctly matched nothing, falling through to the guardrail/handoff
+    path rather than ever surfacing the dropped meta-text. No server
+    restart needed — `catalog.ts` re-reads the file from disk on every
+    query, exactly as designed since 1.5's original build. Scratch script
+    deleted after use.
 - **Status:** ✅ Done, and now the one sub-version in this file with full
-  live proof against the real number, both cases. Catalog file, search
+  live proof against the real number, both cases, *and* real content
+  replacing the placeholder — verified directly. Catalog file, search
   tool, and the don't-invent-an-answer discipline are all built and
-  verified locally *and* live. Content is still placeholder text for Ahmed
-  to replace with his real catalog (see caveat above) — that's a content
-  gap, not a code gap.
+  verified locally, live, and now with Ahmed's actual catalog content in
+  place. No known gaps remain in this sub-version.
 
 **v1 exit criteria:** a customer can message the number any time, get a
 fast, safe, on-brand reply that remembers them. No orders, stock, or
@@ -1195,10 +1228,13 @@ being marked done. Nothing here was declared complete on inspection alone.
    when not, never invented.** Live, 2026-09-05 — a real return-policy
    question got the exact catalog answer; a real physical-store question
    (not in the catalog) got a deflection to Ahmed, no invented answer.
-   **Caveat, not a code gap:** `catalog.md`'s content is still placeholder
-   text ("Example entry — replace with your real product lineup," etc.) —
-   the *mechanism* is proven, Ahmed's real catalog content still needs to
-   be written in.
+   **Caveat, not a code gap, resolved 2026-09-05:** at the time of this
+   test, `catalog.md`'s content was still placeholder text ("Example
+   entry — replace with your real product lineup," etc.) — the mechanism
+   was proven correct regardless. Real content (products, sizes, prices,
+   payment methods, delivery, return/exchange policy) has since been
+   written in by Ahmed; see 1.5's own dated entry for the content update
+   and its verification.
 9. **The tracker accurately reflects all of the above, no stale "not
    started"/contradicting markers left behind.** This is what today's
    full read-through and correction pass (2026-09-05) was for — every
@@ -1285,9 +1321,10 @@ throttle doing its job, not a defect.
   Ahmed only sees a log line today, not an actual WhatsApp message to his
   own number. The blocker that originally deferred this (1.3 unverified) is
   gone; the upgrade itself simply hasn't been built yet.
-- **`catalog.md`'s content is still placeholder text**, not Ahmed's real
-  product lineup/return policy/delivery info — a content task for Ahmed,
-  not a code gap.
+- ~~`catalog.md`'s content is still placeholder text~~ — **resolved
+  2026-09-05**, later the same day this list was written: Ahmed provided
+  real product/payment/delivery/return/exchange content, written in and
+  verified directly (see 1.5's own dated entry). No longer an open item.
 - **1.1's and 1.2's own caveats above** (the send-then-crash-before-ledger
   race; recall not yet proven to survive falling out of the raw
   20-message window) remain open, narrower edge cases within otherwise-
