@@ -104,9 +104,42 @@ written to any books, and Ahmed still can't ask it anything.**
   duplicate or dropped reply. The crash/retry half of this is now verified
   (see above); the "real number" half depends on 1.3's provider connection,
   which is out of scope here and tracked separately below.
+- **2026-09-05 — CLAUDE.md §8's "malformed or unexpected tool call does not
+  crash a turn" item, verified directly against the real (unmocked)
+  `tools.ts` code:** deliberately chose the direct tool-execution route over
+  a live conversation for this one — provoking the real model into actually
+  emitting a specific malformed tool call on demand isn't reliable, and this
+  item is fundamentally about server-side validation (§4 rule 3), which is
+  exactly as real when called directly as when the model happens to trigger
+  it. 35 deliberately bad calls across all 7 tools in `baseTools`
+  (`check_stock`, `get_customer_note`, `record_order`, `record_payment`,
+  `notify_owner`, `search_catalog`, `get_customer_balance`) plus one
+  simulated unknown-tool-name dispatch (mirroring `agent.ts`'s own
+  `tools.find(...) ?? { error: ... }` fallback): wrong types, negative/zero/
+  `NaN`/`Infinity` numbers, empty/missing required fields, a nonexistent
+  `product_id`, a `null` array entry, junk extra fields. Every single call
+  returned a well-formed `{ok:false,...}`/`{found:false,...}` teaching error
+  — never threw, never silently "succeeded" on bad input — and confirmed no
+  partial DB writes (`orders` row count and `balance_owed` both unchanged)
+  from any rejected `record_order`/`record_payment` call. Run as 3 separate
+  small scripts rather than one, because this Windows/Node 24/
+  better-sqlite3 combination has a known unrelated native-module crash on
+  process exit after several `db.prepare()` calls in one process (same
+  flakiness already noted in 1.3's pacing-veto verification) — splitting
+  sidestepped it; it is not a defect in this project's own code. **Caveat,
+  stated plainly:** this is direct execution of the real tool code with a
+  real DB, not a live conversation through the real model/WhatsApp channel
+  — it does NOT move this item into the "live-verified against the real
+  number" column the same way catalog grounding did (see 1.3/1.5's §8
+  tallies), since the model's own tool-call behavior in a live turn was
+  never exercised. It does conclusively prove the validation layer itself
+  — the thing this DoD item actually cares about — holds up under bad
+  input. Scratch scripts and their test customers/DB rows deleted after use.
 - **Status:** ✅ Done — core loop, input validation, teaching-text errors,
   and idempotent send are all in place. Full end-to-end proof against a
-  real WhatsApp number waits on 1.3.
+  real WhatsApp number waits on 1.3. Malformed-tool-input handling now has
+  direct, unmocked proof (above); still not proven through a live
+  conversation with the real model.
 
 ### 1.2 — Conversational memory
 - **Goal:** the bot recalls what a specific customer said/ordered/preferred
@@ -513,6 +546,17 @@ written to any books, and Ahmed still can't ask it anything.**
     1 still should not be marked complete** — 4 of 9 §8 items remain
     live-unverified, and item 9 (tracker accurately reflects all of the
     above) can't honestly be checked off until items 1-8 actually are.
+  - **§8 tally, updated again 2026-09-05:** malformed/unexpected tool input
+    now has direct, unmocked proof against the real `tools.ts` code (see
+    1.1's own dated entry above) — 35 bad calls across all 7 tools, all
+    correctly rejected, no crashes, no partial DB writes. **Deliberately not
+    counted toward the "live-verified" 5** — this was direct tool execution,
+    not a live conversation through the real model/WhatsApp channel, per
+    this file's own standing distinction between the two verification
+    bars. Tally stays **5 of 9 live-verified**, with item 3 now
+    additionally backed by strong direct evidence the other 3 remaining
+    items (cross-conversation memory recall, burst-message throttling, and
+    item 9 itself) don't yet have. **Version 1 still not complete.**
 
 - **2026-09-05 — `PACING_TIMEZONE` set, and the silent-no-reply guard
   widened to a second failure shape:**
