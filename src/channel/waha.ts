@@ -71,6 +71,16 @@ export const wahaAdapter: ChannelAdapter = {
         ? (remoteJidAlt.remoteJidAlt as string)
         : m.from;
 
-    return { phone: phoneFromChatId(realJid), text: m.body };
+    // The group check above only looked at the ORIGINAL `from` — but a LID
+    // resolves to whatever `remoteJidAlt` says, which can itself be a group
+    // JID (found live, 2026-09-05: a burst of buffered group messages on
+    // reconnect produced "turn starting" events with group ids as the
+    // "phone"). Re-check the JID we're actually about to use.
+    if (realJid.endsWith('@g.us')) return null;
+
+    const phone = phoneFromChatId(realJid);
+    if (phone === '') return null; // unresolvable/malformed identifier — nothing safe to reply to
+
+    return { phone, text: m.body };
   },
 };
