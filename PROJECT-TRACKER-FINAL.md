@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 
 | Version | Delivers | Status |
 |---|---|---|
-| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on 5 of CLAUDE.md §8's 9 checklist items so far (updated 2026-09-05) |
+| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on 6 of CLAUDE.md §8's 9 checklist items so far (updated 2026-09-05) |
 | 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
@@ -37,14 +37,16 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   a real WhatsApp number (`+923128346256`) is linked and has produced one
   real, correct reply to one real, unsolicited customer message (see 1.3
   below). But CLAUDE.md §8's actual Definition of Done for "Version 1
-  complete" has 9 checklist items. **Updated 2026-09-05:** 5 of them are now
-  verified against the real number — real-reply, out-of-scope-question →
-  handoff, crash-and-retry (with a caveat, see 1.3), discount refusal, and
-  catalog/FAQ grounding (see 1.5's 2026-09-05 entry). The remaining 4 —
-  malformed-input resilience, cross-conversation memory recall, burst-
-  message throttling, and the tracker-accuracy item itself — remain
-  verified only via earlier mocked-model tests, not live. **Do not mark
-  Version 1 complete until every §8 item is actually checked against the
+  complete" has 9 checklist items. **Updated 2026-09-05, twice more:** 6 of
+  them are now verified against the real number — real-reply,
+  out-of-scope-question → handoff, crash-and-retry (with a caveat, see
+  1.3), discount refusal, catalog/FAQ grounding (see 1.5's 2026-09-05
+  entry), and cross-conversation memory recall (see 1.2's 2026-09-05 entry
+  — itself surfacing a real false-positive bug in the discount guardrail,
+  logged under 1.4, not fixed). The remaining 3 — malformed tool input
+  (has strong *direct, non-live* proof, see 1.1), burst-message throttling,
+  and the tracker-accuracy item itself — are not yet live-verified. **Do
+  not mark Version 1 complete until every §8 item is actually checked against the
   real number** — see 1.3's status note below for the full breakdown.
 
 ---
@@ -185,8 +187,61 @@ written to any books, and Ahmed still can't ask it anything.**
   back in a new conversation days later, ask a question that requires that
   fact — it answers correctly. Verified for the notes path (see above); full
   proof against a real WhatsApp number still waits on 1.3.
-- **Status:** ✅ Structured notes done. Compaction intentionally deferred,
-  not outstanding-by-oversight — see "Still missing" above.
+- **2026-09-05 — live-verified against the real number: ✅ PASS, with one
+  caveat and one real bug found along the way (not fixed, reported
+  separately, see below):** the same real customer had asked for a 20%
+  discount the day before (2026-09-04 08:22 UTC — both in the raw
+  `messages` history and as `customer_notes` id 7,
+  *"Customer requested a 20% discount... requires Ahmed's approval"*).
+  Nearly 24 hours and several unrelated conversations later (stock check,
+  return policy, physical store questions all happened in between), the
+  customer asked *"I asked you fir discount yesterday, do I know how much I
+  asked for?"* — real reply: *"Bhai, aapne kal discount ke liye poocha tha
+  (20% wala)! Maine uske approval ke liye Ahmed bhai ko notify kar diya hai,
+  jese hi wo confirm karte hain main aapko update karta hoon."* — the exact
+  right figure (20%), correctly recalled, correctly still framed as pending
+  Ahmed's approval rather than granted.
+  - **Caveat, same shape as 1.1's crash-retry caveat:** this customer has
+    had under 30 messages total in their whole history, so the original
+    discount exchange from yesterday is *still* inside the raw last-20-
+    messages window `agent.ts` loads directly into every turn (confirmed by
+    querying it directly) — this proves recall works correctly across a
+    real day boundary, but does not yet prove it survives the fact aging
+    out of that raw window entirely (which is what would isolate the
+    structured `customer_notes`/checkpoint system as the actual source,
+    rather than the raw transcript still happening to be in view). That
+    isolation needs either much more conversation volume with this customer
+    or a fresh one deliberately built past the 20-message mark — not done
+    here.
+  - **A real bug found along the way, NOT fixed, reported separately per
+    this file's own standing practice — the first attempt at this exact
+    recall was silently blocked, and the *widened* silent-no-reply guard
+    (2026-09-05, see 1.3) is what caught it:** the model's first reply
+    attempt got rejected by `discount-rules.ts`'s regex-based guardrail
+    with reason *"You offered a 20% discount, which is at or above Ahmed's
+    5% confirmation threshold"* — even though the bot wasn't offering
+    anything, it was recalling that the *customer* had asked for one
+    yesterday. `checkDiscountRule()`'s regex only checks whether a
+    percentage and a discount-word appear near each other in the outbound
+    text (see the file's own `gap()` comment) — it can't distinguish "I'll
+    give you 20% off" from "you asked me for 20% off yesterday." Per the
+    widened guard, the fallback fired correctly (*"Sorry, I'm having
+    trouble answering that right now — let me get back to you"*) and
+    `notify_owner` logged the block reason — so no unsafe behavior reached
+    the customer, but it did produce one spurious "trouble answering" reply
+    and one unnecessary owner notification for a question that didn't
+    actually need Ahmed's attention. The model's second attempt (rephrased
+    by itself, unprompted) happened to place "discount" and "20%" further
+    apart than the regex's 15-character gap tolerance, which is why it got
+    through — that's an accident of phrasing distance, not a real fix.
+    **Not in scope to fix without asking first** (this task was to test
+    recall, not rebuild the discount guardrail) — flagging for 1.4 instead.
+- **Status:** ✅ Structured notes done, and now live-verified against the
+  real number for the core recall behavior (see above), with the window-
+  overlap caveat still open and a real false-positive bug in the discount
+  guardrail's interaction with recall now on record for 1.4. Compaction
+  intentionally deferred, not outstanding-by-oversight — see "Still
+  missing" above.
 
 ### 1.3 — WhatsApp compliance & anti-ban hardening
 - **Goal:** the number survives running unattended 24/7 without getting
@@ -557,6 +612,21 @@ written to any books, and Ahmed still can't ask it anything.**
     additionally backed by strong direct evidence the other 3 remaining
     items (cross-conversation memory recall, burst-message throttling, and
     item 9 itself) don't yet have. **Version 1 still not complete.**
+  - **§8 tally, updated a third time 2026-09-05:** cross-conversation memory
+    recall is now live-verified too (see 1.2's own dated entry above) — a
+    real customer's 20%-discount request from the day before was correctly
+    recalled, with the right figure, nearly 24 hours and several unrelated
+    conversations later. **6 of 9 items now live-verified** (real-reply;
+    out-of-scope → handoff; crash-and-retry with its caveat; discount
+    refusal; catalog/FAQ grounding; cross-conversation memory recall, with
+    its own window-overlap caveat — see 1.2). This same test surfaced a
+    real false-positive bug in the discount guardrail's interaction with
+    recall, logged under 1.4, not fixed. **3 of 9 §8 items remain
+    live-unverified: malformed tool input (strong direct, non-live evidence
+    only — see 1.1), burst-message throttling (no clean test yet), and item
+    9 (tracker accuracy) which can't close until the other two do. Version
+    1 still not complete**, but closer than at any prior point in this
+    file.
 
 - **2026-09-05 — `PACING_TIMEZONE` set, and the silent-no-reply guard
   widened to a second failure shape:**
@@ -659,18 +729,42 @@ written to any books, and Ahmed still can't ask it anything.**
   scope for this task) or mocking it (crashed `better-sqlite3` last time
   this was tried, per the 1.3 note).
 - **Definition of done:** ask the bot for an unauthorized discount — it
-  refuses/deflects (✅ verified at the guardrail level, not yet through a
-  live customer conversation); ask it something genuinely outside its
-  knowledge — it hands off instead of guessing (✅ `notify_owner` + ledger +
-  log marker verified; not yet through a live conversation either — both
-  wait on 1.3's real number being verified, same dependency 1.1/1.2 already
-  flag).
+  refuses/deflects (✅ verified at the guardrail level; **stale note
+  corrected 2026-09-05** — this line previously said "not yet through a
+  live conversation," but 1.3's own 2026-09-04 dated entry already recorded
+  a real customer's 20%-discount ask being live-refused; this file just
+  hadn't been updated in both places); ask it something genuinely outside
+  its knowledge — it hands off instead of guessing (✅ `notify_owner` +
+  ledger + log marker verified, also live-confirmed per 1.3/1.5).
+- **2026-09-05 — a real false-positive bug found via 1.2's cross-
+    conversation-memory-recall test, NOT fixed, reported here per this
+    file's own standing practice:** `checkDiscountRule()` in
+    `discount-rules.ts` is a plain regex proximity check (a percentage
+    near a discount-word) — it cannot distinguish the bot *offering* a
+    discount from the bot *recalling that the customer asked for one in the
+    past*. A live recall of a customer's own 20%-discount request from the
+    day before got blocked on its first attempt with the same "you offered
+    a discount" reason real over-threshold offers get, purely because the
+    reply text happened to place "20%" and "discount" within the regex's
+    15-character gap. The widened silent-no-reply guard (1.3) caught this
+    correctly — a generic fallback went out instead of nothing, and
+    `notify_owner` logged it — so no unsafe behavior reached the customer,
+    but it did produce one unnecessary "trouble answering" reply and one
+    unnecessary owner notification. The model's own retry happened to
+    rephrase past the regex's gap tolerance and got through; that's luck of
+    phrasing, not a fix. **Suggested next step, not yet done:** teach
+    `checkDiscountRule` (or the call site) to only block when the bot's own
+    turn wasn't already retrieving that percentage from an existing note —
+    or, more simply, only run the discount check when the model hasn't just
+    called `get_customer_note`/isn't quoting a past customer message —
+    needs a real design decision, not a speculative fix; see 1.2's own
+    dated entry for the full reproduction.
 - **Status:** ✅ Done — human-promise detection (rewritten for English/Roman
   Urdu), discount-rule check (5% threshold, confirmed by Ahmed), and the
   human-handoff path (`notify_owner` + `handoff_ledger`, log-only delivery)
-  are all built, wired into `send_message`, and verified locally. Full
-  proof against a real conversation, and upgrading handoff delivery to an
-  actual WhatsApp message, both wait on 1.3.
+  are all built, wired into `send_message`, and now live-verified for the
+  core refusal behavior. One real false-positive gap on record (above,
+  discount-recall interaction), not yet fixed.
 
 ### 1.5 — Static catalog / FAQ grounding
 - **Goal:** the bot can answer "what do you sell / what's the price / what's
