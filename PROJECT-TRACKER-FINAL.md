@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 
 | Version | Delivers | Status |
 |---|---|---|
-| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on 6 of CLAUDE.md §8's 9 checklist items so far (updated 2026-09-05) |
+| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🔴 All 5 sub-versions built; 6 of CLAUDE.md §8's 9 checklist items live-verified passing, 1 tested and found FAILING (burst-message throttling — real bug, unfixed), 2 untested (updated 2026-09-05) |
 | 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
@@ -37,16 +37,22 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   a real WhatsApp number (`+923128346256`) is linked and has produced one
   real, correct reply to one real, unsolicited customer message (see 1.3
   below). But CLAUDE.md §8's actual Definition of Done for "Version 1
-  complete" has 9 checklist items. **Updated 2026-09-05, twice more:** 6 of
-  them are now verified against the real number — real-reply,
+  complete" has 9 checklist items. **Updated 2026-09-05, three times over:**
+  6 of them are now verified against the real number — real-reply,
   out-of-scope-question → handoff, crash-and-retry (with a caveat, see
   1.3), discount refusal, catalog/FAQ grounding (see 1.5's 2026-09-05
   entry), and cross-conversation memory recall (see 1.2's 2026-09-05 entry
   — itself surfacing a real false-positive bug in the discount guardrail,
-  fixed and re-verified live the same day, see 1.4). The remaining 3 — malformed tool input
-  (has strong *direct, non-live* proof, see 1.1), burst-message throttling,
-  and the tracker-accuracy item itself — are not yet live-verified. **Do
-  not mark Version 1 complete until every §8 item is actually checked against the
+  fixed and re-verified live the same day, see 1.4). **One item was tested
+  and is currently FAILING, not just unverified:** burst-message throttling
+  — a real, reproducible race condition lets concurrent sends blow straight
+  through the configured throttle, confirmed both by direct concurrent
+  testing and live against the real number (see 1.3's 2026-09-05
+  burst-throttling entry) — not yet fixed. The remaining 2 — malformed tool
+  input (has strong *direct, non-live* proof, see 1.1) and the
+  tracker-accuracy item itself — are simply not yet live-verified either
+  way. **Do not mark Version 1 complete until every §8 item is actually
+  checked against the
   real number** — see 1.3's status note below for the full breakdown.
 
 ---
@@ -623,10 +629,13 @@ written to any books, and Ahmed still can't ask it anything.**
     refusal; catalog/FAQ grounding; cross-conversation memory recall, with
     its own window-overlap caveat — see 1.2). This same test surfaced a
     real false-positive bug in the discount guardrail's interaction with
-    recall — fixed and re-verified live the same day, see 1.4. **3 of 9 §8 items remain
-    live-unverified: malformed tool input (strong direct, non-live evidence
-    only — see 1.1), burst-message throttling (no clean test yet), and item
-    9 (tracker accuracy) which can't close until the other two do. Version
+    recall — fixed and re-verified live the same day, see 1.4. **3 of 9 §8 items
+    remain unresolved: malformed tool input (strong direct, non-live
+    evidence only — see 1.1), burst-message throttling (tested the same day
+    — see the dated entry immediately below — and found FAILING, not
+    unverified: a real concurrency race, confirmed both directly and live,
+    not yet fixed), and item 9 (tracker accuracy) which can't close until
+    the other two do. Version
     1 still not complete**, but closer than at any prior point in this
     file.
 
@@ -667,6 +676,64 @@ written to any books, and Ahmed still can't ask it anything.**
     scripts and the test customers/messages they created were deleted after
     use, per this project's "nothing built speculatively" rule — this was
     manual verification, not a committed automated test suite.
+
+- **2026-09-05 — burst-message throttling tested: outside-hours queuing
+  PASSES cleanly; burst-spacing under concurrent load FAILS — a real,
+  reproducible bug, not yet fixed:**
+  - **Outside-hours half — ✅ PASS, now a clean deliberate test superseding
+    the earlier incidental evidence.** `decidePacing()` takes `now` as a
+    plain argument (no `Date` monkey-patching needed, which crashed
+    `better-sqlite3` before per this file's own history), so this is a
+    direct, deterministic pure-function test: 2:30am Karachi correctly
+    refuses with `code: 'outside_window'` and a real `nextAllowedAt` (the
+    "queue instead of firing" half, not a silent refusal); 7:00am and
+    9:59pm correctly still allow; 10:00pm correctly no longer allows;
+    a sequential send attempted 200ms after the last one correctly computes
+    a wait instead of firing immediately. 7/7 checks passed.
+  - **Burst-spacing under concurrency — ❌ FAILS, confirmed both directly
+    and live against the real number.** `server.ts` awaits `runTurn()`
+    per-request with no lock/queue (deliberately, per its own comment —
+    "one Ahmed doesn't produce enough concurrent messages to need one").
+    Node yields at every `await` (the real LLM call, the pacing `sleep`),
+    so genuinely concurrent inbound messages really do interleave. The
+    pacing engine's own sequence — read `lastSentAt` from the DB → decide
+    a wait → `sleep` → only THEN write the new send — has a classic
+    check-then-act race: two concurrent turns can both read the same stale
+    `lastSentAt` before either has written its own, both compute a similarly
+    short wait, and both send close together regardless of the configured
+    throttle.
+    - **Direct proof:** fired 5 genuinely concurrent `runTurn()` calls
+      (mocked model responding immediately — deliberately, to maximize real
+      interleaving rather than mask it; real DB; real pacing/spinning/
+      discount code, nothing else stubbed). Resulting sends landed within
+      ~230ms of each other (gaps of 30-95ms) against a configured 1200ms
+      throttle. Reproduced twice, both times far under threshold, never
+      once close to compliant. Scratch script deleted after use.
+    - **Live proof, against the real number:** a real customer sent 4 short
+      messages ("one"/"Two"/"Three"/"Four") roughly 1.2-1.8 seconds apart —
+      not even a true instant flood, just normal fast typing — and the bot's
+      3 resulting replies landed within **142ms** of each other
+      (`messages` ids 403-405, `05:18:18.155` → `05:18:18.297`), the same
+      race manifesting in production, not just in a script.
+    - **A separate, non-bug observation from the same live test, confirmed
+      with the user rather than assumed:** the raw message log shows
+      "Two"/"Four"/"Five" repeating roughly a dozen times over the next 12
+      seconds after the initial burst. Asked directly — this was the user
+      manually re-sending because replies felt slow, not an automatic
+      WAHA/WhatsApp retry-storm bug. Notable anyway as a real symptom of the
+      underlying latency (turns taking long enough that a real customer
+      would plausibly re-send), but not itself a code defect and not
+      pursued further here.
+  - **Consequence for CLAUDE.md §8:** this bullet is one line covering two
+    behaviors — outside-hours queuing passes, burst-spacing does not. Per
+    this file's own standing rule, a real failure gets reported as a real
+    failure, not softened into "needs more testing." **This §8 item is
+    live-tested and currently FAILING, not merely unverified** — different
+    from every other item in this tracker, all of which passed once
+    actually checked. Not fixed as part of this task (testing was the ask);
+    a real fix needs either serializing sends (a mutex/queue around the
+    pacing decision+write, or an atomic DB-level reservation of the next
+    send slot) rather than the current read-then-sleep-then-write sequence.
 
 ### 1.4 — Promise & safety guardrails
 - **Goal:** the bot never tells a customer something that costs Ahmed money
