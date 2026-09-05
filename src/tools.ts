@@ -12,6 +12,7 @@ import { findBestMatch, loadCatalogSections } from './catalog';
 import { db } from './db';
 import { getBalance, recordCredit, recordDebit } from './ledger';
 import { createLogger } from './obs/logger';
+import { ORDER_STATUSES, transitionOrderStatus, type OrderStatus } from './orders';
 import type { ToolDef } from './types';
 
 const log = createLogger();
@@ -150,6 +151,61 @@ export const recordOrder: ToolDef = {
   },
 };
 
+// Wide schema for the model (status is just `string` — the JSON-schema
+// `enum` below is a hint, not the gate), strict validation server-side via
+// the real state machine in orders.ts, same discipline as every other tool
+// in this file. `orders.ts` doesn't qualify `next` against `'placed'` in
+// any ALLOWED_TRANSITIONS list, so a model attempting to set that status
+// back is already rejected by the state machine itself — no special case
+// needed here.
+export const updateOrderStatus: ToolDef = {
+  name: 'update_order_status',
+  description:
+    "Move a real order forward through its lifecycle (confirmed -> paid -> shipped -> delivered), " +
+    'or cancel it (only before it has shipped). Orders only move forward — you cannot skip a step ' +
+    'or go backward. Call this once the conversation makes clear a status actually changed (e.g. ' +
+    "the customer confirms the order, says they've paid, or asks to cancel) — never guess.",
+  input_schema: {
+    type: 'object',
+    properties: {
+      order_id: { type: 'number', description: 'the order id' },
+      status: {
+        type: 'string',
+        enum: ['confirmed', 'paid', 'shipped', 'delivered', 'cancelled'],
+        description: 'the new status',
+      },
+    },
+    required: ['order_id', 'status'],
+  },
+  execute: ({ order_id, status }, ctx) => {
+    if (!Number.isInteger(order_id) || order_id <= 0) {
+      return { ok: false, error: 'order_id must be a positive whole number.' };
+    }
+    if (typeof status !== 'string' || !ORDER_STATUSES.includes(status as OrderStatus)) {
+      return {
+        ok: false,
+        error: `"${status}" isn't a real order status. Use one of: confirmed, paid, shipped, delivered, cancelled.`,
+      };
+    }
+
+    const order = db.prepare('select customer_id from orders where id = ?').get(order_id) as
+      | { customer_id: number }
+      | undefined;
+    if (!order) {
+      return { ok: false, error: `Order ${order_id} does not exist.` };
+    }
+    if (order.customer_id !== ctx.customerId) {
+      return { ok: false, error: `Order ${order_id} does not belong to this customer.` };
+    }
+
+    const result = transitionOrderStatus(order_id, status as OrderStatus);
+    if (!result.ok) {
+      return { ok: false, error: result.error };
+    }
+    return { ok: true, order_id: result.order_id, from: result.from, to: result.to };
+  },
+};
+
 export const recordPayment: ToolDef = {
   name: 'record_payment',
   description: 'Record that this customer paid some amount, reducing what they owe.',
@@ -256,6 +312,7 @@ export const baseTools: ToolDef[] = [
   getCustomerBalance,
   getCustomerNote,
   recordOrder,
+  updateOrderStatus,
   recordPayment,
   notifyOwner,
   searchCatalog,

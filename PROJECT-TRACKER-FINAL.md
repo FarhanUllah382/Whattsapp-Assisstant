@@ -13,7 +13,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1 done (2026-09-05); 2.2's core mechanism done via 2.1, not yet wired to a conversation; 2.3-2.5 not started |
+| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1 and 2.2 done (2026-09-05); 2.3-2.5 not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1398,16 +1398,48 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   rejected, cancellation allowed before shipping and blocked after, both
   terminal states (`delivered`, `cancelled`) confirmed to allow nothing
   further.
-- **Still NOT done — this sub-version's own remaining work, not covered by
-  2.1's session:** "the bot marks an order confirmed/paid/shipped **during
-  a natural conversation**" needs an actual AI-facing tool (or extraction
-  logic, see 2.3) calling `transitionOrderStatus` — none exists yet, the
-  function is built and verified but not wired to anything the model can
-  call. "A query for 'orders in status X' returns correctly" is a trivial
-  SQL query against the now-constrained `orders.status` column — not
-  separately built or tested, since it's not meaningful to verify until
-  there's a real path putting orders into varied statuses in the first
-  place.
+- **Verified before starting this half, not assumed (2026-09-05):**
+  confirmed via `git status` (clean) and a direct grep across `src/` that
+  no tool imported `transitionOrderStatus`/`checkOrderStatusTransition` and
+  `baseTools` had no order-status entry — the state machine from 2.1's
+  session genuinely had no conversational path yet. Also re-confirmed
+  `get_customer_balance` already read the ledger (2.1's own work) with zero
+  remaining direct `balance_owed` reads anywhere in `src/` — nothing left
+  to build there, only to re-verify (see below).
+- **Done (2026-09-05) — the conversational-wiring half, closing this
+  sub-version out completely:** new `update_order_status` tool
+  (`src/tools.ts`), added to `baseTools` and mentioned in the system
+  prompt (`agent.ts`), same "wide schema for the model, strict validation
+  server-side" discipline as every other tool here — the JSON-schema
+  `enum` on `status` is a hint for the model, not the gate; `execute()`
+  re-validates the type, checks the order actually exists, checks it
+  belongs to *this* customer (same data-isolation precedent as
+  `get_customer_note`), then calls the real `transitionOrderStatus()`
+  from 2.1 — no separate/duplicate enforcement logic, this tool is a thin
+  wrapper around the same state machine already verified. Attempting to
+  set status back to `'placed'` is rejected too, with no special-casing
+  needed — `orders.ts`'s own `ALLOWED_TRANSITIONS` never lists it as a
+  valid target for any current state, so the existing state machine
+  already covers it.
+- **Verified locally, deterministically — 21 checks, all through the real
+  tool (not calling `orders.ts` directly this time), real DB:** the tool is
+  actually reachable via `baseTools`; 6 different malformed-input shapes
+  (missing fields, wrong types, a made-up status, attempting `'placed'` as
+  a target) all rejected cleanly, no crash; a nonexistent `order_id`
+  rejected with a teaching error; **a different customer cannot transition
+  another customer's order** (rejected, and the order's real status
+  confirmed unchanged afterward — data isolation actually holds, not just
+  assumed); the full valid forward chain through the tool
+  (`confirmed → paid → shipped → delivered`); skipping a step and
+  cancelling after shipping both still correctly rejected through the
+  tool; cancellation before shipping still succeeds through the tool;
+  `get_customer_balance` re-confirmed to reflect the ledger correctly
+  across two orders and a payment (1500 − 300 = 1200); re-confirmed
+  `customers` still has no `balance_owed` column to accidentally read.
+  Scratch script and its test rows/product deleted after use. The live
+  server was restarted afterward so it's running the new tool (not yet
+  live-tested against a real conversation — that's still a separate,
+  not-yet-made decision, same as 2.1 left it).
 - **Built from DeskcommCRM:** the *mechanism* in `agent/lead-state.ts`
   (forward-only, model-driven, server-validated state machine) — did not
   qualify for direct extraction (DB-coupled), but the pattern is simple
@@ -1415,13 +1447,17 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   vocabulary. This vocabulary swap is permanent — never revert to the
   funnel shape (see permanent exclusions).
 - **Definition of done:** the bot marks an order confirmed/paid/shipped
-  during a natural conversation (🔲 not done — see above); a query for
-  "orders in status X" returns correctly (⚪ trivially true given the
-  schema, not separately tested — see above); an invalid backward
-  transition is rejected (✅ verified, see 2.1's entry).
-- **Status:** 🟡 Core state-machine mechanism done and verified (via 2.1's
-  session); not wired into any conversation yet — that's this
-  sub-version's own remaining work.
+  during a natural conversation (✅ the tool exists and is verified to work
+  correctly when called — not yet exercised through an actual live
+  conversation, see above); a query for "orders in status X" returns
+  correctly (⚪ trivially true given the schema — a plain `select * from
+  orders where status = ?`, not separately built as its own tool since
+  nothing yet asks for it); an invalid backward transition is rejected (✅
+  verified, both directly in 2.1 and now through the real tool above).
+- **Status:** ✅ Done — both halves complete: the state machine (2.1's
+  session) and now the conversational tool that actually exposes it to the
+  model, both verified deterministically. Not yet live-tested against a
+  real conversation; that remains a separate, explicit decision for later.
 
 ### 2.3 — Automatic order & payment extraction
 - **Goal:** "20 shirts, medium, black, ₹5000" becomes a real order row
