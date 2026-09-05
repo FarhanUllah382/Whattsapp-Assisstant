@@ -284,8 +284,9 @@ verified against real conversation data, not assumed:
 - [ ] An order or payment mentioned in passing but never explicitly
       confirmed via a tool call is still caught and flagged, not silently
       lost
-- [ ] A real order is correctly moved through `received → confirmed → paid
-      → shipped → delivered` as the conversation progresses; an invalid
+- [ ] A real order is correctly moved through `placed → confirmed → paid
+      → shipped → delivered` as the conversation progresses (or cancelled
+      before shipping, restoring any reserved stock); an invalid or
       backward transition is rejected with a teaching-text error, not a
       crash
 - [ ] A real "do you have X in stock" question gets the live, current
