@@ -60,10 +60,10 @@ export const PACING_DEFAULTS: PacingKnobs = {
   windowStartHour: 7, // janela 7h-22h
   windowEndHour: 22,
   allowSunday: true,
-  // Ahmed's project is not Brazil-specific — no timezone hardcoded here.
-  // Set PACING_TIMEZONE (an IANA zone, e.g. "Asia/Karachi") once Ahmed's
-  // actual shop timezone is known; defaults to UTC until then.
-  timezone: process.env.PACING_TIMEZONE ?? 'UTC',
+  // Ahmed's shop is in Pakistan — confirmed 2026-09-05. Still overridable
+  // via PACING_TIMEZONE (an IANA zone) for any future shop in another zone;
+  // this is just the correct default now that the real one is known.
+  timezone: process.env.PACING_TIMEZONE ?? 'Asia/Karachi',
   // Número sem linha em channel_knobs é tratado como idade 0 (o degrau mais
   // conservador) até alguém registrar number_activated_at.
   warmupDailyCaps: [

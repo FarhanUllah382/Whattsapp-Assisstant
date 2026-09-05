@@ -338,6 +338,8 @@ export async function runTurn(
   // model ever actually replied — see the silent-no-reply guard below.
   const toolsCalledThisTurn = new Set<string>();
   let lastAssistantText = '';
+  let sendMessageSucceeded = false;
+  let lastSendMessageError: string | undefined;
 
   for (let step = 0; step < MAX_TOOL_STEPS; step++) {
     const result = await callModel(SYSTEM_PROMPT, messages, tools);
@@ -358,6 +360,14 @@ export async function runTurn(
       const output = tool
         ? await tool.execute(call.input, { customerId: customer.id })
         : { error: `unknown tool ${call.name}` };
+      if (call.name === 'send_message') {
+        const sendOutput = output as { ok?: boolean; error?: string };
+        if (sendOutput?.ok) {
+          sendMessageSucceeded = true;
+        } else if (sendOutput?.error) {
+          lastSendMessageError = sendOutput.error; // keep the LAST attempt's reason
+        }
+      }
       toolResults.push({
         type: 'tool_result',
         tool_use_id: call.id,
@@ -370,42 +380,65 @@ export async function runTurn(
   }
 
   // Silent-no-reply guard: a turn can end cleanly — no thrown exception, no
-  // failed tool call — while never once calling send_message, because the
-  // model's raw text is discarded by design (see the loop above) and there's
-  // no other tripwire for "the model just gave up." From the customer's side
-  // that's indistinguishable from the bot being completely broken: zero
-  // reply, zero trace anywhere. This is permanent observability plus a
-  // guaranteed fallback, not a one-off debug print — it fires every time
-  // this condition occurs, not just while chasing this specific bug.
-  if (!toolsCalledThisTurn.has('send_message')) {
-    log.warn('turn ended without ever calling send_message', {
+  // failed tool call — while the customer never actually gets a reply.
+  // Originally this only checked "was send_message ever called" (the model
+  // giving up with plain text, discarded by design — see the loop above).
+  // Widened 2026-09-05: send_message CAN be called and still never succeed —
+  // every attempt vetoed by pacing/spinning/discount/promise — which is
+  // exactly as silent from the customer's side. Tracks success, not just
+  // the call, so both shapes of "customer gets nothing" are caught. This is
+  // permanent observability plus a guaranteed fallback, not a one-off debug
+  // print — it fires every time either condition occurs.
+  if (!sendMessageSucceeded) {
+    const wasCalled = toolsCalledThisTurn.has('send_message');
+    // Pacing vetoes (outside window / daily cap / warm-up cap) are time- or
+    // volume-based, not body-text-based — re-attempting the SAME send a
+    // moment later with different words hits the identical veto, so a
+    // "guaranteed" fallback send would just fail again for no benefit. This
+    // matches 1.3's own already-accepted judgment call that outside-hours
+    // sends genuinely don't fire yet (no job queue to defer to) — the
+    // customer gets nothing until the window opens, and Ahmed is the one
+    // who needs to know, not get a duplicate doomed send attempt logged.
+    // Every OTHER veto (spinning, discount, human-promise) is content-based:
+    // a generic, unrelated fallback body has a real chance of getting past
+    // them, so it's still worth attempting.
+    const isPacingVeto = lastSendMessageError?.startsWith('Not sending right now —') ?? false;
+    const skipFallbackSend = wasCalled && isPacingVeto;
+
+    log.warn('turn ended without a successful send_message', {
       phone,
       customerId: customer.id,
+      sendMessageWasCalled: wasCalled,
+      lastSendMessageError,
       toolsCalled: [...toolsCalledThisTurn],
       discardedModelText: lastAssistantText,
+      fallbackSendAttempted: !skipFallbackSend,
     });
 
-    const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
-    const fallbackResult = await sendMessageTool.execute(
-      { body: FALLBACK_REPLY_TEXT },
-      { customerId: customer.id },
-    );
-    if (!(fallbackResult as { ok?: boolean })?.ok) {
-      log.error('fallback reply itself failed to send', {
-        phone,
-        customerId: customer.id,
-        fallbackResult,
-      });
+    if (!skipFallbackSend) {
+      const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
+      const fallbackResult = await sendMessageTool.execute(
+        { body: FALLBACK_REPLY_TEXT },
+        { customerId: customer.id },
+      );
+      if (!(fallbackResult as { ok?: boolean })?.ok) {
+        log.error('fallback reply itself failed to send', {
+          phone,
+          customerId: customer.id,
+          fallbackResult,
+        });
+      }
     }
 
     const notifyOwnerTool = tools.find((t) => t.name === 'notify_owner')!;
+    const reason = !wasCalled
+      ? `Bot failed to reply on its own (no send_message call this turn). ` +
+        `Tools called: ${[...toolsCalledThisTurn].join(', ') || 'none'}. ` +
+        `Discarded model text: "${lastAssistantText}"`
+      : `Bot tried to reply but send_message was blocked every time this turn. ` +
+        `Last reason: ${lastSendMessageError}`;
     await notifyOwnerTool.execute(
-      {
-        reason:
-          `Bot failed to reply on its own (no send_message call this turn). ` +
-          `Tools called: ${[...toolsCalledThisTurn].join(', ') || 'none'}. ` +
-          `Discarded model text: "${lastAssistantText}"`,
-      },
+      { reason },
       { customerId: customer.id },
     );
   }

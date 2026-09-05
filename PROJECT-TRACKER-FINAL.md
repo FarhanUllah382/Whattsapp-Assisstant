@@ -171,9 +171,10 @@ written to any books, and Ahmed still can't ask it anything.**
     import edits needed inside them. `EXTRACTED-FOR-AHMED/MANIFEST.md`
     updated so its file-count claim doesn't go stale (16 files remain there).
   - **Content note resolved:** `pacing/defaults.ts`'s hardcoded
-    `timezone: 'America/Sao_Paulo'` is now `process.env.PACING_TIMEZONE ??
-    'UTC'` — configurable, no Brazil default. Set `PACING_TIMEZONE` (an IANA
-    zone) once Ahmed's actual shop timezone is known.
+    `timezone: 'America/Sao_Paulo'` is now
+    `process.env.PACING_TIMEZONE ?? 'Asia/Karachi'` — configurable (still no
+    Brazil default), defaulting to Ahmed's actual shop timezone (confirmed
+    2026-09-05, see the dated entry further below) rather than a placeholder.
   - `send_message`'s `execute()` in `src/agent.ts` now runs, in order, before
     every send: (1) the existing idempotency check; (2) **pacing** —
     `decidePacing()` against sends across *all* customers (pacing/spinning
@@ -474,42 +475,68 @@ written to any books, and Ahmed still can't ask it anything.**
      correctness issue:** this turn took ~2 minutes end-to-end (several
      tool-call round trips against a slow model) — worth flagging as a UX
      concern for later, separate from whether it was correct.
-  - **A third real bug, found along the way, NOT fixed — same severity as
-    the Gemini-quota silent-failure bug already logged above, and reported
-    separately per explicit instruction, not folded into the two PASS
-    results above:** during this same testing session, a real customer
-    asked *"Do I have shirts or paints in stock?"* — the turn logged
-    `"turn starting"` then, 52 seconds later, `"turn completed"`, with **no
-    error anywhere** — and **no reply was ever sent.** Confirmed by reading
-    WAHA's message log directly: the most recent outbound message was from
-    an earlier, unrelated turn. **Root cause (inferred from the code, not
-    yet directly observed — no per-tool-call tracing exists to confirm it
-    precisely):** `agent.ts`'s tool loop explicitly discards any turn where
-    the model's final output is plain text with no tool call —
-    `if (toolCalls.length === 0) break; // model produced only text
-    (ignored) — nothing left to do` — which is *correct* per this project's
-    core rule that raw model text must never reach a customer, but means
-    that when the model forgets (or chooses not) to call `send_message`,
-    the customer receives **literally nothing, and nothing is logged
-    anywhere to say so.** From the customer's side this is indistinguishable
-    from the bot being completely broken. **Not fixed. Compounding
-    observability gap:** there is currently no per-tool-call log, only
-    whole-turn `turn starting`/`turn completed`/`turn failed` — so there's
-    no way to confirm from logs alone whether `check_stock` was even called
-    before the model gave up, which would matter for actually fixing this.
-    **Suggested next step, not yet done:** log a warning whenever the tool
-    loop exits via the `toolCalls.length === 0` branch on a turn that never
-    called `send_message` at all — turns this from a silent failure into a
-    visible one, without changing what the model itself sees.
+  - **A third real bug, found along the way — fixed 2026-09-04, then
+    widened 2026-09-05 (see the dated entry below); reported separately per
+    explicit instruction, not folded into the two PASS results above:**
+    during this same testing session, a real customer asked *"Do I have
+    shirts or paints in stock?"* — the turn logged `"turn starting"` then,
+    52 seconds later, `"turn completed"`, with **no error anywhere** — and
+    **no reply was ever sent.** Confirmed by reading WAHA's message log
+    directly: the most recent outbound message was from an earlier,
+    unrelated turn. **Root cause:** `agent.ts`'s tool loop explicitly
+    discards any turn where the model's final output is plain text with no
+    tool call — `if (toolCalls.length === 0) break; // model produced only
+    text (ignored) — nothing left to do` — which is *correct* per this
+    project's core rule that raw model text must never reach a customer,
+    but meant that when the model forgot (or chose not) to call
+    `send_message`, the customer received **literally nothing, and nothing
+    was logged anywhere to say so.** From the customer's side this was
+    indistinguishable from the bot being completely broken.
   - **§8 tally after today:** 4 of 9 items now live-verified (real-reply;
     out-of-scope → handoff; crash-and-retry with the caveat above;
     discount refusal). The rest — malformed tool input not crashing a turn,
     cross-conversation memory recall, burst-message throttling, catalog/FAQ
     grounding — remain verified only via earlier mocked-model, local-only
-    tests. **Version 1 still should not be marked complete** — both because
-    5 of 9 §8 items remain live-unverified, and because this session
-    surfaced a real, unfixed, silent-failure bug that a §8-complete claim
-    would otherwise paper over.
+    tests. **Version 1 still should not be marked complete** — 5 of 9 §8
+    items remain live-unverified.
+
+- **2026-09-05 — `PACING_TIMEZONE` set, and the silent-no-reply guard
+  widened to a second failure shape:**
+  - **`PACING_TIMEZONE` fixed.** Ahmed's shop timezone is confirmed
+    Pakistan, so `pacing/defaults.ts`'s fallback (used whenever the env var
+    itself isn't set) changed from `'UTC'` to `'Asia/Karachi'` — still fully
+    overridable via the `PACING_TIMEZONE` env var, this is just the correct
+    default now that the real value is known. Live-verified: a
+    `decidePacing()` veto reason logged during testing now reads
+    `"...agende para 2026-09-06 07:00:00 (Asia/Karachi)..."`, confirming the
+    new zone is actually in effect, not just set in a comment.
+  - **Silent-no-reply guard widened.** The 2026-09-04 fix above only caught
+    "model never called `send_message`." Live testing that same day showed
+    a second, equally silent failure shape: `send_message` gets called, but
+    **every attempt is vetoed** by pacing, spinning, the discount guardrail,
+    or the human-promise guardrail — from the customer's side that's
+    identical to never calling it at all (zero reply, and previously zero
+    log trace of *why*). `agent.ts`'s guard now tracks
+    `sendMessageSucceeded`, not just "was it called," so both shapes trip
+    the same warning log + fallback send + `notify_owner` handoff.
+    **One deliberate exception:** if the *only* reason every attempt failed
+    is a pacing veto (outside the sending window, or over the warm-up/daily
+    cap — both time- or volume-based, not content-based), the guaranteed
+    fallback send is skipped, because re-attempting the exact same send a
+    moment later with different words hits the identical veto — it would
+    just log a second doomed send attempt for no benefit. Every other veto
+    (spinning, discount, human-promise) is content-based, so a generic
+    fallback body has a real chance of getting past it and is still
+    attempted. **Verified locally** (mocked model call, real `runTurn()`,
+    real DB, only the network edge stubbed): a warm-up-cap veto (20/day for
+    a day-0 number — time/volume-based, chosen over an hours-based window
+    veto so the test doesn't depend on real wall-clock time) correctly
+    skipped the fallback send and still logged `notify_owner` with the real
+    veto reason; a spinning veto (near-duplicate body) correctly still
+    attempted and delivered the generic fallback reply. Scratch verification
+    scripts and the test customers/messages they created were deleted after
+    use, per this project's "nothing built speculatively" rule — this was
+    manual verification, not a committed automated test suite.
 
 ### 1.4 — Promise & safety guardrails
 - **Goal:** the bot never tells a customer something that costs Ahmed money
