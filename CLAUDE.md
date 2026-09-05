@@ -4,11 +4,17 @@ This file governs how Claude Code works in this repository. Read it in
 full before making any change. If anything you're about to do conflicts
 with a rule below, the rule wins — stop and ask, don't quietly proceed.
 
-**Current mission: complete Version 1 only.** Nothing else. See §3 for the
-exact, exhaustive scope of Version 1. Everything not listed there is
-explicitly out of scope for this phase, and a large portion of it is
-*permanently* out of scope for this project altogether (§6) — read that
-section before importing any pattern from the reference repository.
+**Current mission: complete Version 2 only.** Nothing else. Version 1 is
+complete and live-verified — see `PROJECT-TRACKER-FINAL.md`'s "Version 1 —
+final status" section for the full proof, including everything explicitly
+carried forward unresolved (Version 1 completion did not fix the Node v24
+crash mitigation, the per-number health circuit, STOP/opt-out handling, or
+several other named items — see §3 below for why Version 2 must not make
+any of those worse). See §3 for the exact, exhaustive scope of Version 2.
+Everything not listed there is explicitly out of scope for this phase, and
+a large portion of it is *permanently* out of scope for this project
+altogether (§6) — read that section before importing any pattern from the
+reference repository.
 
 ---
 
@@ -45,31 +51,68 @@ a bug.
 
 ---
 
-## 3. Version 1 — the ONLY thing in scope right now
+## 3. Version 2 — the ONLY thing in scope right now
 
-Full detail lives in `PROJECT-TRACKER-FINAL.md` §Version 1. Summary below
+Full detail lives in `PROJECT-TRACKER-FINAL.md` §Version 2. Summary below
 for orientation; the tracker file is authoritative if the two ever
 disagree.
 
 | Sub-version | Goal | Status |
 |---|---|---|
-| 1.1 | Core loop hardening — strict tool-input validation, teaching-text errors instead of crashes, idempotent send | 🟡 Core loop exists; hardening not done |
-| 1.2 | Conversational memory upgrade — structured per-customer notes, compaction for long threads | 🟡 Flat checkpoint summary exists; structured version not done |
-| 1.3 | Real WhatsApp connection + anti-ban compliance (pacing, spinning, messaging window, disclosure) | 🔲 Not started — source files already verified in `EXTRACTED-FOR-AHMED/` |
-| 1.4 | Promise & safety guardrails (unauthorized-discount detection, human handoff) | 🔲 Not started — deliberately deferred until needed, see §5 |
-| 1.5 | Static catalog/FAQ grounding (answer from a maintained document, never invent) | 🔲 Not started |
+| 2.1 | Retail data model — a real debit/credit ledger, balance always reconstructable from history, not a single mutable field | 🟡 Placeholder schema exists (`customers`/`products`/`orders`); ledger formalization not started |
+| 2.2 | Order-status tracking — forward-only `received → confirmed → paid → shipped → delivered`, invalid transitions rejected with a teaching error | 🔲 Not started |
+| 2.3 | Automatic order & payment extraction — conversation → real order/line-item/payment rows, zero manual entry, plus a safety net catching anything mentioned but never explicitly logged | 🔲 Not started |
+| 2.4 | Live stock-aware replies — `check_stock` already queries real quantity; still needs stock to actually decrement on order confirmation | 🟡 Basic lookup exists; decrement-on-order not started |
+| 2.5 | Follow-up tracking tied to unpaid orders — an owner-*queryable* read path ("what's pending"), not the bot auto-firing reminders on its own | 🔲 Not started |
 
-**Version 1 is done when:** a customer can message the real number at any
-time, get a fast, safe, on-brand reply that correctly remembers their
-history, sourced from real catalog/FAQ content when asked, with no
-possibility of an unauthorized promise reaching them and no possibility of
-the number getting banned from sending too fast. Orders, payments, and
-stock do **not** need to work yet — that is Version 2, a separate phase,
-not to be started until Version 1's definition of done is fully met.
+**Version 2 is done when:** every order and payment discussed in a normal
+customer conversation is automatically and correctly recorded, with zero
+manual data entry by Ahmed — and anything mentioned but never explicitly
+confirmed via a tool call is still caught, not silently lost. Stock is
+live-accurate: a stock check reflects the real current quantity, and a
+confirmed order decrements it by the right amount. Order status only ever
+moves forward, with an invalid backward transition rejected via a
+teaching-text error, never a crash. Every unpaid order has a follow-up
+tracked against it, queryable by Ahmed on demand. Owner-facing analytics
+Q&A and proactive alerts do **not** need to work yet — that is Version 3,
+a separate phase, not to be started until Version 2's definition of done
+is fully met.
 
-**Do not begin Version 2 or Version 3 work under this file's authority.**
-If a task description asks for order tracking, payment ledgers, or
-owner-facing analytics, stop and confirm with the user first — that work
+**Carried forward from Version 1, unresolved — Version 2 work must not
+make any of these worse, even incidentally:**
+- **The Node v24 / `better-sqlite3` native crash is still only mitigated
+  (a dev-only shell restart loop), not fixed** — root cause untouched.
+  Version 2 adds order/payment/ledger writes to nearly every turn, meaning
+  more `db.prepare()` calls on the exact same crash-prone path. Do not
+  layer speculative retry logic or defensive transaction-wrapping around
+  this to compensate — if Version 2 work makes the crash noticeably more
+  frequent, that's a signal to actually fix the root cause (or escalate to
+  the user), not to paper over it with more workarounds.
+- **`notify_owner` handoff delivery is still log-only**, not a real
+  WhatsApp message to Ahmed's own number. Not Version 2's job to fix, but
+  don't build Version 2 features that assume it already sends a real
+  message.
+- **Per-number health circuit and STOP/opt-out handling are still not
+  built.** Not Version 2's job either — don't let new send paths (e.g. an
+  automatic follow-up reminder in 2.5) skip past guardrails that a manual
+  reply already goes through, on the assumption these will exist later.
+- **No real async job queue exists** for outside-hours retry — a message
+  outside the sending window still just doesn't fire, it doesn't queue and
+  auto-send later. If 2.5's follow-up firing needs "send later," that's new
+  infrastructure, not something to assume already exists.
+- **Two narrow live-verification gaps remain genuinely open, not
+  Version 2's job to close, but don't regress them either:** the crash
+  window between `sendToCustomer()` succeeding and `send_ledger` being
+  marked `'sent'`; and cross-conversation memory recall proven correct
+  across a real day boundary, but not yet proven to survive a fact aging
+  out of the raw 20-message window `agent.ts` loads per turn.
+- **`catalog.md`'s content is still placeholder text**, not Ahmed's real
+  catalog — a content task for Ahmed, unrelated to Version 2, not something
+  to touch as part of this phase.
+
+**Do not begin Version 3 work under this file's authority.** If a task
+description asks for owner recognition, analytics Q&A, or WhatsApp-
+delivered alerts, stop and confirm with the user first — that work
 belongs to a later phase with its own CLAUDE.md scope, not this one.
 
 ---
@@ -198,30 +241,68 @@ port it — even in simplified form — without explicit user sign-off:**
 
 ---
 
-## 8. Definition of Done for "Version 1 complete"
+## 8. Definition of Done for "Version 1 complete" — ✅ satisfied 2026-09-05
 
-Do not report Version 1 as finished until all of the following are true,
-verified, not assumed:
+Every item below was verified true against the real number, not assumed —
+see `PROJECT-TRACKER-FINAL.md`'s "Version 1 — final status" section for
+what specifically verified each one, including the two bugs that were
+found genuinely *failing* on first real test (burst-message throttling;
+the discount guardrail's interaction with memory recall) and fixed before
+being checked off. Kept here, checked off, as the historical record of what
+"done" actually required — not a currently-open checklist.
 
-- [ ] A real WhatsApp message to the actual number produces a real reply
-- [ ] A crash-and-retry mid-turn does not produce a duplicate customer
+- [x] A real WhatsApp message to the actual number produces a real reply
+- [x] A crash-and-retry mid-turn does not produce a duplicate customer
       message
-- [ ] A malformed or unexpected tool call does not crash a turn
-- [ ] A fact told to the bot in one conversation is correctly recalled in a
+- [x] A malformed or unexpected tool call does not crash a turn
+- [x] A fact told to the bot in one conversation is correctly recalled in a
       separate conversation days later
-- [ ] A burst of test messages visibly throttles/spaces out rather than
+- [x] A burst of test messages visibly throttles/spaces out rather than
       firing at once; messages outside configured sending hours queue
       instead of firing immediately
-- [ ] A request for an unauthorized discount is refused or deflected, not
+- [x] A request for an unauthorized discount is refused or deflected, not
       granted
-- [ ] A question genuinely outside the bot's knowledge triggers a handoff
+- [x] A question genuinely outside the bot's knowledge triggers a handoff
       to the owner, not a guess
-- [ ] A catalog/FAQ question answered from the maintained document is
+- [x] A catalog/FAQ question answered from the maintained document is
       correct; a question not covered by it results in "I'll confirm and
       get back to you," never an invented answer
+- [x] `PROJECT-TRACKER-FINAL.md` accurately reflects all of the above as
+      done, with no stale "not started" markers left behind
+
+## 9. Definition of Done for "Version 2 complete"
+
+Do not report Version 2 as finished until all of the following are true,
+verified against real conversation data, not assumed:
+
+- [ ] A real customer conversation that agrees on product/size/color/
+      quantity/price produces a correct order row with correct line items
+      and total — zero manual entry by Ahmed
+- [ ] A real payment mentioned in conversation is recorded and correctly
+      reduces what the customer owes, with the balance reconstructable
+      from ledger history, not just a mutated single field
+- [ ] An order or payment mentioned in passing but never explicitly
+      confirmed via a tool call is still caught and flagged, not silently
+      lost
+- [ ] A real order is correctly moved through `received → confirmed → paid
+      → shipped → delivered` as the conversation progresses; an invalid
+      backward transition is rejected with a teaching-text error, not a
+      crash
+- [ ] A real "do you have X in stock" question gets the live, current
+      quantity, not a stale or invented number
+- [ ] Completing a real order decrements real stock by the correct amount
+- [ ] A real unpaid order automatically gets a follow-up tracked against it
+- [ ] Ahmed asking what follow-ups are pending, in his own words, gets a
+      correct answer sourced from real order/follow-up data — this is a
+      query path only; the bot proactively pushing this to him unprompted
+      is Version 3, not Version 2
+- [ ] None of Version 1's now-verified guarantees have regressed — a
+      spot-check that a real reply, discount refusal, catalog grounding,
+      and burst-message throttling all still work exactly as before adding
+      Version 2's order/payment writes to the turn
 - [ ] `PROJECT-TRACKER-FINAL.md` accurately reflects all of the above as
       done, with no stale "not started" markers left behind
 
-When every box is checked, stop and report Version 1 complete. Do not
-proceed into Version 2 scope without the user explicitly starting that
+When every box is checked, stop and report Version 2 complete. Do not
+proceed into Version 3 scope without the user explicitly starting that
 phase.
