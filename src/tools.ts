@@ -10,6 +10,7 @@
 
 import { findBestMatch, loadCatalogSections } from './catalog';
 import { db } from './db';
+import { getBalance, recordCredit, recordDebit } from './ledger';
 import { createLogger } from './obs/logger';
 import type { ToolDef } from './types';
 
@@ -58,10 +59,7 @@ export const getCustomerBalance: ToolDef = {
   description: "Check how much this customer currently owes (unpaid orders).",
   input_schema: { type: 'object', properties: {} },
   execute: (_input, ctx) => {
-    const row = db
-      .prepare('select balance_owed from customers where id = ?')
-      .get(ctx.customerId) as { balance_owed: number } | undefined;
-    return { balance_owed: row?.balance_owed ?? 0 };
+    return { balance_owed: getBalance(ctx.customerId) };
   },
 };
 
@@ -144,10 +142,7 @@ export const recordOrder: ToolDef = {
         'insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)',
       );
       const result = insertOrder.run(ctx.customerId, JSON.stringify(items), total, 'placed');
-      db.prepare('update customers set balance_owed = balance_owed + ? where id = ?').run(
-        total,
-        ctx.customerId,
-      );
+      recordDebit(ctx.customerId, result.lastInsertRowid as number, total);
       return { ok: true, order_id: result.lastInsertRowid, total };
     } catch {
       return { ok: false, error: 'Could not record the order — please try again.' };
@@ -168,10 +163,7 @@ export const recordPayment: ToolDef = {
       if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
         return { ok: false, error: 'Payment amount must be a number greater than 0.' };
       }
-      db.prepare('update customers set balance_owed = balance_owed - ? where id = ?').run(
-        amount,
-        ctx.customerId,
-      );
+      recordCredit(ctx.customerId, amount);
       return { ok: true };
     } catch {
       return { ok: false, error: 'Could not record the payment — please try again.' };

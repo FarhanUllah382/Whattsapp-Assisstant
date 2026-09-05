@@ -22,3 +22,47 @@ function ensureColumn(table: string, column: string, columnDdl: string): void {
 }
 
 ensureColumn('customers', 'disclosure_sent_at', 'disclosure_sent_at text');
+
+// Version 2.1: `customers.balance_owed` is replaced by the `ledger` table
+// (schema.sql). `create table if not exists` never touches an already-
+// existing table, so an existing dev database still has the old column —
+// drop it if present. Safe to run every startup: `ensureColumn`'s sibling,
+// same idempotency idea.
+function dropColumnIfExists(table: string, column: string): void {
+  const existingColumns = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
+  if (existingColumns.some((c) => c.name === column)) {
+    db.exec(`alter table ${table} drop column ${column}`);
+  }
+}
+
+dropColumnIfExists('customers', 'balance_owed');
+
+// Version 2.1: `orders.status` gained a CHECK constraint listing the full
+// retail state machine. SQLite's ALTER TABLE can't add a CHECK constraint
+// to an existing table, only the standard create-new/copy/drop-old/rename
+// dance — done here, guarded so it only runs once (detected by checking
+// the table's own stored CREATE TABLE text for the new constraint).
+function migrateOrdersStatusConstraint(): void {
+  const row = db
+    .prepare(`select sql from sqlite_master where type = 'table' and name = 'orders'`)
+    .get() as { sql: string } | undefined;
+  if (!row || row.sql.includes("check (status in")) return; // already migrated, or table doesn't exist yet
+
+  db.exec(`
+    create table orders_new (
+      id integer primary key autoincrement,
+      customer_id integer not null references customers(id),
+      items_json text not null,
+      total real not null,
+      status text not null default 'placed'
+        check (status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
+      created_at text not null default (datetime('now'))
+    );
+    insert into orders_new (id, customer_id, items_json, total, status, created_at)
+      select id, customer_id, items_json, total, status, created_at from orders;
+    drop table orders;
+    alter table orders_new rename to orders;
+  `);
+}
+
+migrateOrdersStatusConstraint();

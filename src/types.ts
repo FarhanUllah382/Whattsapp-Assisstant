@@ -5,7 +5,7 @@ export interface Customer {
   id: number;
   phone: string;
   name: string | null;
-  balance_owed: number;
+  // No balance_owed — see src/ledger.ts's getBalance() (Version 2.1).
 }
 
 export interface StoredMessage {

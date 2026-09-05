@@ -13,7 +13,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
+| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1 done (2026-09-05); 2.2's core mechanism done via 2.1, not yet wired to a conversation; 2.3-2.5 not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1291,35 +1291,137 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
 ### 2.1 — Retail data model
 - **Goal:** a place to put the facts of a sale.
 - **Depends on:** 1.1.
-- **Already done:** a first-pass schema exists in `ahmed-assistant`
-  (`customers`, `products`, `orders`, `messages`, `checkpoints`) — but
-  `orders.status` is never updated past `'placed'`, and `balance_owed` is a
-  single mutable field, not a proper ledger.
-- **Still missing:** a real debit/credit ledger table (see 2.2/2.3).
-- **Built from DeskcommCRM:** nothing — no analog exists anywhere in the
-  module, confirmed during extraction.
+- **Verified before starting, not assumed (2026-09-05):** confirmed via
+  `git status` (clean) and direct inspection of `db/schema.sql`/`tools.ts`
+  that 2.1 had not already been touched — `orders.status` was still never
+  updated past `'placed'` (hardcoded at insert, no other write site
+  anywhere in `src/`), `customers.balance_owed` was still a single mutated
+  field (3 read/write sites, all in `tools.ts`), and the live dev DB had
+  zero real order/nonzero-balance rows to migrate (checked directly) —
+  so no data-migration risk going in.
+- **Done (2026-09-05) — real ledger, replacing `balance_owed` entirely:**
+  new `ledger` table (`db/schema.sql`) — one row per debit (an order
+  placed) or credit (a payment) event, `amount >= 0` with direction from
+  `kind`, `order_id` nullable (a payment isn't always tied to one specific
+  order). New `src/ledger.ts`: `recordDebit`, `recordCredit`, `getBalance`
+  (sums the ledger, never trusts a stored number). `customers.balance_owed`
+  is fully **removed** from the schema, not just deprecated — an
+  `alter table ... drop column` migration in `src/db.ts` drops it from an
+  already-existing dev database on startup (guarded, idempotent, same
+  `ensureColumn`-sibling pattern already used for `disclosure_sent_at`).
+  `tools.ts`'s `record_order`/`record_payment`/`get_customer_balance` all
+  rewired to the ledger; external tool contracts (input/output shape)
+  unchanged, so this is invisible to the model.
+- **Done (2026-09-05) — order-status forward-only state machine, bundled
+  into this same session per explicit instruction (this is 2.2's own core
+  mechanism — see 2.2's note below for what's still separately open
+  there):** new `src/orders.ts` — `placed → confirmed → paid → shipped →
+  delivered`, or `cancelled` (only before shipping; `delivered` and
+  `cancelled` are both terminal). Retail vocabulary throughout, never the
+  B2B funnel vocabulary — permanent exclusion, CLAUDE.md §6.
+  `lead-state.ts` didn't qualify for extraction (DB-coupled, confirmed
+  against `MANIFEST.md`'s rejected list before writing a line of this) —
+  re-implemented from scratch, not ported. A pure `checkOrderStatusTransition`
+  (no DB) plus a DB-backed `transitionOrderStatus` (reads the real current
+  status, validates, writes only on success, never throws) — same
+  teaching-text-error discipline as every tool in `tools.ts`. `orders.status`
+  also gained a DB-level `CHECK` constraint listing the full enum, as a
+  backstop against a bad direct `UPDATE` bypassing the state machine
+  function — not the primary gate, just defense in depth, matching this
+  schema's own existing convention (`messages.direction` already has one).
+  SQLite can't add a `CHECK` constraint to an existing table via `ALTER
+  TABLE`, only the standard create-new/copy/drop-old/rename dance — done in
+  `src/db.ts`, guarded so it only runs once (detects the new constraint in
+  the table's own stored `CREATE TABLE` text) and copies any existing rows
+  rather than assuming the table is empty (it happened to be, but the
+  migration doesn't rely on that).
+- **Verified locally, deterministically — 28 checks, all real (unmocked)
+  code, run directly against the actual dev database (backed up first,
+  confirmed history-intact after — 29 customers/367 messages/21
+  checkpoints/18 notes/22 handoffs, all unchanged):** migration sanity
+  (column really dropped, constraint really present, ledger table exists);
+  insert-then-query-back for a product/order/payment; balance correctly
+  reflects a debit then a partial credit (1500 → 900), reconstructed by
+  hand-summing raw ledger rows and confirmed to match `getBalance()`
+  exactly; the full valid forward chain (`placed → confirmed → paid →
+  shipped → delivered`); four different invalid-transition shapes rejected
+  cleanly (backward, skipping a state, cancelling after shipping, moving
+  out of a terminal state) — none of them crashed, all returned a
+  teaching-text error; a nonexistent `order_id` rejected the same way; the
+  pure and DB-backed functions agree; both new `CHECK` constraints
+  independently confirmed as real backstops (a raw invalid `UPDATE` and a
+  raw negative-amount `INSERT` both actually throw); two customers'
+  balances confirmed isolated from each other. The live server was stopped
+  before running the migration against the real dev DB (it was still
+  running old code that reads `balance_owed` directly — running the
+  migration underneath it risked a crash on the next real message) and
+  restarted afterward with the new code. Scratch script and its test
+  rows/product deleted after use.
+- **Not done, deliberately, per explicit scope for this session:** no new
+  AI-facing tool exposes order-status transitions to the model yet — this
+  session was scoped to the data model and its enforcement, verified
+  locally, not wiring it into a live conversation. That wiring (a tool the
+  model calls, or extraction logic that infers it) is 2.2's/2.3's own
+  remaining work, not done here. Whether/how to live-test this against real
+  messages is a separate decision, not yet made.
+- **Built from DeskcommCRM:** nothing for the ledger — no analog exists
+  anywhere in the module, confirmed during extraction. The order-status
+  *mechanism* re-implements `agent/lead-state.ts`'s pattern (did not
+  qualify for extraction — DB-coupled) with retail vocabulary; see above.
 - **Definition of done:** can insert a product, an order, and a payment and
-  query them back correctly, with balance always reconstructable from
-  ledger history rather than trusted as a single field.
-- **Status:** 🟡 Placeholder schema exists; ledger formalization not started.
+  query them back correctly (✅ verified above) — with balance always
+  reconstructable from ledger history rather than trusted as a single
+  field (✅ verified above); an invalid status transition is rejected (✅
+  verified above, four different shapes).
+- **Status:** ✅ Done — real ledger and forward-only order-status state
+  machine both built, migrated safely against the real dev database, and
+  verified deterministically. Not yet wired into any AI-facing tool or
+  live-tested against real messages (see "Not done" above) — a separate,
+  not-yet-made decision.
 
 ### 2.2 — Order-status tracking
 - **Goal:** every order has a clear, queryable status that only moves
   forward.
 - **Depends on:** 2.1.
 - **Ships:** `received → confirmed → paid → shipped → delivered`, with
-  invalid transitions rejected via a teaching error.
+  invalid transitions rejected via a teaching error. **Naming note:** built
+  as `placed → confirmed → paid → shipped → delivered` instead of
+  `received → ...` — `placed` was already `orders.status`'s existing
+  default value from before 2.1/2.2 existed, so keeping it avoided a
+  gratuitous rename; same state machine either way.
+- **Done (2026-09-05), bundled into 2.1's own session per explicit
+  instruction — the core mechanism itself, see 2.1's dated entry for the
+  full verification:** `src/orders.ts`'s forward-only state machine
+  (`checkOrderStatusTransition` + `transitionOrderStatus`) plus the DB
+  `CHECK` constraint backstop. Deterministically verified: the full valid
+  forward chain, four different invalid-transition shapes correctly
+  rejected, cancellation allowed before shipping and blocked after, both
+  terminal states (`delivered`, `cancelled`) confirmed to allow nothing
+  further.
+- **Still NOT done — this sub-version's own remaining work, not covered by
+  2.1's session:** "the bot marks an order confirmed/paid/shipped **during
+  a natural conversation**" needs an actual AI-facing tool (or extraction
+  logic, see 2.3) calling `transitionOrderStatus` — none exists yet, the
+  function is built and verified but not wired to anything the model can
+  call. "A query for 'orders in status X' returns correctly" is a trivial
+  SQL query against the now-constrained `orders.status` column — not
+  separately built or tested, since it's not meaningful to verify until
+  there's a real path putting orders into varied statuses in the first
+  place.
 - **Built from DeskcommCRM:** the *mechanism* in `agent/lead-state.ts`
   (forward-only, model-driven, server-validated state machine) — did not
   qualify for direct extraction (DB-coupled), but the pattern is simple
   enough to re-implement with retail vocabulary instead of B2B funnel
   vocabulary. This vocabulary swap is permanent — never revert to the
   funnel shape (see permanent exclusions).
-- **New work:** the order-status vocabulary and transition rules themselves.
 - **Definition of done:** the bot marks an order confirmed/paid/shipped
-  during a natural conversation; a query for "orders in status X" returns
-  correctly; an invalid backward transition is rejected.
-- **Status:** 🔲 Not started.
+  during a natural conversation (🔲 not done — see above); a query for
+  "orders in status X" returns correctly (⚪ trivially true given the
+  schema, not separately tested — see above); an invalid backward
+  transition is rejected (✅ verified, see 2.1's entry).
+- **Status:** 🟡 Core state-machine mechanism done and verified (via 2.1's
+  session); not wired into any conversation yet — that's this
+  sub-version's own remaining work.
 
 ### 2.3 — Automatic order & payment extraction
 - **Goal:** "20 shirts, medium, black, ₹5000" becomes a real order row

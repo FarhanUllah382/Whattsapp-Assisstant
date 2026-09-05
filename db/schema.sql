@@ -5,9 +5,11 @@ create table if not exists customers (
   id integer primary key autoincrement,
   phone text not null unique,          -- WhatsApp number, our lookup key
   name text,                            -- filled in once the AI learns it
-  balance_owed real not null default 0, -- running total of unpaid orders
   disclosure_sent_at text,              -- set once the "I'm a virtual assistant" notice has gone out
   created_at text not null default (datetime('now'))
+  -- No balance_owed column (Version 2.1) — a single mutable field couldn't
+  -- be reconstructed or audited. What a customer owes is now derived by
+  -- summing the `ledger` table below, never trusted as a standalone number.
 );
 
 create table if not exists products (
@@ -19,12 +21,34 @@ create table if not exists products (
   stock integer not null default 0
 );
 
+-- Status is a forward-only state machine (Version 2.1), enforced in
+-- src/orders.ts, not just this constraint — the constraint is a backstop
+-- against a bad direct UPDATE, not the primary gate. Retail vocabulary only:
+-- placed -> confirmed -> paid -> shipped -> delivered, or cancelled (only
+-- before shipped — see ALLOWED_TRANSITIONS in orders.ts). Never the B2B
+-- funnel vocabulary (new/contacted/qualifying/...) — permanently excluded,
+-- see CLAUDE.md §6.
 create table if not exists orders (
   id integer primary key autoincrement,
   customer_id integer not null references customers(id),
   items_json text not null,   -- [{product_id, qty, price}], simple and flexible
   total real not null,
-  status text not null default 'placed', -- placed | paid | cancelled
+  status text not null default 'placed'
+    check (status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
+  created_at text not null default (datetime('now'))
+);
+
+-- One row per debit (an order placed — customer now owes more) or credit
+-- (a payment — customer owes less) event. `customers`' balance is always
+-- this table's running sum, never a mutated standalone field (Version 2.1)
+-- — reconstructable from history, auditable, and never silently drifts out
+-- of sync with what actually happened.
+create table if not exists ledger (
+  id integer primary key autoincrement,
+  customer_id integer not null references customers(id),
+  order_id integer references orders(id), -- null for a payment not tied to one specific order
+  kind text not null check (kind in ('debit', 'credit')),
+  amount real not null check (amount >= 0), -- direction comes from `kind`; a free (0-total) order is a valid debit
   created_at text not null default (datetime('now'))
 );
 
