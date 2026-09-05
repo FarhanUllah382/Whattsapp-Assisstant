@@ -20,9 +20,10 @@ import { PACING_DEFAULTS } from './guardrails/pacing/defaults';
 import { dayStartInTz, decidePacing, type PacingState } from './guardrails/pacing/engine';
 import { SPINNING_DEFAULTS } from './guardrails/spinning/defaults';
 import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from './guardrails/spinning/engine';
+import { recordCredit } from './ledger';
 import { callModel, type ModelMessage } from './llm';
 import { createLogger } from './obs/logger';
-import { baseTools } from './tools';
+import { baseTools, insertValidatedOrder, recordHandoff, validateOrderItems } from './tools';
 import type { Customer, ToolDef } from './types';
 
 const log = createLogger();
@@ -515,8 +516,20 @@ export async function runTurn(
       'Also list any NEW durable facts about this customer worth remembering permanently ' +
       '(e.g. "prefers black", "usually orders in bulk") — only ones not already covered by the ' +
       '"Known facts" list you were shown or by the summary you just wrote. Most turns have none.\n\n' +
+      'Also: if the customer just now clearly agreed to a NEW order or made a NEW payment that ' +
+      'you have NOT already logged with record_order/record_payment THIS turn, report it as a ' +
+      'safety net so it is not lost — but do NOT guess exact numbers you are not sure of.\n' +
+      '"unlogged_order": null, or {"confident": true/false, "items": [{"product_id":N,"qty":N,' +
+      '"price":N}] or null, "description": "plain text of what you believe happened"}\n' +
+      '"unlogged_payment": null, or {"confident": true/false, "amount": N or null, ' +
+      '"description": "plain text"}\n' +
+      'Set confident:true ONLY if you already know the real product_id (e.g. from calling ' +
+      'check_stock earlier this turn) and the exact qty/price or amount. Otherwise set ' +
+      "confident:false and just describe it — Ahmed will confirm it himself, never guess a " +
+      'number into the books. Most turns have neither.\n\n' +
       'Reply with ONLY a JSON object, nothing else, in this exact shape:\n' +
-      '{"summary": "...", "new_notes": [{"headline": "short phrase", "body": "fuller detail"}]}\n' +
+      '{"summary": "...", "new_notes": [{"headline": "short phrase", "body": "fuller detail"}], ' +
+      '"unlogged_order": null, "unlogged_payment": null}\n' +
       'Use an empty array for new_notes when there is nothing new.',
   });
   const closing = await callModel(SYSTEM_PROMPT, messages, []); // no tools — just want text
@@ -525,6 +538,8 @@ export async function runTurn(
 
   let summary = checkpoint?.summary ?? '';
   let newNotes: { headline: string; body: string }[] = [];
+  let unloggedOrder: any = null;
+  let unloggedPayment: any = null;
 
   try {
     const jsonText = closingText.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '');
@@ -541,6 +556,12 @@ export async function runTurn(
           typeof n.body === 'string' &&
           n.body.trim() !== '',
       );
+    }
+    if (parsed?.unlogged_order && typeof parsed.unlogged_order === 'object') {
+      unloggedOrder = parsed.unlogged_order;
+    }
+    if (parsed?.unlogged_payment && typeof parsed.unlogged_payment === 'object') {
+      unloggedPayment = parsed.unlogged_payment;
     }
   } catch {
     // Model didn't return valid JSON this turn — fall back to the old behavior
@@ -562,5 +583,49 @@ export async function runTurn(
     for (const note of newNotes) {
       insertNote.run(customer.id, note.headline.trim().slice(0, 120), note.body.trim());
     }
+  }
+
+  // Version 2.3 safety net: catches an order/payment the customer clearly
+  // agreed to but the model never called record_order/record_payment for
+  // this turn. toolsCalledThisTurn — real bookkeeping from the loop above,
+  // not the model's own say-so — is what gates this, so a real tool call
+  // this turn can never get double-logged by its own safety net. Never
+  // guesses a number into the books: only auto-logs when the model marks
+  // itself confident with a validated payload; otherwise it's a handoff
+  // for Ahmed to confirm by hand, same as every other "unsure" case in
+  // this project. Wrapped so a bug here can never crash a turn that may
+  // have already sent a real reply to the customer.
+  try {
+    if (!toolsCalledThisTurn.has('record_order') && unloggedOrder) {
+      if (unloggedOrder.confident === true && Array.isArray(unloggedOrder.items)) {
+        const check = validateOrderItems(unloggedOrder.items);
+        if (check.ok) {
+          const orderId = insertValidatedOrder(customer.id, unloggedOrder.items, check.total!);
+          log.info('safety-net order logged at turn close', { customerId: customer.id, orderId, total: check.total });
+        } else {
+          recordHandoff(
+            customer.id,
+            `Possible order the bot couldn't auto-log (${check.error}): ${String(unloggedOrder.description ?? '').slice(0, 400)}`,
+          );
+        }
+      } else if (typeof unloggedOrder.description === 'string' && unloggedOrder.description.trim() !== '') {
+        recordHandoff(customer.id, `Possible unlogged order needs Ahmed's confirmation: ${unloggedOrder.description.trim().slice(0, 400)}`);
+      }
+    }
+
+    if (!toolsCalledThisTurn.has('record_payment') && unloggedPayment) {
+      const amount = unloggedPayment.amount;
+      if (unloggedPayment.confident === true && typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
+        recordCredit(customer.id, amount);
+        log.info('safety-net payment logged at turn close', { customerId: customer.id, amount });
+      } else if (typeof unloggedPayment.description === 'string' && unloggedPayment.description.trim() !== '') {
+        recordHandoff(customer.id, `Possible unlogged payment needs Ahmed's confirmation: ${unloggedPayment.description.trim().slice(0, 400)}`);
+      }
+    }
+  } catch (err) {
+    log.error('safety-net order/payment extraction failed', {
+      customerId: customer.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }

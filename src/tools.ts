@@ -90,6 +90,52 @@ export const getCustomerNote: ToolDef = {
   },
 };
 
+export interface ValidateOrderItemsResult {
+  ok: boolean;
+  error?: string;
+  total?: number;
+}
+
+// Shared between record_order's own execute() and the Version 2.3 safety
+// net in agent.ts's CLOSE step (a possible order the model confirmed in
+// conversation but never called record_order for) — one validation source
+// of truth, so the safety net can never be looser than the real tool.
+export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { ok: false, error: 'Please list at least one item to order.' };
+  }
+  for (const it of items as any[]) {
+    if (typeof it !== 'object' || it === null) {
+      return { ok: false, error: 'Each order item must be a product, quantity, and price.' };
+    }
+    if (!Number.isInteger(it.product_id) || it.product_id <= 0) {
+      return { ok: false, error: 'Each item needs a valid product.' };
+    }
+    if (!Number.isInteger(it.qty) || it.qty <= 0) {
+      return { ok: false, error: 'Quantity must be a whole number greater than 0.' };
+    }
+    if (typeof it.price !== 'number' || !Number.isFinite(it.price) || it.price < 0) {
+      return { ok: false, error: 'Price must be a number 0 or greater.' };
+    }
+    const product = db.prepare('select id from products where id = ?').get(it.product_id);
+    if (!product) {
+      return { ok: false, error: `Product ${it.product_id} does not exist — check the product first.` };
+    }
+  }
+  const total = (items as any[]).reduce((sum, it) => sum + it.qty * it.price, 0);
+  return { ok: true, total };
+}
+
+/** Assumes `items`/`total` already passed validateOrderItems — no re-validation here. */
+export function insertValidatedOrder(customerId: number, items: unknown[], total: number): number {
+  const result = db
+    .prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)')
+    .run(customerId, JSON.stringify(items), total, 'placed');
+  const orderId = result.lastInsertRowid as number;
+  recordDebit(customerId, orderId, total);
+  return orderId;
+}
+
 export const recordOrder: ToolDef = {
   name: 'record_order',
   description:
@@ -116,35 +162,12 @@ export const recordOrder: ToolDef = {
   },
   execute: ({ items }, ctx) => {
     try {
-      if (!Array.isArray(items) || items.length === 0) {
-        return { ok: false, error: 'Please list at least one item to order.' };
+      const check = validateOrderItems(items);
+      if (!check.ok) {
+        return { ok: false, error: check.error };
       }
-      for (const it of items) {
-        if (typeof it !== 'object' || it === null) {
-          return { ok: false, error: 'Each order item must be a product, quantity, and price.' };
-        }
-        if (!Number.isInteger(it.product_id) || it.product_id <= 0) {
-          return { ok: false, error: 'Each item needs a valid product.' };
-        }
-        if (!Number.isInteger(it.qty) || it.qty <= 0) {
-          return { ok: false, error: 'Quantity must be a whole number greater than 0.' };
-        }
-        if (typeof it.price !== 'number' || !Number.isFinite(it.price) || it.price < 0) {
-          return { ok: false, error: 'Price must be a number 0 or greater.' };
-        }
-        const product = db.prepare('select id from products where id = ?').get(it.product_id);
-        if (!product) {
-          return { ok: false, error: `Product ${it.product_id} does not exist — check the product first.` };
-        }
-      }
-
-      const total = items.reduce((sum: number, it: any) => sum + it.qty * it.price, 0);
-      const insertOrder = db.prepare(
-        'insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)',
-      );
-      const result = insertOrder.run(ctx.customerId, JSON.stringify(items), total, 'placed');
-      recordDebit(ctx.customerId, result.lastInsertRowid as number, total);
-      return { ok: true, order_id: result.lastInsertRowid, total };
+      const orderId = insertValidatedOrder(ctx.customerId, items, check.total!);
+      return { ok: true, order_id: orderId, total: check.total };
     } catch {
       return { ok: false, error: 'Could not record the order — please try again.' };
     }
@@ -259,6 +282,20 @@ export const searchCatalog: ToolDef = {
   },
 };
 
+// Shared between notify_owner's own execute() and the Version 2.3 safety
+// net in agent.ts's CLOSE step (flagging a possible order/payment the
+// model wasn't confident enough to auto-log). Real WhatsApp delivery to
+// Ahmed's own number still isn't built (1.3 itself has been live-verified
+// since 2026-09-04 — that's not what's blocking this, the upgrade itself
+// just hasn't been done yet, see PROJECT-TRACKER-FINAL.md's Version 1
+// final-status note). Until then, this log line + ledger row IS the
+// handoff delivery mechanism: a distinct, greppable marker Ahmed (or
+// whoever's watching the logs) can act on directly.
+export function recordHandoff(customerId: number, reason: string): void {
+  db.prepare('insert into handoff_ledger (customer_id, reason) values (?, ?)').run(customerId, reason);
+  log.warn('NEEDS AHMED', { customerId, reason });
+}
+
 export const notifyOwner: ToolDef = {
   name: 'notify_owner',
   description:
@@ -279,21 +316,7 @@ export const notifyOwner: ToolDef = {
       return { ok: false, error: 'Please describe what Ahmed needs to look at.' };
     }
     try {
-      db.prepare('insert into handoff_ledger (customer_id, reason) values (?, ?)').run(
-        ctx.customerId,
-        reason.trim(),
-      );
-
-      // The real WhatsApp connection (1.3) isn't live-verified yet — see
-      // PROJECT-TRACKER-FINAL.md 1.3, currently blocked on a WhatsApp-side
-      // session restriction. Until it's verified end-to-end, this log line
-      // IS the handoff delivery mechanism: a distinct, greppable marker
-      // Ahmed (or whoever's watching the logs) can act on directly.
-      // TODO(after 1.3 is verified live): also send this as an actual
-      // WhatsApp message to Ahmed's own number via the ChannelAdapter,
-      // instead of only logging it.
-      log.warn('NEEDS AHMED', { customerId: ctx.customerId, reason: reason.trim() });
-
+      recordHandoff(ctx.customerId, reason.trim());
       return { ok: true };
     } catch {
       return { ok: false, error: 'Could not record the handoff — please try again.' };

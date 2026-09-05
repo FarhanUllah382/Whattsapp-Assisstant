@@ -13,7 +13,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1 and 2.2 done (2026-09-05); 2.3-2.5 not started |
+| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1, 2.2, and 2.3 done (2026-09-05); 2.4-2.5 not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1464,21 +1464,90 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   without Ahmed typing anything — including a safety net for orders/payments
   mentioned but never explicitly logged via a tool call.
 - **Depends on:** 2.1, 2.2.
-- **Ships:** a structured extraction step at turn close (alongside the
-  existing checkpoint-summary call) that pulls items/quantity/price/
-  amount-paid out of the conversation and writes them to the ledger,
-  validated before it's trusted.
+- **Verified before starting, not assumed (2026-09-05):** the *primary*
+  path ("20 shirts... becomes a real order row") was already fully covered
+  by 2.1/2.2's `record_order`/`record_payment` tools, called mid-turn by
+  the model — confirmed by re-reading them before writing anything new.
+  2.3's own genuinely new work is only the *safety net* half — "mentioned
+  but never explicitly logged" — which did not exist anywhere yet.
+- **Done (2026-09-05) — the safety net, at turn CLOSE (the same forced
+  second model call that already produces the checkpoint summary and
+  notes, per this file's own established pattern):** the CLOSE prompt
+  (`agent.ts`) now also asks the model to report, in the same JSON, an
+  `unlogged_order`/`unlogged_payment` — but **only** if it has NOT already
+  called `record_order`/`record_payment` this same turn. Two shapes: (1)
+  `confident: true` with structured `items`/`amount` — used only when the
+  model already knows the real `product_id` from calling `check_stock`
+  earlier in this same turn; (2) `confident: false` with a plain-text
+  `description` — used whenever it's not sure of exact numbers.
+  **Deterministic gate, not the model's self-report:** whether the safety
+  net acts at all is decided by `toolsCalledThisTurn` — real bookkeeping
+  from the turn's own tool-call loop, already tracked for the silent-no-
+  reply guard (1.3) — not by trusting the model's claim that it "forgot."
+  A real `record_order`/`record_payment` call this turn always wins; the
+  safety net is skipped entirely regardless of what the CLOSE step says,
+  so a real call can never get double-logged.
+  - **"Never guess a number into the books," the explicit instruction from
+    this file's own "New work" line below, actually enforced:** `confident:
+    true` items/amounts are re-validated through the exact same
+    `validateOrderItems()`/positive-number checks `record_order`/
+    `record_payment` themselves use (factored into shared, exported
+    functions in `tools.ts` — `validateOrderItems`, `insertValidatedOrder`
+    — so the safety net can never be looser than the real tool, one
+    validation source of truth, not two that could drift). Only a
+    genuinely valid, confident report gets written to `orders`/`ledger`.
+    Anything else — `confident: false`, or `confident: true` but the
+    validation actually fails (e.g. a nonexistent `product_id`) — becomes a
+    `handoff_ledger` row instead (via a new shared `recordHandoff()`,
+    factored out of `notify_owner`'s own code, same "NEEDS AHMED" log
+    marker), for Ahmed to confirm by hand. Nothing is ever silently lost,
+    and nothing is ever silently invented.
+  - **Scope, stated plainly:** this safety net only catches a miss *within
+    the same turn* — e.g. the model looked up a product via `check_stock`
+    but never got around to calling `record_order` before the turn ended.
+    It does not (and structurally cannot yet) recover an order mentioned
+    in an *earlier* turn and only confirmed later — tool-call results
+    aren't persisted across turns (only the raw text transcript and the
+    checkpoint/notes are), so there's no reliable way for a later turn to
+    know a specific `product_id` from an earlier one. That's a real,
+    separate gap (a proper order-lookup tool would close it), not
+    something this session solved.
+- **Verified locally, deterministically — 16 checks, real (unmocked)
+  `agent.ts`/`tools.ts` code, real DB, only the model call stubbed (with
+  full control over both the tool-calling loop and the CLOSE step's JSON,
+  so every shape is exercised precisely):** a real `record_order` call this
+  turn is never double-logged even when the CLOSE step also (wrongly)
+  claims an unlogged order with different numbers — the real order's
+  actual total is what's in the DB, not the decoy; a confident, valid
+  unlogged order is correctly auto-logged (order row + ledger debit both
+  correct); an unconfident report creates zero orders and a handoff
+  mentioning the description instead; a `confident: true` report with an
+  actually-invalid product is still rejected (no order created) and
+  flagged via handoff citing the real validation error — proving
+  `confident: true` alone is never enough to bypass validation; the same
+  three shapes repeated for payments (double-log prevention, confident
+  auto-credit, unconfident handoff); a turn with neither field present has
+  zero side effects (regression check) while the checkpoint/notes path
+  still saves correctly; a malformed shape (`unlogged_order` as a plain
+  string instead of an object) does not crash the turn and is correctly
+  ignored. Scratch script and its test rows/product deleted after use; the
+  live server was restarted afterward to run the new code (this session's
+  work was schema-free — no migration, so the running server wasn't
+  stopped first, unlike 2.1's).
 - **Built from DeskcommCRM:** the *pattern* of `inbound-turn.ts`'s
   checkpoint-close call (forced second model call, strict-validated JSON,
   persisted) — steered from extracting commitments/objections to extracting
   order/payment fields.
-- **New work:** the extraction schema and validation rules; deciding what
-  happens when the model is unsure (flag for Ahmed to confirm, never guess a
-  number into the books).
 - **Definition of done:** a normal order conversation end to end produces
   order/line-item/payment rows matching what was actually agreed, with no
-  manual entry, and a mentioned-but-unlogged order/payment is still caught.
-- **Status:** 🔲 Not started.
+  manual entry (✅ already true via 2.1/2.2's tools, reconfirmed above); a
+  mentioned-but-unlogged order/payment is still caught (✅ verified above,
+  both the auto-log and the flag-for-Ahmed paths, deterministically — not
+  yet exercised through an actual live conversation, a separate decision
+  same as 2.1/2.2 left it).
+- **Status:** ✅ Done — the safety net is built and verified
+  deterministically, on top of 2.1/2.2's already-working primary path. Not
+  yet live-tested against a real conversation.
 
 ### 2.4 — Live stock-aware replies
 - **Goal:** "do you have 20 in stock" gets a real, current answer, and a
