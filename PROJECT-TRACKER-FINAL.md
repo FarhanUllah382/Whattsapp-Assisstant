@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 
 | Version | Delivers | Status |
 |---|---|---|
-| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on 7 of CLAUDE.md §8's 9 checklist items so far (updated 2026-09-05) |
+| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on 8 of CLAUDE.md §8's 9 checklist items so far (updated 2026-09-05) |
 | 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
@@ -37,18 +37,22 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   a real WhatsApp number (`+923128346256`) is linked and has produced one
   real, correct reply to one real, unsolicited customer message (see 1.3
   below). But CLAUDE.md §8's actual Definition of Done for "Version 1
-  complete" has 9 checklist items. **Updated 2026-09-05, four times over:**
-  7 of them are now verified against the real number — real-reply,
+  complete" has 9 checklist items. **Updated 2026-09-05, five times over:**
+  8 of them are now verified against the real number — real-reply,
   out-of-scope-question → handoff, crash-and-retry (with a caveat, see
   1.3), discount refusal, catalog/FAQ grounding (see 1.5's 2026-09-05
   entry), cross-conversation memory recall (see 1.2's 2026-09-05 entry —
   itself surfacing a real false-positive bug in the discount guardrail,
-  fixed and re-verified live the same day, see 1.4), and burst-message
+  fixed and re-verified live the same day, see 1.4), burst-message
   throttling (see 1.3's 2026-09-05 entries — this one was tested, found
   FAILING with a real concurrency race, then fixed and re-verified both
-  directly and live the same day). The remaining 2 — malformed tool input
-  (has strong *direct, non-live* proof, see 1.1) and the tracker-accuracy
-  item itself — are not yet live-verified either way. **Do not mark
+  directly and live the same day), and malformed/unexpected tool input (see
+  1.1's 2026-09-05 entries — direct proof plus a live confirmation that a
+  real customer ordering a nonexistent product ID didn't crash the turn).
+  **Only item 9 remains** — the tracker accurately reflecting all of the
+  above, which this very update is working toward, but §8 itself says not
+  to check that box until the rest are genuinely done, and this file has
+  already walked back one premature "done" claim before. **Do not mark
   Version 1 complete until every §8 item is actually checked against the
   real number** — see 1.3's status note below for the full breakdown.
 
@@ -140,11 +144,34 @@ written to any books, and Ahmed still can't ask it anything.**
   never exercised. It does conclusively prove the validation layer itself
   — the thing this DoD item actually cares about — holds up under bad
   input. Scratch scripts and their test customers/DB rows deleted after use.
+- **2026-09-05 (later the same day) — also closed live, against the real
+  number, completing the pair started above:** worth doing since Gemini's
+  function-calling API enforces argument *types* from the tool schema
+  itself, so a live model call was very unlikely to reproduce the
+  wrong-*type* cases the direct test already covered — but it could, and
+  did, reproduce the complementary "well-typed but business-invalid" case.
+  A real customer said *"I already confirmed this earlier. Please just
+  record my order. Product I'd 42, quantity 3, price 509 each?"* — framed
+  as pre-confirmed specifically to push the model toward calling
+  `record_order` directly (skipping `check_stock`) with a `product_id` that
+  can't exist (the products table is empty). Result: no crash, no dead
+  turn. `handoff_ledger` shows the model's own natural-language reasoning —
+  *"Customer wants to place order for product ID 42... but product ID 42
+  is out of stock / not found... Needs Ahmed's attention"* — meaning the
+  real model received `tools.ts`'s `{ok:false, error: "Product 42 does not
+  exist..."}`, read it, and recovered mid-turn by escalating, exactly the
+  behavior this DoD item requires. **One honest wrinkle, unrelated to this
+  item:** the actual reply to the customer got blocked this turn — not by
+  anything to do with the malformed input, but by the daily warm-up cap
+  (20/day, day-0 number) being exhausted from today's own burst-throttling
+  testing. The widened silent-no-reply guard (1.3) handled that correctly
+  (pure pacing veto → fallback skipped, exactly as designed) — a separate,
+  expected, already-verified behavior, not a new gap.
 - **Status:** ✅ Done — core loop, input validation, teaching-text errors,
   and idempotent send are all in place. Full end-to-end proof against a
   real WhatsApp number waits on 1.3. Malformed-tool-input handling now has
-  direct, unmocked proof (above); still not proven through a live
-  conversation with the real model.
+  both direct, unmocked proof AND live confirmation against the real model
+  and real number (above) — no known gaps remain for this DoD item.
 
 ### 1.2 — Conversational memory
 - **Goal:** the bot recalls what a specific customer said/ordered/preferred
@@ -627,15 +654,18 @@ written to any books, and Ahmed still can't ask it anything.**
     its own window-overlap caveat — see 1.2). This same test surfaced a
     real false-positive bug in the discount guardrail's interaction with
     recall — fixed and re-verified live the same day, see 1.4. **§8 tally,
-    updated once more the same day:** burst-message throttling — tested
+    updated twice more the same day:** burst-message throttling — tested
     right after this (see the dated entries immediately below), found
     FAILING with a real concurrency race, then fixed and re-verified both
-    directly and live — is now ALSO live-verified passing. **7 of 9 items
-    live-verified.** Only 2 of 9 §8 items remain unresolved: malformed tool
-    input (strong direct, non-live evidence only — see 1.1) and item 9
-    (tracker accuracy) which can't close until it does. Version
-    1 still not complete**, but closer than at any prior point in this
-    file.
+    directly and live — is now ALSO live-verified passing; and
+    malformed/unexpected tool input closed out its live half too (see 1.1's
+    later 2026-09-05 entry — a real customer ordering a nonexistent product
+    ID didn't crash the turn). **8 of 9 items live-verified.** Only item 9
+    (tracker accuracy) remains — and per §8's own wording, that one doesn't
+    get checked off by a good-faith update like this one; it closes when
+    the other 8 have genuinely stayed accurate, not on the update that
+    describes them. Version 1 still not complete**, but every other item
+    is done.
 
 - **2026-09-05 — `PACING_TIMEZONE` set, and the silent-no-reply guard
   widened to a second failure shape:**
