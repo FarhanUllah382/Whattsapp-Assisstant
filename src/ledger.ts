@@ -12,10 +12,15 @@ export function recordDebit(customerId: number, orderId: number, amount: number)
   ).run(customerId, orderId, amount);
 }
 
-export function recordCredit(customerId: number, amount: number): void {
+// orderId is optional — a genuine payment usually isn't tied to one specific
+// order (customers often pay against their running balance, not per-order),
+// but a cancellation reversal (orders.ts) IS tied to a specific order, and
+// recording that link keeps the ledger's audit trail honest instead of
+// flattening every credit down to "a payment, from somewhere."
+export function recordCredit(customerId: number, amount: number, orderId: number | null = null): void {
   db.prepare(
-    "insert into ledger (customer_id, order_id, kind, amount) values (?, null, 'credit', ?)",
-  ).run(customerId, amount);
+    "insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'credit', ?)",
+  ).run(customerId, orderId, amount);
 }
 
 /** What this customer currently owes: sum of debits minus sum of credits, reconstructed from history every time. */

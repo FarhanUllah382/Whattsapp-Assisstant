@@ -14,7 +14,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
 | 2.x | Promise 3 — keeps the books automatically | 🟡 All 5 sub-versions (2.1-2.5) built and deterministically verified (2026-09-05) — none yet live-tested against a real conversation, see each sub-version's own status |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 built and locally verified (2026-09-05) under the explicit early-start exception below; 3.2 not started; 3.3 stays out of scope |
+| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 and 3.2 built and locally verified (2026-09-05) under the explicit early-start exception below; 3.3 stays out of scope |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
 **Note on the 3.x exception, so anyone reading this later understands why
@@ -1397,6 +1397,14 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   verified deterministically. Now wired into a real AI-facing tool too
   (2.2's `update_order_status`) and stock-aware (2.4) — not yet
   live-tested against real messages, a separate, not-yet-made decision.
+  **Correction, 2026-09-05, found while building 3.2:** the ledger debit
+  `record_order` writes at creation was never reversed when an order was
+  later cancelled — `get_customer_balance` would have silently overstated
+  what a customer owed for anyone with a cancelled order. Fixed in
+  `orders.ts`'s `transitionOrderStatus` (see 3.2's own dated entry for the
+  full story and verification) — this file's balance-reconstruction
+  guarantee now actually holds for the cancelled-order case too, not just
+  the ones tested in 2.1's own original 28 checks.
 
 ### 2.2 — Order-status tracking
 - **Goal:** every order has a clear, queryable status that only moves
@@ -1629,7 +1637,12 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
 - **Status:** ✅ Done — decrement-on-confirm and restore-on-cancel both
   built and verified deterministically, including the double-
   decrement/double-restore guarantees. Not yet live-tested against a real
-  conversation, same as 2.1-2.3 left it.
+  conversation, same as 2.1-2.3 left it. **Note, 2026-09-05:** the same
+  `transitionOrderStatus` function this sub-version's stock logic lives in
+  was corrected while building 3.2 (a separate, ledger-side bug — the
+  reversal-on-cancel fix, see 2.1's and 3.2's own entries) — re-verified
+  directly that this sub-version's own stock-restore behavior still fires
+  correctly and was not regressed by that fix.
 
 ### 2.5 — Follow-up tracking tied to unpaid orders
 - **Goal:** the system knows which customers still owe money or are waiting
@@ -1808,10 +1821,78 @@ the MVP-complete milestone.**
 
 ### 3.2 — Owner analytics Q&A tools
 - **Goal:** Ahmed's four example questions all work, in his own words.
-- **Depends on:** 3.1, version 2 complete.
-- **Ships:** `sales_today`, `unpaid_customers`, `top_selling_product`,
-  `pending_followups` — a small, fixed set of safe report functions, never
-  a freely-written SQL query from the model.
+- **Depends on:** 3.1 (✅ built and locally verified, see its own entry),
+  version 2 complete (⚠️ still not live-verified — **built under the
+  2026-09-05 exception**, CLAUDE.md §3, same as 3.1; not scope drift).
+- **Verified before starting, not assumed (2026-09-05):** `git status`
+  clean, `grep` across `src/` for the four function names found only my
+  own 3.1-era comment naming them as future work — nothing built yet.
+  Also checked the dev database directly before seeding any test data:
+  `orders`/`ledger` were both completely empty (every scratch row from
+  2.1-2.4's own testing had been cleaned up afterward, per this file's own
+  convention) — flagged to the user rather than assuming stale "seeded
+  data" existed, then seeded a fresh, realistic scenario for this test on
+  their explicit instruction.
+- **Done (2026-09-05):** new `src/analytics.ts` — `getSalesToday(now?)`
+  (sum of non-cancelled order totals placed today, Ahmed's shop timezone,
+  `now` injectable same as `getPendingFollowups`), `getUnpaidCustomers()`
+  (every customer with a real positive ledger balance — reuses
+  `getBalance()` per candidate rather than re-deriving the debit/credit
+  math a second time, so it can never drift from what
+  `get_customer_balance` itself reports), `getTopSellingProduct()` (most
+  units sold across all non-cancelled orders, all time, ties broken by
+  lowest `product_id` for determinism). `pending_followups` is **not**
+  reimplemented — it's 2.5's own `getPendingFollowups()`, wired in
+  directly, one source of truth. All four exposed as new owner-only tools
+  (`tools.ts`'s `ownerTools`), reachable only from `runOwnerTurn()` (3.1) —
+  a customer can never see these regardless of phrasing, because reaching
+  this tool list at all already required `isOwnerPhone()` to say yes.
+  Deliberately a small, fixed, explicitly-named set — never a
+  freely-written query handed to the model, exactly the risk naming each
+  one avoids.
+- **A real correctness bug found and fixed along the way, touching
+  already-merged 2.1/2.4 code, not just this sub-version — flagged to the
+  user and fixed only after explicit confirmation, not silently:**
+  building `unpaid_customers`' test data surfaced that `record_order`
+  writes its ledger debit immediately at creation (`'placed'`), but
+  `transitionOrderStatus` (2.1, stock side effects added in 2.4) never
+  reversed that debit on cancellation — only stock was ever restored. A
+  cancelled order would silently keep counting as money owed, forever,
+  in both `get_customer_balance` (2.1) and this new `unpaid_customers`.
+  **Fixed** in `orders.ts`: cancelling now also issues a ledger credit for
+  the order's total, reversing it — unconditional on `next === 'cancelled'`
+  (unlike the stock branch, which only fires if stock was actually
+  reserved), since the debit always exists by the time an order can be
+  cancelled at all, regardless of which status it's cancelled from.
+  `ledger.ts`'s `recordCredit()` gained an optional `orderId` parameter
+  (default `null`, preserving existing payment behavior) so this reversal
+  is traceable back to the order it reverses, not flattened to "a payment
+  from somewhere." **Re-verified 2.4's own stock-restore side effect still
+  fires correctly alongside the new ledger one** — this fix did not
+  regress it.
+- **Verified locally, deterministically — 16 checks across 2 scripts, real
+  (unmocked) `analytics.ts`/`orders.ts`/`ledger.ts` code, a realistic
+  hand-computed seeded scenario (3 customers, 3 products, 5 orders
+  spanning today/yesterday/10-days-ago and placed/confirmed/paid/cancelled
+  statuses):** `sales_today` correctly totals only today's non-cancelled
+  orders (excludes yesterday's and the cancelled one); `top_selling_product`
+  correctly picks the real best-seller by units, with the cancelled
+  order's units correctly excluded from the tally, verified separately
+  against an isolated exact-tie scenario proving the tie-break really
+  compares `product_id` (not just "whichever the tally iterates to first"
+  — the losing product's order was deliberately inserted *first* to rule
+  that out) and that no-orders-at-all correctly returns `null`;
+  `unpaid_customers` correctly includes only the two customers who
+  actually still owe money, sorted highest-first, with the customer whose
+  only order was cancelled correctly excluded entirely (the bug-fix
+  proof); `pending_followups` (via the tool wrapper) correctly includes
+  the genuinely old unpaid order and excludes a same-day one, a paid one,
+  and the cancelled one. The real cancellation call itself, and the
+  ledger-reversal credit it produced, were both asserted directly, not
+  assumed. Scratch scripts and all seeded rows deleted after use. Live
+  server restarted with the fixed `orders.ts` (this also affects the
+  customer-facing `update_order_status` tool from 2.2, so it mattered to
+  redeploy promptly, not just for this sub-version).
 - **Built from DeskcommCRM:** nothing — confirmed during extraction that no
   agent-callable analytics tool exists anywhere in the module. DeskcommCRM's
   numbers live in React dashboard code with hand-written SQL, not as
@@ -1819,8 +1900,15 @@ the MVP-complete milestone.**
   part of the whole project.
 - **Definition of done:** each of Ahmed's four example questions, asked in
   natural language (including Roman Urdu/Hindi phrasing), gets a correct
-  answer sourced from real data.
-- **Status:** 🔲 Not started.
+  answer sourced from real data (✅ the underlying functions are verified
+  correct against hand-checked expectations above; the natural-language
+  phrasing/Roman-Urdu half of this specifically needs a live conversation
+  through `runOwnerTurn()`, not yet done — same distinction as everywhere
+  else in this file).
+- **Status:** ✅ Built and locally verified, deterministically — **not yet
+  live-tested against a real conversation**. Also fixed one real bug in
+  already-merged 2.1/2.4 code (ledger reversal on cancel) discovered while
+  building this.
 
 ### 3.3 — WhatsApp-delivered alerts
 - **Goal:** things Ahmed should know about reach him without opening

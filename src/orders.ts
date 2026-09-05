@@ -10,6 +10,7 @@
 // reimplementation of the pattern, not a port.
 
 import { db } from './db';
+import { recordCredit } from './ledger';
 
 export const ORDER_STATUSES = ['placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled'] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
@@ -78,13 +79,25 @@ interface OrderItem {
  * valid target, so a second "confirm" attempt is rejected before this code
  * ever runs), and "cancelled" is terminal (nothing transitions out of it),
  * so each order can decrement at most once and restore at most once.
+ *
+ * Correction found and fixed 2026-09-05, while building 3.2's
+ * unpaid_customers report: record_order writes its ledger debit
+ * immediately at creation (status 'placed'), before any confirm/pay step —
+ * unlike stock, which only reserves at 'confirmed'. That debit was never
+ * being reversed on cancellation, so a cancelled order silently kept
+ * counting as money owed forever (get_customer_balance and
+ * unpaid_customers would both have been wrong for any customer with a
+ * cancelled order). Fixed the same way as stock, just unconditional on
+ * `next === 'cancelled'` rather than gated on the prior status, since the
+ * debit — unlike the stock reservation — always exists by the time an
+ * order can be cancelled at all.
  */
 export function transitionOrderStatus(orderId: number, next: OrderStatus): TransitionResult {
   if (!Number.isInteger(orderId) || orderId <= 0) {
     return { ok: false, error: 'orderId must be a positive whole number.' };
   }
-  const row = db.prepare('select status, items_json from orders where id = ?').get(orderId) as
-    | { status: OrderStatus; items_json: string }
+  const row = db.prepare('select status, items_json, customer_id, total from orders where id = ?').get(orderId) as
+    | { status: OrderStatus; items_json: string; customer_id: number; total: number }
     | undefined;
   if (!row) {
     return { ok: false, error: `Order ${orderId} does not exist.` };
@@ -104,6 +117,14 @@ export function transitionOrderStatus(orderId: number, next: OrderStatus): Trans
     for (const item of items) {
       adjustStock.run(sign * item.qty, item.product_id);
     }
+  }
+
+  if (next === 'cancelled') {
+    // Unconditional (unlike the stock branch above): the debit was recorded
+    // the instant this order was placed, so it needs reversing no matter
+    // which status it's cancelled from. Tied to this order_id (not null)
+    // so the reversal is traceable back to what it's reversing.
+    recordCredit(row.customer_id, row.total, orderId);
   }
 
   return { ok: true, order_id: orderId, from: row.status, to: next };

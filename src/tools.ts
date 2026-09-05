@@ -8,8 +8,10 @@
 // message" possible later — there's exactly one choke point.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { getSalesToday, getTopSellingProduct, getUnpaidCustomers } from './analytics';
 import { findBestMatch, loadCatalogSections } from './catalog';
 import { db } from './db';
+import { getPendingFollowups } from './followups';
 import { getBalance, recordCredit, recordDebit } from './ledger';
 import { createLogger } from './obs/logger';
 import { ORDER_STATUSES, transitionOrderStatus, type OrderStatus } from './orders';
@@ -340,3 +342,46 @@ export const baseTools: ToolDef[] = [
   notifyOwner,
   searchCatalog,
 ];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Version 3.2 — Ahmed's own analytics tools. Only reachable from
+// runOwnerTurn() (agent.ts), never baseTools — a customer can never see
+// these regardless of what they ask, because routing to this tool list at
+// all requires isOwnerPhone() to have already said yes (owner.ts).
+// Deliberately a small, FIXED, explicitly-named set of safe report
+// functions — never a freely-written SQL query handed to the model, which
+// is exactly the risk naming each one avoids.
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const salesToday: ToolDef = {
+  name: 'sales_today',
+  description: "Total value of orders placed today (excluding cancelled ones), in Ahmed's shop timezone.",
+  input_schema: { type: 'object', properties: {} },
+  execute: () => ({ total_sales: getSalesToday() }),
+};
+
+export const unpaidCustomersTool: ToolDef = {
+  name: 'unpaid_customers',
+  description: 'Every customer who currently owes money, with how much, highest balance first.',
+  input_schema: { type: 'object', properties: {} },
+  execute: () => ({ unpaid_customers: getUnpaidCustomers() }),
+};
+
+export const topSellingProductTool: ToolDef = {
+  name: 'top_selling_product',
+  description: 'The single best-selling product by units sold, across all non-cancelled orders, all time.',
+  input_schema: { type: 'object', properties: {} },
+  execute: () => {
+    const top = getTopSellingProduct();
+    return top ? { found: true, ...top } : { found: false, message: 'No orders recorded yet.' };
+  },
+};
+
+export const pendingFollowupsTool: ToolDef = {
+  name: 'pending_followups',
+  description: 'Every unpaid order that has been sitting for a while, most overdue first.',
+  input_schema: { type: 'object', properties: {} },
+  execute: () => ({ pending_followups: getPendingFollowups() }),
+};
+
+export const ownerTools: ToolDef[] = [salesToday, unpaidCustomersTool, topSellingProductTool, pendingFollowupsTool];

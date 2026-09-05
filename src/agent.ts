@@ -23,7 +23,7 @@ import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from '
 import { recordCredit } from './ledger';
 import { callModel, type ModelMessage } from './llm';
 import { createLogger } from './obs/logger';
-import { baseTools, insertValidatedOrder, recordHandoff, validateOrderItems } from './tools';
+import { baseTools, insertValidatedOrder, ownerTools, recordHandoff, validateOrderItems } from './tools';
 import type { Customer, ToolDef } from './types';
 
 const log = createLogger();
@@ -663,9 +663,10 @@ export async function runTurn(
 const OWNER_SYSTEM_PROMPT = `You are Ahmed's own private assistant. You are talking directly to Ahmed,
 the shop's owner — never to a customer. This conversation is completely separate from any customer
 conversation: you never send anything to a customer, never record an order or payment, and never
-change an order's status from here. Answer Ahmed's questions about his own business honestly, using
-only the tools available to you in this conversation. If you don't have a way to answer something
-yet, say so plainly instead of guessing.`;
+change an order's status from here. Answer Ahmed's questions about his own business using the
+report tools available to you — sales_today, unpaid_customers, top_selling_product, and
+pending_followups — rather than guessing or estimating. If a question doesn't match any tool you
+have, say so plainly instead of inventing an answer.`;
 
 function makeOwnerSendTool(sendToOwner: (text: string) => Promise<void>): ToolDef {
   return {
@@ -727,7 +728,7 @@ export async function runOwnerTurn(
     'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
   ).run(owner.id, 'inbound', incomingText, nowSql());
 
-  const tools = [makeOwnerSendTool(sendToOwner)];
+  const tools = [...ownerTools, makeOwnerSendTool(sendToOwner)];
   const messages: ModelMessage[] = [{ role: 'user', content: incomingText }];
 
   for (let step = 0; step < MAX_TOOL_STEPS; step++) {
