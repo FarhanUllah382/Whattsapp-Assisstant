@@ -13,7 +13,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1, 2.2, and 2.3 done (2026-09-05); 2.4-2.5 not started |
+| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1-2.4 done (2026-09-05); 2.5 status not updated here — see 2.5's own section |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1553,15 +1553,64 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
 - **Goal:** "do you have 20 in stock" gets a real, current answer, and a
   completed order actually decrements stock.
 - **Depends on:** 2.1.
-- **Ships:** `check_stock` querying the real quantity table (already exists
-  in `ahmed-assistant` in basic form), plus stock decrement on order
-  confirmation (not yet built).
+- **Verified before starting, not assumed (2026-09-05):** re-read
+  `check_stock` (already queried the real `products.stock` column, nothing
+  stale about it — `select *` on every call, no caching) and confirmed via
+  `grep` that no code anywhere wrote to `products.stock` — 2.1's ledger and
+  2.2's order-status tool both existed, but neither touched stock yet.
+- **Done (2026-09-05) — stock decrement/restore, living in `orders.ts`'s
+  `transitionOrderStatus()` itself, not in the tool that calls it:** put
+  here deliberately rather than in `tools.ts`'s `update_order_status`, so
+  the side effect holds for any future caller of the state machine, not
+  just today's one tool. Confirming an order (`placed → confirmed`)
+  decrements each line item's product stock by its ordered qty. Cancelling
+  an order that had already reserved stock — cancelled from `"confirmed"`
+  or `"paid"`, not from `"placed"` (nothing was reserved yet at `placed`)
+  — restores it. **Double-decrement/double-restore is ruled out by the
+  state machine's own guarantees, not a separate "already adjusted" flag:**
+  `"confirmed"` is reachable via exactly one edge per order
+  (`placed → confirmed` — no other state lists it as a valid target, so a
+  second "confirm" attempt is rejected by `checkOrderStatusTransition`
+  before the stock-adjustment code ever runs), and `"cancelled"` is
+  terminal (nothing transitions out of it), so each order can decrement at
+  most once and restore at most once, for free, from 2.1's own design.
+  **Not built, deliberately, not asked for:** no "insufficient stock"
+  block on confirming — stock is allowed to go negative if oversold, an
+  honest signal for Ahmed to see and act on, not a new guardrail invented
+  beyond what this task asked for.
+- **Verified locally, deterministically — 23 checks, real (unmocked)
+  `tools.ts`/`orders.ts` code, real DB:** placing an order alone (status
+  `placed`) never touches stock; confirming decrements by the exact ordered
+  qty, and `check_stock` (the real tool, not a raw query) reflects the drop
+  immediately; a second "confirm" attempt on an already-confirmed order is
+  rejected by the state machine and stock is confirmed unchanged (the
+  double-decrement guarantee actually holds, not just in theory);
+  cancelling after confirmed fully restores stock, `check_stock` reflects
+  the restore too; cancelling an already-cancelled order is rejected and
+  stock isn't double-restored; cancelling straight from `placed` correctly
+  leaves stock untouched (nothing to restore); restoring also verified from
+  a `paid → cancelled` cancellation, not just `confirmed → cancelled`;
+  cancelling a shipped order is rejected (2.1/2.2's own guarantee) and
+  stock is confirmed unaffected by the rejected attempt; a multi-item order
+  correctly decrements/restores each product's own quantity independently.
+  Scratch script and test rows/products deleted after use; live server
+  restarted with the new code afterward (no schema change this time — the
+  `stock` column already existed — so it wasn't stopped first, same as
+  2.3's session).
 - **Built from DeskcommCRM:** the *tool pattern* from
   `agent/search-knowledge.ts` — steered from document search to a live
-  quantity query.
+  quantity query (this was already done, pre-2.4; the decrement/restore
+  logic itself has no DeskcommCRM analog).
 - **Definition of done:** stock check for a low/out item gives the real
-  number; completing an order drops stock by the right amount.
-- **Status:** 🟡 Basic lookup exists; decrement-on-order not started.
+  number (✅ already true, reconfirmed above); completing an order drops
+  stock by the right amount (✅ verified above — "completing" here means
+  reaching `confirmed`, which is where reservation actually happens
+  operationally, not `delivered`; restoring on a pre-shipping cancellation
+  was in this same session's explicit scope too and is verified above).
+- **Status:** ✅ Done — decrement-on-confirm and restore-on-cancel both
+  built and verified deterministically, including the double-
+  decrement/double-restore guarantees. Not yet live-tested against a real
+  conversation, same as 2.1-2.3 left it.
 
 ### 2.5 — Follow-up tracking tied to unpaid orders
 - **Goal:** the system knows which customers still owe money or are waiting
