@@ -25,29 +25,63 @@ const PATTERNS: readonly RegExp[] = [
   new RegExp(`\\b${DISCOUNT_WORD}\\b${gap(15)}\\b(\\d{1,3})\\s*%`, 'i'),
 ];
 
+// Recalling that the CUSTOMER previously asked for a discount ("you asked
+// me for 20% yesterday") reads identically to this regex as actually
+// OFFERING one — found live 2026-09-05 (PROJECT-TRACKER-FINAL.md 1.2/1.4)
+// when a cross-conversation memory recall got blocked as if it were a real
+// offer. Fix requires BOTH of the following near the match, not either
+// alone (a lone known-number match could just as easily be a genuine fresh
+// offer that happens to reuse an old number; a lone language match could be
+// gamed by phrasing): (1) the percentage is already grounded in this
+// customer's own persisted notes/checkpoint — passed in by the caller,
+// which owns the DB access, keeping this file DB-free as it already was —
+// and (2) the surrounding text reads as reporting the past, not proposing
+// now.
+const RETROSPECTIVE_MARKER =
+  /\b(?:asked|requested|wanted|said|mentioned|yesterday|earlier|previously|before|kal|pehle|poocha|maang\w*|kaha)\b/i;
+const RETROSPECTIVE_WINDOW = 40;
+
+function hasRetrospectiveLanguageNear(body: string, matchIndex: number, matchLength: number): boolean {
+  const start = Math.max(0, matchIndex - RETROSPECTIVE_WINDOW);
+  const end = Math.min(body.length, matchIndex + matchLength + RETROSPECTIVE_WINDOW);
+  return RETROSPECTIVE_MARKER.test(body.slice(start, end));
+}
+
 export interface DiscountCheckResult {
   ok: boolean;
   percent?: number;
   reason?: string;
 }
 
-/** Blocks (ok:false) if the text offers a discount at/above the confirmed threshold. */
-export function checkDiscountRule(body: string): DiscountCheckResult {
+/**
+ * Blocks (ok:false) if the text offers a discount at/above the confirmed
+ * threshold. `knownPercents` — percentages already on record for this
+ * customer (from their notes/checkpoint) — lets a recall of a past ask
+ * through instead of treating it as a fresh offer; see the comment above.
+ */
+export function checkDiscountRule(
+  body: string,
+  knownPercents: ReadonlySet<number> = new Set(),
+): DiscountCheckResult {
   for (const re of PATTERNS) {
     const match = re.exec(body);
     if (!match) continue;
     const percent = Number(match[1]);
-    if (Number.isFinite(percent) && percent >= MAX_DISCOUNT_PERCENT_WITHOUT_CONFIRMATION) {
-      return {
-        ok: false,
-        percent,
-        reason:
-          `You offered a ${percent}% discount, which is at or above Ahmed's ` +
-          `${MAX_DISCOUNT_PERCENT_WITHOUT_CONFIRMATION}% confirmation threshold. Do not send this — ` +
-          `either drop the discount, or tell the customer you'll confirm with Ahmed first ` +
-          '(and actually call notify_owner if you do).',
-      };
+    if (!Number.isFinite(percent) || percent < MAX_DISCOUNT_PERCENT_WITHOUT_CONFIRMATION) continue;
+
+    if (knownPercents.has(percent) && hasRetrospectiveLanguageNear(body, match.index, match[0].length)) {
+      continue; // reporting a past ask, not proposing one now
     }
+
+    return {
+      ok: false,
+      percent,
+      reason:
+        `You offered a ${percent}% discount, which is at or above Ahmed's ` +
+        `${MAX_DISCOUNT_PERCENT_WITHOUT_CONFIRMATION}% confirmation threshold. Do not send this — ` +
+        `either drop the discount, or tell the customer you'll confirm with Ahmed first ` +
+        '(and actually call notify_owner if you do).',
+    };
   }
   return { ok: true };
 }

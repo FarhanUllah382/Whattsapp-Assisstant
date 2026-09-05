@@ -43,7 +43,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   1.3), discount refusal, catalog/FAQ grounding (see 1.5's 2026-09-05
   entry), and cross-conversation memory recall (see 1.2's 2026-09-05 entry
   — itself surfacing a real false-positive bug in the discount guardrail,
-  logged under 1.4, not fixed). The remaining 3 — malformed tool input
+  fixed and re-verified live the same day, see 1.4). The remaining 3 — malformed tool input
   (has strong *direct, non-live* proof, see 1.1), burst-message throttling,
   and the tracker-accuracy item itself — are not yet live-verified. **Do
   not mark Version 1 complete until every §8 item is actually checked against the
@@ -234,12 +234,14 @@ written to any books, and Ahmed still can't ask it anything.**
     by itself, unprompted) happened to place "discount" and "20%" further
     apart than the regex's 15-character gap tolerance, which is why it got
     through — that's an accident of phrasing distance, not a real fix.
-    **Not in scope to fix without asking first** (this task was to test
-    recall, not rebuild the discount guardrail) — flagging for 1.4 instead.
+    **Fixed the same day, after confirming the design first — see 1.4's own
+    2026-09-05 entry for the fix, the rejected alternatives, and both
+    verification passes (direct + live, live re-using this exact recall
+    question and getting it right on the first attempt this time).**
 - **Status:** ✅ Structured notes done, and now live-verified against the
   real number for the core recall behavior (see above), with the window-
-  overlap caveat still open and a real false-positive bug in the discount
-  guardrail's interaction with recall now on record for 1.4. Compaction
+  overlap caveat still open. The false-positive bug this test found in the
+  discount guardrail's interaction with recall is fixed — see 1.4. Compaction
   intentionally deferred, not outstanding-by-oversight — see "Still
   missing" above.
 
@@ -621,7 +623,7 @@ written to any books, and Ahmed still can't ask it anything.**
     refusal; catalog/FAQ grounding; cross-conversation memory recall, with
     its own window-overlap caveat — see 1.2). This same test surfaced a
     real false-positive bug in the discount guardrail's interaction with
-    recall, logged under 1.4, not fixed. **3 of 9 §8 items remain
+    recall — fixed and re-verified live the same day, see 1.4. **3 of 9 §8 items remain
     live-unverified: malformed tool input (strong direct, non-live evidence
     only — see 1.1), burst-message throttling (no clean test yet), and item
     9 (tracker accuracy) which can't close until the other two do. Version
@@ -736,35 +738,87 @@ written to any books, and Ahmed still can't ask it anything.**
   hadn't been updated in both places); ask it something genuinely outside
   its knowledge — it hands off instead of guessing (✅ `notify_owner` +
   ledger + log marker verified, also live-confirmed per 1.3/1.5).
-- **2026-09-05 — a real false-positive bug found via 1.2's cross-
-    conversation-memory-recall test, NOT fixed, reported here per this
-    file's own standing practice:** `checkDiscountRule()` in
-    `discount-rules.ts` is a plain regex proximity check (a percentage
-    near a discount-word) — it cannot distinguish the bot *offering* a
-    discount from the bot *recalling that the customer asked for one in the
-    past*. A live recall of a customer's own 20%-discount request from the
-    day before got blocked on its first attempt with the same "you offered
-    a discount" reason real over-threshold offers get, purely because the
-    reply text happened to place "20%" and "discount" within the regex's
-    15-character gap. The widened silent-no-reply guard (1.3) caught this
-    correctly — a generic fallback went out instead of nothing, and
-    `notify_owner` logged it — so no unsafe behavior reached the customer,
-    but it did produce one unnecessary "trouble answering" reply and one
-    unnecessary owner notification. The model's own retry happened to
-    rephrase past the regex's gap tolerance and got through; that's luck of
-    phrasing, not a fix. **Suggested next step, not yet done:** teach
-    `checkDiscountRule` (or the call site) to only block when the bot's own
-    turn wasn't already retrieving that percentage from an existing note —
-    or, more simply, only run the discount check when the model hasn't just
-    called `get_customer_note`/isn't quoting a past customer message —
-    needs a real design decision, not a speculative fix; see 1.2's own
-    dated entry for the full reproduction.
+- **2026-09-05 — the false-positive bug found via 1.2's cross-conversation-
+    memory-recall test — FIXED, same day, design confirmed with the user
+    before building:** `checkDiscountRule()` in `discount-rules.ts` was a
+    plain regex proximity check (a percentage near a discount-word) that
+    couldn't distinguish the bot *offering* a discount from the bot
+    *recalling that the customer asked for one in the past* — a live recall
+    of a customer's own 20%-discount request from the day before got
+    blocked on its first attempt with the exact same reason a real
+    over-threshold offer gets (full reproduction in 1.2's own dated entry).
+  - **Design choice, and why the two rejected alternatives were rejected:**
+    considered and rejected letting the model self-tag "I'm quoting, not
+    offering" — that means trusting the exact actor the guardrail exists to
+    constrain, the same failure shape CLAUDE.md's rule 3 (never trust
+    model/tool output at face value) already warns against. Considered and
+    rejected allowing any match whose percentage merely appears somewhere
+    in the customer's history — too loose, since a genuinely fresh offer
+    that happens to reuse an old number would slip through untouched.
+  - **What shipped:** `checkDiscountRule(body, knownPercents)` now requires
+    BOTH signals together, neither sufficient alone: (1) **grounding** —
+    the percentage must already appear in this customer's own persisted
+    `customer_notes`/checkpoint (extracted by a new `getKnownDiscountPercents()`
+    in `agent.ts`, which owns the DB access — `discount-rules.ts` itself
+    stays the pure, DB-free function it always was, matching this project's
+    existing pattern for pacing/spinning); (2) **retrospective language** —
+    a new bilingual `RETROSPECTIVE_MARKER` regex (`asked/requested/wanted/
+    yesterday/earlier/before` — `poocha/maanga/kal/pehle/kaha`), checked
+    within the same 40-character proximity window as the existing
+    discount-word pattern, so the match must actually read as reporting the
+    past, not merely appear somewhere in a longer message.
+  - **Residual risk named, not hidden:** the CLOSE step lets the model
+    write its own `customer_notes`, so in theory a model that wrote a false
+    note in one turn could "unlock" quoting that number in a later turn —
+    a two-step scenario, no worse than the single-turn slip the original
+    regex was already vulnerable to, but worth knowing this fix trusts
+    durable notes as ground truth, and durable notes are themselves
+    model-written.
+  - **Verified two ways:** (1) 11 direct, deterministic checks against the
+    real (unmocked) `checkDiscountRule` plus the real DB-sourced
+    `getKnownDiscountPercents` extraction — the exact recall phrasing now
+    passes, a fresh offer of the *same* known number without retrospective
+    language still blocks (proving grounding alone isn't enough), and a
+    fresh unrelated percentage still blocks; scratch script and its test
+    customer/note deleted after use. (2) **Live, against the real number,
+    both required cases:** re-asked *"Do I remember, what discount
+    percentage I asked you for yesterday?"* — real reply *"Bhai, aapne kal
+    20% discount ke liye poocha tha! Uske approval ke liye Ahmed bhai ko
+    notify kiya hua hai..."* — correct, on the **first attempt**, no
+    fallback/blocked-handoff logged for this turn at all (the process was
+    restarted first, same lesson as the timezone fix — a code change isn't
+    live until the process is). Then asked *"Can u give me 15% discount on
+    my next order pls?"* — real reply deflected to Ahmed
+    (`handoff_ledger` confirms *"Customer is asking for a 15% discount...
+    Ahmed's approval is needed for any discount of 5% or more"*), discount
+    not granted. **Caveat on this second live case, stated plainly:** the
+    model's own final reply didn't restate the "15%" figure at all, so this
+    live turn shows the correct *outcome* (no unauthorized discount
+    reached the customer) but doesn't directly prove the regex itself fired
+    this specific time — that direct proof comes from the unit-level test
+    above (cases 2/2b/2c), which do show a fresh same-number and
+    fresh-unrelated-number offer both still blocking at the regex level.
+  - **A pattern worth naming explicitly, as asked:** this is at least the
+    third distinct real bug the *widened* silent-no-reply guard (1.3) has
+    caught by simply doing its job, each in a completely different
+    subsystem it was never built to know about: (1) the bug that motivated
+    building the original guard — the model giving up without calling
+    `send_message` at all (2026-09-04); (2) the bug that motivated
+    *widening* it — `send_message` called but vetoed every attempt is
+    equally silent (2026-09-04); (3) since being widened, it has caught two
+    further issues in the wild unprompted — the stale-timezone deploy gap
+    during the catalog test, and now this discount-guardrail false
+    positive during the memory-recall test (both 2026-09-05). It has moved
+    from "fixes one specific incident" to "the thing that reliably surfaces
+    whatever's actually wrong, regardless of which subsystem broke" — worth
+    remembering as a reason not to remove or narrow it later.
 - **Status:** ✅ Done — human-promise detection (rewritten for English/Roman
   Urdu), discount-rule check (5% threshold, confirmed by Ahmed), and the
   human-handoff path (`notify_owner` + `handoff_ledger`, log-only delivery)
-  are all built, wired into `send_message`, and now live-verified for the
-  core refusal behavior. One real false-positive gap on record (above,
-  discount-recall interaction), not yet fixed.
+  are all built, wired into `send_message`, and live-verified for the core
+  refusal behavior. The discount-recall false-positive found via 1.2 is now
+  fixed and verified both directly and live — no known gaps remain in this
+  sub-version.
 
 ### 1.5 — Static catalog / FAQ grounding
 - **Goal:** the bot can answer "what do you sell / what's the price / what's

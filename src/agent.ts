@@ -103,6 +103,31 @@ function getPacingState(timezone: string): PacingState {
   return { lastSentAt, sentToday, numberActivatedAt: null };
 }
 
+// Percentages already on record for this customer — from their own
+// persisted notes/checkpoint, not anything this turn's model output could
+// invent — so discount-rules.ts can tell a recall of a past ask apart from
+// a fresh offer. See discount-rules.ts's own comment for why this alone
+// isn't sufficient (paired there with a retrospective-language check).
+const PERCENT_IN_TEXT = /\b(\d{1,3})\s*%/g;
+
+function getKnownDiscountPercents(customerId: number): Set<number> {
+  const notes = db
+    .prepare('select body from customer_notes where customer_id = ? and superseded_by is null')
+    .all(customerId) as { body: string }[];
+  const checkpoint = db
+    .prepare('select summary from checkpoints where customer_id = ?')
+    .get(customerId) as { summary: string } | undefined;
+
+  const percents = new Set<number>();
+  for (const text of [...notes.map((n) => n.body), checkpoint?.summary ?? '']) {
+    for (const m of text.matchAll(PERCENT_IN_TEXT)) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n)) percents.add(n);
+    }
+  }
+  return percents;
+}
+
 function getRecentOutboundWindow(limit: number): RecentCopy[] {
   const rows = db
     .prepare("select body from messages where direction = 'outbound' order by id desc limit ?")
@@ -199,7 +224,7 @@ function makeSendMessageTool(
         // Unauthorized-discount guardrail: block before it ever reaches the
         // customer. A teaching-text reason, same as every other guardrail
         // here, so the model can reformulate instead of the turn crashing.
-        const discountCheck = checkDiscountRule(body);
+        const discountCheck = checkDiscountRule(body, getKnownDiscountPercents(ctx.customerId));
         if (!discountCheck.ok) {
           return { ok: false, error: discountCheck.reason };
         }
