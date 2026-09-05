@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 
 | Version | Delivers | Status |
 |---|---|---|
-| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on only 2 of CLAUDE.md §8's 9 checklist items so far |
+| 1.x | Promise 1 + 2 — talks to customers, remembers conversations | 🟡 All 5 sub-versions built; live-verified against the real number on 5 of CLAUDE.md §8's 9 checklist items so far (updated 2026-09-05) |
 | 2.x | Promise 3 — keeps the books automatically | 🔲 Not started |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
@@ -37,14 +37,15 @@ in dependency order. Version 4 is stretch work beyond the original spec.
   a real WhatsApp number (`+923128346256`) is linked and has produced one
   real, correct reply to one real, unsolicited customer message (see 1.3
   below). But CLAUDE.md §8's actual Definition of Done for "Version 1
-  complete" has 9 checklist items, and only 2 of them (real-reply, and
-  out-of-scope-question → handoff) have been verified against the real
-  number so far — the rest (crash-and-retry with no duplicate send,
-  malformed-input resilience, cross-conversation memory recall, burst
-  throttling, discount refusal, catalog grounding) remain verified only via
-  earlier mocked-model tests, not live. **Do not mark Version 1 complete
-  until every §8 item is actually checked against the real number** — see
-  1.3's status note below for the full breakdown.
+  complete" has 9 checklist items. **Updated 2026-09-05:** 5 of them are now
+  verified against the real number — real-reply, out-of-scope-question →
+  handoff, crash-and-retry (with a caveat, see 1.3), discount refusal, and
+  catalog/FAQ grounding (see 1.5's 2026-09-05 entry). The remaining 4 —
+  malformed-input resilience, cross-conversation memory recall, burst-
+  message throttling, and the tracker-accuracy item itself — remain
+  verified only via earlier mocked-model tests, not live. **Do not mark
+  Version 1 complete until every §8 item is actually checked against the
+  real number** — see 1.3's status note below for the full breakdown.
 
 ---
 
@@ -499,6 +500,19 @@ written to any books, and Ahmed still can't ask it anything.**
     grounding — remain verified only via earlier mocked-model, local-only
     tests. **Version 1 still should not be marked complete** — 5 of 9 §8
     items remain live-unverified.
+  - **§8 tally, updated 2026-09-05:** catalog/FAQ grounding is now also
+    live-verified (see 1.5's own dated entry above) — **5 of 9 items
+    live-verified** (real-reply; out-of-scope → handoff; crash-and-retry
+    with the caveat above; discount refusal; catalog/FAQ grounding). Still
+    live-unverified: malformed/unexpected tool input not crashing a turn,
+    cross-conversation memory recall across separate days, and burst-message
+    throttling (the "outside hours doesn't fire immediately" half got
+    incidentally demonstrated today by the timezone bug itself, but that
+    was a bug-triggered side effect during an unrelated test, not a clean
+    deliberate test of it — doesn't count as verifying that item). **Version
+    1 still should not be marked complete** — 4 of 9 §8 items remain
+    live-unverified, and item 9 (tracker accurately reflects all of the
+    above) can't honestly be checked off until items 1-8 actually are.
 
 - **2026-09-05 — `PACING_TIMEZONE` set, and the silent-no-reply guard
   widened to a second failure shape:**
@@ -665,19 +679,90 @@ written to any books, and Ahmed still can't ask it anything.**
   don't-guess instruction; an empty query is rejected. `npx tsc --noEmit`
   passes clean.
 - **Definition of done:** ask about something in the document — correct
-  answer (✅ verified for all three starter sections); ask about something
-  not in it — bot says it'll confirm, never guesses (✅ verified at the tool
-  level — `found: false` plus the instruction; not yet observed through a
-  live customer conversation, which waits on 1.3 same as every other
-  sub-version here).
-- **Status:** ✅ Done — catalog file, search tool, and the
-  don't-invent-an-answer discipline are all built and verified locally.
-  Content is placeholder text for Ahmed to replace with the real catalog;
-  full proof against a live conversation waits on 1.3.
+  answer (✅ verified for all three starter sections, both locally and now
+  live — see below); ask about something not in it — bot says it'll
+  confirm, never guesses (✅ verified at the tool level and now live too).
+- **2026-09-05 — live-verified against the real number, the last of this
+  sub-version's own two test cases (see the §8 tally note further below for
+  where this leaves Version 1 as a whole):**
+  1. **Covered question — ✅ PASS.** Real customer asked *"Could u tell me,
+     that how many ways do I return something if it doesn't fit"* → real
+     reply: *"Agar size fit na aaye, toh aap item delivery ke 7 days ke
+     andar return kar sakte hain, shart ye hai ke wo unworn ho aur tags
+     sath hon. Refund aapke original payment method mein 5 business days ke
+     andar mil jata hai!"* — matches `catalog.md`'s Return policy section
+     exactly (7 days, unworn + tags, 5-business-day refund to original
+     method), just phrased naturally in Roman Urdu/English per the system
+     prompt's style instruction.
+  2. **Uncovered question — ✅ PASS.** Same customer asked *"Do I have any
+     physical store somewhere so that I can visit to it or no it is online
+     only?"* — nothing in `catalog.md` covers a physical location. Real
+     reply: *"Bhai, physical store ke baray mein main Ahmed bhai se confirm
+     karke aapko batata hoon!"* — no invented answer. `handoff_ledger`
+     confirms `notify_owner` fired with reason *"Customer is asking if we
+     have a physical store they can visit or if it's online only. Need
+     Ahmed's confirmation on our store status/address."*
+  - **A real deployment gap surfaced along the way, fixed during this same
+    test, not a bug in the grounding logic itself:** the first attempt at
+    both questions was silently vetoed by pacing — reason logged as
+    `fora da janela de envio (7h-22h, UTC)` — even though it was ~9:30am in
+    Karachi (inside the window). Root cause: the running `tsx src/server.ts`
+    process had been started *before* the 2026-09-05 `PACING_TIMEZONE`
+    default fix (`56f4d8d`) was committed — `PACING_DEFAULTS.timezone` is
+    read from `process.env` once at process start, so the live process kept
+    the old `UTC` default in memory even after the fix landed on disk and
+    was pushed. Per the veto-fallback guard's own (correct) design, the
+    fallback send was skipped for both, since it was a pure pacing veto —
+    so both test messages initially got a silent handoff instead of a
+    reply, and only sending both again *after restarting the process*
+    produced the PASS results above. **Lesson for this project, not just
+    this bug:** a config/env default fix isn't actually live until the
+    running process is restarted — worth remembering for any future
+    knob change, not just this one.
+  - **Content caveat, unchanged from 2026-09-02:** `catalog.md`'s three
+    sections are still the placeholder text ("Example entry — replace with
+    your real product lineup," etc.), not Ahmed's actual policies. Today's
+    test proves the *mechanism* (answer correctly from the document;
+    deflect instead of inventing when not covered) works end-to-end against
+    the real number — it does not mean the content customers currently see
+    is Ahmed's real catalog. Filling in real content is a content task for
+    Ahmed, not a code task, and isn't blocking on anything.
+- **Status:** ✅ Done, and now the one sub-version in this file with full
+  live proof against the real number, both cases. Catalog file, search
+  tool, and the don't-invent-an-answer discipline are all built and
+  verified locally *and* live. Content is still placeholder text for Ahmed
+  to replace with his real catalog (see caveat above) — that's a content
+  gap, not a code gap.
 
 **v1 exit criteria:** a customer can message the number any time, get a
 fast, safe, on-brand reply that remembers them. No orders, stock, or
 payments exist yet.
+
+**The Version 1 journey so far, for the record (written 2026-09-05, status
+not complete — see §8 tally above):** all five sub-versions were built
+against the mocked-model, local-only bar first, then pushed through real
+WhatsApp testing one real bug at a time rather than declared done on
+inspection. That live testing was not a formality — it found and fixed a
+string of genuine bugs a code read alone would have missed: a Gemini-quota
+failure that silently produced zero reply, a LID-addressed contact that
+silently failed to send, a group-chat filter that missed a resolved LID
+pointing at a group, a turn that ended cleanly with no reply because the
+model gave up without calling `send_message`, a second and subtler version
+of that same silent-reply gap where `send_message` was called but vetoed
+every time, a millisecond-precision bug in the anti-ban throttle, and — as
+recently as today — a live process still running on a stale timezone
+default fifteen minutes after the fix that corrected it had already been
+committed. Two premature "Version 1 done" claims were made and walked back
+in this same file, both times because a real test surfaced something a
+status update had assumed rather than checked. As of today, 5 of CLAUDE.md
+§8's 9 Definition-of-Done items are proven against the real number
+(real-reply, crash-and-retry, discount refusal, out-of-scope handoff, and
+catalog/FAQ grounding); 4 remain — malformed tool input, cross-conversation
+memory recall, burst-message throttling, and the tracker-accuracy item that
+can only close once the other three do. The pattern that got this far,
+and that the remaining items should keep following, is: build it, mock-test
+it locally, then prove it against the real number before crossing it off —
+not the other way around.
 
 ---
 
