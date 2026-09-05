@@ -4,15 +4,21 @@ This file governs how Claude Code works in this repository. Read it in
 full before making any change. If anything you're about to do conflicts
 with a rule below, the rule wins — stop and ask, don't quietly proceed.
 
-**Current mission: complete Version 2 only.** Nothing else. Version 1 is
-complete and live-verified — see `PROJECT-TRACKER-FINAL.md`'s "Version 1 —
-final status" section for the full proof, including everything explicitly
-carried forward unresolved (Version 1 completion did not fix the Node v24
-crash mitigation, the per-number health circuit, STOP/opt-out handling, or
-several other named items — see §3 below for why Version 2 must not make
-any of those worse). See §3 for the exact, exhaustive scope of Version 2.
-Everything not listed there is explicitly out of scope for this phase, and
-a large portion of it is *permanently* out of scope for this project
+**Current mission: Version 2, plus Version 3.1/3.2 as an explicit, time-
+boxed exception (see §3).** Version 1 is complete and live-verified — see
+`PROJECT-TRACKER-FINAL.md`'s "Version 1 — final status" section for the
+full proof, including everything explicitly carried forward unresolved
+(Version 1 completion did not fix the Node v24 crash mitigation, the
+per-number health circuit, STOP/opt-out handling, or several other named
+items — see §3 below for why later work must not make any of those
+worse). Version 2 is built and locally verified end to end; only its
+*live* verification against the real number remains, gated on the daily
+send cap, not on any remaining code work. **§3 also documents a deliberate
+exception, made consciously by the user, not a drift in scope:** Version
+3.1 and 3.2 are open for building and local verification now, in parallel
+with waiting on that cap — see §3 for the exact reasoning and boundary.
+Everything not listed in §3 is explicitly out of scope for this phase,
+and a large portion of it is *permanently* out of scope for this project
 altogether (§6) — read that section before importing any pattern from the
 reference repository.
 
@@ -51,69 +57,116 @@ a bug.
 
 ---
 
-## 3. Version 2 — the ONLY thing in scope right now
+## 3. Current scope: Version 2 (primary) + Version 3.1/3.2 (explicit exception)
 
-Full detail lives in `PROJECT-TRACKER-FINAL.md` §Version 2. Summary below
-for orientation; the tracker file is authoritative if the two ever
-disagree.
+Full detail lives in `PROJECT-TRACKER-FINAL.md` §Version 2 and §Version 3.
+Summary below for orientation; the tracker file is authoritative if the
+two ever disagree.
+
+### Version 2 — built and locally verified; live verification pending
 
 | Sub-version | Goal | Status |
 |---|---|---|
-| 2.1 | Retail data model — a real debit/credit ledger, balance always reconstructable from history, not a single mutable field | 🟡 Placeholder schema exists (`customers`/`products`/`orders`); ledger formalization not started |
-| 2.2 | Order-status tracking — forward-only `received → confirmed → paid → shipped → delivered`, invalid transitions rejected with a teaching error | 🔲 Not started |
-| 2.3 | Automatic order & payment extraction — conversation → real order/line-item/payment rows, zero manual entry, plus a safety net catching anything mentioned but never explicitly logged | 🔲 Not started |
-| 2.4 | Live stock-aware replies — `check_stock` already queries real quantity; still needs stock to actually decrement on order confirmation | 🟡 Basic lookup exists; decrement-on-order not started |
-| 2.5 | Follow-up tracking tied to unpaid orders — an owner-*queryable* read path ("what's pending"), not the bot auto-firing reminders on its own | 🔲 Not started |
+| 2.1 | Retail data model — a real debit/credit ledger, balance always reconstructable from history, not a single mutable field | ✅ Built, deterministically verified (2026-09-05) |
+| 2.2 | Order-status tracking — forward-only `placed → confirmed → paid → shipped → delivered`, invalid transitions rejected with a teaching error | ✅ Built, deterministically verified (2026-09-05) |
+| 2.3 | Automatic order & payment extraction — conversation → real order/line-item/payment rows, zero manual entry, plus a safety net catching anything mentioned but never explicitly logged | ✅ Built, deterministically verified (2026-09-05) |
+| 2.4 | Live stock-aware replies — `check_stock` queries real quantity; stock actually decrements on order confirmation and restores on a pre-shipping cancellation | ✅ Built, deterministically verified (2026-09-05) |
+| 2.5 | Follow-up tracking tied to unpaid orders — an owner-*queryable* read path ("what's pending"), not the bot auto-firing reminders on its own | ✅ Built, deterministically verified (2026-09-05) |
 
-**Version 2 is done when:** every order and payment discussed in a normal
-customer conversation is automatically and correctly recorded, with zero
-manual data entry by Ahmed — and anything mentioned but never explicitly
-confirmed via a tool call is still caught, not silently lost. Stock is
-live-accurate: a stock check reflects the real current quantity, and a
-confirmed order decrements it by the right amount. Order status only ever
-moves forward, with an invalid backward transition rejected via a
-teaching-text error, never a crash. Every unpaid order has a follow-up
-tracked against it, queryable by Ahmed on demand. Owner-facing analytics
-Q&A and proactive alerts do **not** need to work yet — that is Version 3,
-a separate phase, not to be started until Version 2's definition of done
-is fully met.
+**Version 2 is done when**, beyond the deterministic verification above,
+**all of it has also been checked against the real number**: every order
+and payment discussed in a normal customer conversation is automatically
+and correctly recorded, with zero manual data entry by Ahmed — and
+anything mentioned but never explicitly confirmed via a tool call is
+still caught, not silently lost. Stock is live-accurate: a stock check
+reflects the real current quantity, and a confirmed order decrements it
+by the right amount. Order status only ever moves forward, with an
+invalid backward transition rejected via a teaching-text error, never a
+crash. Every unpaid order has a follow-up tracked against it, queryable
+by Ahmed on demand. **This live-verification pass has not happened yet**
+— it's gated on the daily anti-ban send cap resetting, not on any
+remaining code work; see `PROJECT-TRACKER-FINAL.md` for the exact plan
+and current status. Do not report Version 2 complete until it has.
 
-**Carried forward from Version 1, unresolved — Version 2 work must not
-make any of these worse, even incidentally:**
+### Explicit exception: Version 3.1 and 3.2 opened early
+
+**This is a deliberate, conscious choice by the user — not scope drift,
+and not a precedent for skipping ahead by default in future sessions.**
+Reason, stated plainly: the user's Claude Code usage limit resets
+mid-month, leaving a hard deadline of roughly two days to get as much
+done as possible. The only thing actually time-gated right now is *live*
+verification against the real WhatsApp number (the daily send cap); build
+and local-verification work is not blocked by anything, so it makes sense
+to keep producing it in parallel rather than sitting idle waiting on a
+clock.
+
+**The exception covers exactly this, no more:**
+- Building and **locally, deterministically** verifying 3.1 (owner
+  recognition & dedicated owner turn) and 3.2 (owner analytics Q&A tools)
+  is permitted now, even though Version 2 has not finished its own live
+  verification and even though 3.2's own stated dependency
+  (`PROJECT-TRACKER-FINAL.md`: "Depends on: 3.1, version 2 complete") is
+  not yet fully satisfied.
+- 3.3 (WhatsApp-delivered alerts) and anything beyond 3.1/3.2 remain
+  **out of scope** — this exception was not extended to the rest of
+  Version 3.
+- **Live-testing anything in Version 3, against the real number, remains
+  fully gated**, exactly like Version 2's own live testing — on the send
+  cap allowing it, and additionally on Version 2's own live verification
+  actually completing first. Building ahead does not change that gate.
+
+| Sub-version | Goal | Status |
+|---|---|---|
+| 3.1 | Owner recognition & dedicated owner turn — sender-identity check, a distinct turn kind for owner messages that never talks to a customer | 🔲 Not started — opened for building now under this exception |
+| 3.2 | Owner analytics Q&A tools — `sales_today`, `unpaid_customers`, `top_selling_product`, `pending_followups`, a small fixed set of safe report functions, never a freely-written SQL query from the model | 🔲 Not started — opened for building now under this exception |
+
+**The one rule this exception must not break, stated as plainly as
+possible: code existing and being locally verified is not the same as a
+version being "done."** Whoever reads this file next — including a future
+instance of Claude — must not treat Version 2 or Version 3 as complete,
+or safe to build further on top of without checking, until each has
+actually been verified against the real number. If both versions'
+`PROJECT-TRACKER-FINAL.md` entries end up saying "built and locally
+verified, live verification pending" at the same time, that is the
+correct, honest state produced by this exception — not a mistake to
+paper over.
+
+**Carried forward from Version 1, unresolved — neither Version 2 nor
+Version 3 work under this exception may make any of these worse, even
+incidentally:**
 - **The Node v24 / `better-sqlite3` native crash is still only mitigated
-  (a dev-only shell restart loop), not fixed** — root cause untouched.
-  Version 2 adds order/payment/ledger writes to nearly every turn, meaning
-  more `db.prepare()` calls on the exact same crash-prone path. Do not
-  layer speculative retry logic or defensive transaction-wrapping around
-  this to compensate — if Version 2 work makes the crash noticeably more
-  frequent, that's a signal to actually fix the root cause (or escalate to
-  the user), not to paper over it with more workarounds.
+  (a dev-only shell restart loop), not fixed** — root cause untouched, and
+  it has recurred during ordinary local testing multiple times since
+  (see `PROJECT-TRACKER-FINAL.md`). Version 2 already added order/payment/
+  ledger writes to nearly every turn; do not layer speculative retry logic
+  or defensive transaction-wrapping around this to compensate — if this
+  work makes the crash noticeably more frequent, that's a signal to
+  actually fix the root cause (or escalate to the user), not to paper over
+  it with more workarounds.
 - **`notify_owner` handoff delivery is still log-only**, not a real
-  WhatsApp message to Ahmed's own number. Not Version 2's job to fix, but
-  don't build Version 2 features that assume it already sends a real
-  message.
+  WhatsApp message to Ahmed's own number. Not this work's job to fix, but
+  don't build features that assume it already sends a real message.
 - **Per-number health circuit and STOP/opt-out handling are still not
-  built.** Not Version 2's job either — don't let new send paths (e.g. an
-  automatic follow-up reminder in 2.5) skip past guardrails that a manual
+  built.** Don't let new send paths skip past guardrails that a manual
   reply already goes through, on the assumption these will exist later.
 - **No real async job queue exists** for outside-hours retry — a message
   outside the sending window still just doesn't fire, it doesn't queue and
-  auto-send later. If 2.5's follow-up firing needs "send later," that's new
-  infrastructure, not something to assume already exists.
-- **Two narrow live-verification gaps remain genuinely open, not
-  Version 2's job to close, but don't regress them either:** the crash
+  auto-send later.
+- **Two narrow live-verification gaps remain genuinely open:** the crash
   window between `sendToCustomer()` succeeding and `send_ledger` being
   marked `'sent'`; and cross-conversation memory recall proven correct
   across a real day boundary, but not yet proven to survive a fact aging
   out of the raw 20-message window `agent.ts` loads per turn.
 - **`catalog.md`'s content is still placeholder text**, not Ahmed's real
-  catalog — a content task for Ahmed, unrelated to Version 2, not something
-  to touch as part of this phase.
+  catalog — a content task for Ahmed, not something to touch as part of
+  this work (unless the user is actively dictating real content, which is
+  its own separate, explicit task).
 
-**Do not begin Version 3 work under this file's authority.** If a task
-description asks for owner recognition, analytics Q&A, or WhatsApp-
-delivered alerts, stop and confirm with the user first — that work
-belongs to a later phase with its own CLAUDE.md scope, not this one.
+**Do not begin Version 3.3 or any work beyond 3.1/3.2 under this file's
+authority.** If a task description asks for WhatsApp-delivered alerts or
+anything past what's explicitly opened above, stop and confirm with the
+user first — that work belongs to a later phase with its own CLAUDE.md
+scope, not this one.
 
 ---
 

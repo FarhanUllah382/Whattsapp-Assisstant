@@ -14,8 +14,25 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
 | 2.x | Promise 3 — keeps the books automatically | 🟡 All 5 sub-versions (2.1-2.5) built and deterministically verified (2026-09-05) — none yet live-tested against a real conversation, see each sub-version's own status |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
+| 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started, except 3.1/3.2 opened early as an explicit exception (2026-09-05) — see the note directly below the table |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
+
+**Note on the 3.x exception, so anyone reading this later understands why
+Version 3 work started before Version 2 was fully closed out:** the user
+made a deliberate, explicit call to open 3.1 and 3.2 for building and
+local verification while Version 2 sat waiting on its live-verification
+step (gated on the daily anti-ban send cap, not on any remaining code
+work) — reason stated plainly: a Claude Code usage-limit reset left a
+hard two-day deadline, and only live testing was actually time-gated, not
+build/local-verify work. This is documented as policy in CLAUDE.md §3, not
+just here. **The boundary that makes this safe, restated:** 3.3 and beyond
+stayed out of scope; nothing in Version 3 gets live-tested until Version 2
+itself has been, regardless of how much Version 3 code exists by then;
+and "built + locally verified" is never to be read as "done" for either
+version until the real-number pass actually happens. If this file ever
+shows both Version 2 and Version 3 sub-versions marked "built, locally
+verified, live-verification pending" at the same time, that's the correct
+result of this exception, not a sign something was skipped by mistake.
 
 ---
 
