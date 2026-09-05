@@ -13,7 +13,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | 🟡 In progress — 2.1-2.4 done (2026-09-05); 2.5 status not updated here — see 2.5's own section |
+| 2.x | Promise 3 — keeps the books automatically | 🟡 All 5 sub-versions (2.1-2.5) built and deterministically verified (2026-09-05) — none yet live-tested against a real conversation, see each sub-version's own status |
 | 3.x | Promise 4 — Ahmed can just ask it questions | 🔲 Not started |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1231,13 +1231,16 @@ being marked done. Nothing here was declared complete on inspection alone.
 - **The burst-throttling concurrency race** (2026-09-05) — described in
   item 5 above; fixed with `withSendLock()`.
 - **The Node v24 native-module crash** (first surfaced 2026-09-04,
-  recurred during today's own testing) — a random, load-independent
-  assertion crash in `better-sqlite3`'s native bindings on process
-  cleanup. **Explicitly NOT fixed, only mitigated** — a dev-only shell
-  auto-restart loop (not part of the committed project) recovers within
-  ~1-2s of a crash; the actual Node 24 / native-binding incompatibility has
-  never been touched. **This is not resolved by Version 1 completion** —
-  do not read anything above as implying otherwise.
+  recurred during today's own testing, and recurred again during 2.5's
+  local testing in a separate worktree — same known issue every time, not
+  a new one, folded in here rather than logged separately) — a random,
+  load-independent assertion crash in `better-sqlite3`'s native bindings on
+  process cleanup. **Explicitly NOT fixed, only mitigated** — a dev-only
+  shell auto-restart loop (not part of the committed project) recovers
+  within ~1-2s of a crash; the actual Node 24 / native-binding
+  incompatibility has never been touched. **This is not resolved by
+  Version 1 completion, nor by any Version 2 work since** — do not read
+  anything above as implying otherwise.
 
 ### Standing operational fact, not a bug
 
@@ -1357,13 +1360,12 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   migration underneath it risked a crash on the next real message) and
   restarted afterward with the new code. Scratch script and its test
   rows/product deleted after use.
-- **Not done, deliberately, per explicit scope for this session:** no new
-  AI-facing tool exposes order-status transitions to the model yet — this
-  session was scoped to the data model and its enforcement, verified
-  locally, not wiring it into a live conversation. That wiring (a tool the
-  model calls, or extraction logic that infers it) is 2.2's/2.3's own
-  remaining work, not done here. Whether/how to live-test this against real
-  messages is a separate decision, not yet made.
+- **Not done here, deliberately, per explicit scope for this session —
+  since resolved, see 2.2's own section:** no new AI-facing tool exposed
+  order-status transitions to the model as of this session; that wiring
+  was 2.2's own remaining work, and `update_order_status` was built there
+  the same day. Whether/how to live-test the full flow against real
+  messages is still a separate decision, not yet made (see 2.2/2.4).
 - **Built from DeskcommCRM:** nothing for the ledger — no analog exists
   anywhere in the module, confirmed during extraction. The order-status
   *mechanism* re-implements `agent/lead-state.ts`'s pattern (did not
@@ -1375,9 +1377,9 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   verified above, four different shapes).
 - **Status:** ✅ Done — real ledger and forward-only order-status state
   machine both built, migrated safely against the real dev database, and
-  verified deterministically. Not yet wired into any AI-facing tool or
-  live-tested against real messages (see "Not done" above) — a separate,
-  not-yet-made decision.
+  verified deterministically. Now wired into a real AI-facing tool too
+  (2.2's `update_order_status`) and stock-aware (2.4) — not yet
+  live-tested against real messages, a separate, not-yet-made decision.
 
 ### 2.2 — Order-status tracking
 - **Goal:** every order has a clear, queryable status that only moves
@@ -1621,14 +1623,66 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   just the bot silently acting on schedules. Important distinction: "kisko
   follow-up karna hai?" is Ahmed *querying* what's pending — that's a
   separate tool from the one that fires reminders automatically.
-- **Built from DeskcommCRM — extracted and verified, staged:**
-  `cron/schedule.ts` (pure scheduling math, no I/O) for the firing side.
-  The read/query path has no DeskcommCRM equivalent — DeskcommCRM's version
-  only fires automatically, it never exposes a "list what's scheduled"
-  query. That's new work either way.
+- **Done (2026-09-05), built in a separate worktree while main progressed
+  through 2.4, then reviewed and merged from this session:** new
+  `src/followups.ts` — `getPendingFollowups(now?)`, a pure query (no stored
+  `follow_ups` table, no background job) over real `orders`/`customers`
+  state: an order counts as pending once it's been `'placed'` or
+  `'confirmed'` (i.e. short of `'paid'`) for 2+ days, flagged `overdue`
+  past 7. Deliberately **derived, not stored** — 2.1's forward-only state
+  machine is already the single source of truth for "is this order still
+  unpaid," so a separate table tracking the same fact could only drift out
+  of sync or silently stop updating; there's no real job queue yet either
+  (see the carried-forward Version 1 gaps), so a background-firing design
+  wasn't an option regardless. Each result includes the customer's real
+  ledger balance (`getBalance()`, customer-wide — matching how the ledger
+  itself already works, not order-scoped) for context alongside that
+  specific unpaid order. `now` is injectable, same discipline as
+  `decidePacing()` in 1.3, so tests don't depend on the wall clock.
+  **Deliberately does not ship, per its own explicit scope:** no tool
+  fires a reminder or pushes anything to Ahmed on its own — that's the
+  whole "owner-initiated query, not the bot auto-firing" distinction this
+  sub-version is named for. Wiring this into something Ahmed can actually
+  ask over WhatsApp needs a sender-identity check to tell him apart from a
+  customer, which is Version 3.1's job (CLAUDE.md §3/§6), not this one's —
+  this ships only the underlying query capability.
+- **Process note, since this was the first sub-version built outside this
+  session:** found with no test artifacts on disk when this session picked
+  it up — re-verified from scratch here (didn't just trust the other
+  session's unseen report) rather than committing on faith. Reviewed the
+  diff (one new file, zero overlap with 2.4's `orders.ts` changes,
+  confirmed before merging), ran 15 deterministic checks against the real
+  function in that worktree's own isolated DB, then committed on its own
+  branch and merged into `main` with no conflicts.
+- **Verified locally, deterministically — 15 checks:** an empty DB
+  correctly returns nothing; an order under the 2-day window correctly
+  doesn't appear yet; one past it (still `'placed'`) correctly appears,
+  correctly not yet `overdue`, with roughly correct `days_since_placed`;
+  a `'confirmed'` (still-unpaid) order counts too, correctly flagged
+  `overdue` past 7 days; `'paid'`/`'shipped'`/`'delivered'`/`'cancelled'`
+  orders never appear regardless of age (even 30 days); multiple
+  customers' pending orders sort most-overdue-first; `balance_owed`
+  matches the real ledger sum, not a stale/order-scoped number; phone/name
+  join in correctly from `customers`. Scratch script and test rows deleted
+  after use.
+- **Built from DeskcommCRM:** `cron/schedule.ts` (pure scheduling math, no
+  I/O) was extracted and staged for the firing side — **not used here**,
+  since this sub-version deliberately ships only the read/query path, no
+  firing mechanism at all (see "Deliberately does not ship" above); it
+  remains staged in `EXTRACTED-FOR-AHMED/` for whenever a real firing path
+  is actually built. The read/query path itself has no DeskcommCRM
+  equivalent — DeskcommCRM's version only fires automatically, it never
+  exposes a "list what's scheduled" query. That was new work either way.
 - **Definition of done:** an unpaid order automatically has a follow-up
-  associated with it; a query for "pending follow-ups" returns it correctly.
-- **Status:** 🔲 Not started.
+  associated with it (✅ verified above — "associated with it" here means
+  correctly derivable via the query, per this sub-version's own
+  deliberately-derived-not-stored design); a query for "pending
+  follow-ups" returns it correctly (✅ verified above, including sorting
+  and the overdue flag).
+- **Status:** ✅ Done — the query/read path is built and verified
+  deterministically. Not yet exposed to Ahmed in any conversation (needs
+  Version 3.1's owner-recognition work first, out of scope here) and not
+  yet live-tested, same as every other Version 2 sub-version so far.
 
 **v2 exit criteria:** every order and payment that happens in conversation
 is correctly recorded, stock is accurate, and follow-ups are tracked
