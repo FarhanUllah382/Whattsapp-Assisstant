@@ -1,5 +1,80 @@
+# ==========================================
+# Dependencies
+# ==========================================
 node_modules/
+.pnp
+.pnp.js
+
+# ==========================================
+# Databases & Local Data Stores
+# ==========================================
 *.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ==========================================
+# Environment Variables & Secrets
+# ==========================================
 .env
 .env.*
+!.env.example
+
+# ==========================================
+# Build & Distribution Artifacts
+# ==========================================
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# ==========================================
+# Logs & Diagnostic Outputs
+# ==========================================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================================
+# Testing & Code Coverage
+# ==========================================
+coverage/
+.nyc_output/
+
+# ==========================================
+# IDEs & Editor Configurations
+# ==========================================
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# ==========================================
+# Operating System Artifacts
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ==========================================
+# Temporary, Scratch & Local Tooling
+# ==========================================
 _tmp-*
+scratch/
+tmp/
+temp/
+.claude/
+.gemini/
