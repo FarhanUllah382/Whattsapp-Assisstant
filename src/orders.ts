@@ -8,9 +8,9 @@
 // lead-state.ts itself didn't qualify for extraction (DB-coupled, see
 // EXTRACTED-FOR-AHMED/MANIFEST.md's rejected list) — this is a from-scratch
 // reimplementation of the pattern, not a port.
-
-import { db } from './db';
-import { recordCredit } from './ledger';
+// db and recordCredit are loaded lazily inside transitionOrderStatus so pure
+// callers of checkOrderStatusTransition / ORDER_STATUSES don't eagerly trigger
+// native SQLite bindings.
 
 export const ORDER_STATUSES = ['placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled'] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
@@ -96,6 +96,9 @@ export function transitionOrderStatus(orderId: number, next: OrderStatus): Trans
   if (!Number.isInteger(orderId) || orderId <= 0) {
     return { ok: false, error: 'orderId must be a positive whole number.' };
   }
+  const { db } = require('./db') as typeof import('./db');
+  const { recordCredit } = require('./ledger') as typeof import('./ledger');
+
   const row = db.prepare('select status, items_json, customer_id, total from orders where id = ?').get(orderId) as
     | { status: OrderStatus; items_json: string; customer_id: number; total: number }
     | undefined;

@@ -20,7 +20,7 @@
 // available, the same way the original file was refined over several waves.
 
 const TARGET =
-  '(?:ahmed(?:\\s*(?:sahab|bhai))?|owner|boss|malik|manager|the\\s*team|our\\s*team|staff|shop\\s*(?:wale|walo)?|store)';
+  '(?:ahmed(?:\\s*(?:sahab|bhai))?|owner|boss|malik|manager|(?:the\\s*|our\\s*)?team|staff|shop\\s*(?:wale|walo)?|store)';
 
 // Short gap that doesn't cross a sentence boundary — prevents matching a
 // verb from one sentence against a target from an unrelated one.

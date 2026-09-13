@@ -15,7 +15,7 @@ db.exec(schema);
 // created by an earlier version of this file. This adds any such column if
 // it's missing, so an existing dev database doesn't break on startup.
 function ensureColumn(table: string, column: string, columnDdl: string): void {
-  const existingColumns = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
+  const existingColumns = db.pragma(`table_info(${table})`) as { name: string }[];
   if (!existingColumns.some((c) => c.name === column)) {
     db.exec(`alter table ${table} add column ${columnDdl}`);
   }
@@ -29,7 +29,7 @@ ensureColumn('customers', 'disclosure_sent_at', 'disclosure_sent_at text');
 // drop it if present. Safe to run every startup: `ensureColumn`'s sibling,
 // same idempotency idea.
 function dropColumnIfExists(table: string, column: string): void {
-  const existingColumns = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
+  const existingColumns = db.pragma(`table_info(${table})`) as { name: string }[];
   if (existingColumns.some((c) => c.name === column)) {
     db.exec(`alter table ${table} drop column ${column}`);
   }

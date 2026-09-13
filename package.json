@@ -3,7 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "tsx src/server.ts"
+    "dev": "tsx src/server.ts",
+    "test": "tsx tests/index.ts",
+    "test:e2e": "tsx scripts/test-v2-flow.ts",
+    "typecheck": "tsc --noEmit",
+    "seed": "tsx scripts/seed-catalog.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
