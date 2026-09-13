@@ -1,85 +1,229 @@
 # Ahmed's WhatsApp Assistant
 
-**Start here, in this order:**
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-22%2B-green.svg?style=flat-square&logo=node.js)](https://nodejs.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57.svg?style=flat-square&logo=sqlite)](https://github.com/WiseLibs/better-sqlite3)
+[![Gemini](https://img.shields.io/badge/LLM-Google%20Gemini-orange.svg?style=flat-square&logo=google)](https://ai.google.dev/)
+[![WAHA](https://img.shields.io/badge/Channel-WAHA%20(WhatsApp%20API)-25D366.svg?style=flat-square&logo=whatsapp)](https://waha.devlike.pro/)
+[![Architecture](https://img.shields.io/badge/Architecture-FSM%20%2B%20Double--Entry%20Ledger-purple.svg?style=flat-square)](#architecture--data-flow)
 
-1. **`CLAUDE.md`** — if you're working in this repo with Claude Code, this
-   governs how. Read it first, every session.
-2. **`PROJECT-TRACKER-FINAL.md`** — the single source of truth for what's
-   built, what's in progress, and what's next. Check this before starting
-   any work.
-3. **`EXTRACTED-FILES-EXPLAINED.md`** — plain-language description of every
-   file in `EXTRACTED-FOR-AHMED/` and what it's for.
-4. This README — the code tour below.
+> **A production-ready, autonomous WhatsApp AI sales agent and business operational intelligence partner designed for a single-owner retail clothing enterprise.**
 
-## Where things live
+Unlike generic toy chatbots, this system is an end-to-end, single-tenant commercial engine: it communicates in natural bilingual mix (English and Roman Urdu), manages conversational context across multi-day threads, executes audit-grade double-entry bookkeeping, maintains real-time inventory synchronization with an order Finite State Machine (FSM), enforces rigorous anti-ban safety guardrails, and provides real-time private business analytics to the shop owner via WhatsApp.
 
-- **`src/`** — the actual, running chatbot: the conversation loop, memory
-  (checkpoints), the 4 business tools, and the AI connection. This is the
-  real engine, written fresh for this project.
-- **`db/schema.sql`** — what the assistant remembers.
-- **`EXTRACTED-FOR-AHMED/`** — verified, reusable utility files pulled
-  directly from the DeskcommCRM reference repo (anti-ban pacing, a logger,
-  follow-up scheduling math, etc.). **Staged, not yet wired into `src/`.**
-  See `EXTRACTED-FILES-EXPLAINED.md` for what each one does and
-  `EXTRACTED-FOR-AHMED/MANIFEST.md` for how each was verified safe to reuse.
+---
 
-## Code tour — the engine in `src/`, in reading order
+## 🌟 Key Highlights
 
-1. `db/schema.sql`     — what we remember
-2. `src/types.ts`       — the shapes we pass around
-3. `src/llm.ts`         — the ONE place we talk to the AI (the "seam")
-4. `src/tools.ts`       — the actions the AI is allowed to take
-5. `src/agent.ts`       — the turn loop, chatbot + memory (this is the heart of the system)
-6. `src/server.ts`      — where a WhatsApp message enters the system
+* **Autonomous Bilingual Sales Agent**: Handles 24/7 customer inquiries, product discovery, and order negotiations in fluent English and colloquial Roman Urdu with zero hallucinated inventory or pricing.
+* **Persistent Conversational Memory**: Employs rolling context checkpoints + long-term structured facts (`customer_notes`) so returning customers are recognized without repeating preferences.
+* **Double-Entry Financial Ledger**: What customers owe is dynamically derived by summing debit and credit events in `ledger`—completely eliminating balance calculation drift.
+* **FSM Order Lifecycle & Live Stock Sync**: Forward-only state machine (`placed → confirmed → paid → shipped → delivered`) that automatically decrements stock on confirmation and restores stock and ledger credits upon cancellation.
+* **Turn-Close Safety Net**: Automatically catches orders or payments agreed upon in natural language that were not explicitly logged by the model during the turn loop.
+* **Owner Executive Analytics (Private WhatsApp Mode)**: Caller-ID fail-closed authentication routes messages from the owner's personal phone to a private executive assistant equipped with deterministic BI report tools (`sales_today`, `unpaid_customers`, `top_selling_product`, `pending_followups`) with zero SQL injection risk.
+* **Production Anti-Ban & Guardrail Suite**: In-process promise-chain mutex (`withSendLock`) guarantees anti-ban pacing (daily volume caps, warmup curves, jitter throttling), spinning copy-variation detection, 5% unauthorized discount limits, and human-promise verification.
 
-## The one loop everything is built around
+---
 
+## 🏗️ Architecture & Data Flow
+
+```mermaid
+flowchart TD
+    Customer([Customer WhatsApp]) -->|Inbound Message| WAHA[WAHA / WhatsApp Gateway]
+    Owner([Shop Owner Phone]) -->|Inbound Message| WAHA
+
+    WAHA -->|POST /webhook/whatsapp| Server[Express Server: src/server.ts]
+    Server --> Auth{isOwnerPhone?}
+
+    %% Owner Route
+    Auth -->|Yes: Owner Turn| OwnerTurn[runOwnerTurn: src/agent.ts]
+    OwnerTurn --> LLMOwner[LLM Seam: Gemini Flash]
+    LLMOwner --> OwnerTools[Deterministic Analytics Tools<br/>• sales_today<br/>• unpaid_customers<br/>• top_selling_product<br/>• pending_followups]
+    OwnerTools --> Analytics[(SQLite: ahmed.db)]
+    OwnerTurn --> PacingLock[Anti-Ban Pacing & Send Lock]
+    PacingLock --> SendOwner[WAHA sendText]
+
+    %% Customer Route
+    Auth -->|No: Customer Turn| Agent[runTurn: src/agent.ts]
+    Agent --> Open[1. OPEN: Load History, Checkpoint & Notes]
+    Open --> Loop[2. LOOP: Model Tool Calling Loop]
+    Loop --> Catalog[(catalog.md & SQLite)]
+    Loop --> ToolExec[Execute Tool: check_stock, record_order, etc.]
+    ToolExec --> Guardrails{Guardrail Pipeline<br/>• Concurrency Send Lock<br/>• Anti-Ban Pacing & Sending Window<br/>• Copy Variation / Spinning<br/>• Max 5% Discount Rule<br/>• Human Promise Detection}
+    Guardrails -->|Allowed| SendCust[WAHA sendText]
+    Loop --> Close[3. CLOSE: Forced Summary & Safety Net]
+    Close --> Checkpoints[(checkpoints & customer_notes)]
+    Close --> SafetyNet{Unlogged Order/Payment?}
+    SafetyNet -->|Confident| AutoRecord[(orders & ledger)]
+    SafetyNet -->|Uncertain| Handoff[(handoff_ledger)]
 ```
-WhatsApp message arrives
-        │
-        ▼
-runTurn(customerId, incomingText)      <-- src/agent.ts
-        │
-        ├─ 1. load customer + recent messages + last checkpoint  (OPEN)
-        ├─ 2. ask the AI, giving it tools it can call             (LOOP)
-        │        - check_stock / get_customer_balance / record_order / record_payment
-        │        - send_message  <-- the ONLY way it can talk to the customer
-        ├─ 3. ask the AI to summarize what happened this turn     (CLOSE)
-        └─ 4. save that summary as the new checkpoint
-```
 
-That's it. That's the whole system. Everything in the big reference file
-(`inbound-turn.ts`, 1000+ lines) is this exact same loop, wrapped in years of
-production armor. You don't need the armor yet.
+---
 
-## Mapping to the big reference codebase
+## 🚀 Implemented Capabilities & Roadmap
 
-| Big system concept | This skeleton | Why we simplified |
+The application delivers against all four commercial business promises:
+
+### 1. Autonomous Sales & Grounded Conversation
+- **Instant, Grounded Replies**: Product queries, return/exchange policies, delivery timelines, and accepted payment methods (COD, Bank Transfer, Easypaisa, JazzCash) are grounded in [catalog.md](catalog.md) with 3x title-weighted keyword matching.
+- **Strict Guardrails**: Disallows unauthorized discounts $\ge 5\%$ without owner confirmation, prevents empty promises (*"Ahmed will call you"* is blocked unless `notify_owner` was executed), and delivers a one-time virtual assistant disclosure on first contact.
+
+### 2. Conversational Memory & Context Preservation
+- **Checkpoints**: After every turn, a forced second LLM call summarizes the current conversation state (what was discussed, what is owed, commitments made).
+- **Durable Customer Notes**: Permanent customer preferences (e.g. *"prefers black"*, *"orders in bulk"*) are extracted into `customer_notes` and automatically injected into subsequent conversations across days or weeks.
+
+### 3. Automated Bookkeeping, FSM Orders & Live Inventory
+- **Dynamic Ledger**: Balance owed is computed via $\sum(\text{debits}) - \sum(\text{credits})$. Zero mutable `balance_owed` fields.
+- **Forward-Only Finite State Machine (FSM)**:
+  $$\text{placed} \longrightarrow \text{confirmed} \longrightarrow \text{paid} \longrightarrow \text{shipped} \longrightarrow \text{delivered}$$
+  $$\text{placed / confirmed / paid} \longrightarrow \text{cancelled}$$
+- **Synchronized Inventory**: Orders in `placed` reserve nothing; transitioning to `confirmed` decrements `products.stock`. Pre-shipping cancellations automatically restore stock and issue a ledger credit reversal.
+- **Turn-Close Extraction Safety Net**: A defensive extraction prompt at turn-close detects orders or payments mentioned in natural conversation that the AI failed to log via tools, either auto-recording them if confident or alerting the owner.
+
+### 4. Owner Operational Intelligence (WhatsApp BI)
+- **Zero-Interface Reporting**: Ahmed texts the shop number directly from his personal phone; the system recognizes his number and routes to a dedicated analytics assistant.
+- **Deterministic SQL-Backed Reports**:
+  - `sales_today`: Real-time shop revenue for the current business day.
+  - `unpaid_customers`: Ranked list of customers with outstanding balances.
+  - `top_selling_product`: All-time volume and revenue leader across completed orders.
+  - `pending_followups`: Overdue unpaid orders sitting for $>2$ days (flagged overdue if $>7$ days).
+
+---
+
+## 🛠️ Technology Stack
+
+| Layer | Technology | Purpose |
 |---|---|---|
-| `job_queue` + worker polling loop | `server.ts` calls `runTurn()` directly, inline | You have one Ahmed, not thousands of concurrent orgs. No queue needed until you have real concurrency problems. |
-| `runModelCall` (seam, budget, multi-provider, cost tracking) | `llm.ts` — one function, one provider | You don't have per-org billing. Add budget checks later if you ever resell this. |
-| `AGENT_TOOL_DEFS` (11 tools, MCP catalog, breaker-wrapped) | `tools.ts` — 4 tools | Start with only what Ahmed's business actually needs. Add tools when you feel the AI reaching for one that doesn't exist. |
-| `lead_checkpoints` + `ritualBlocks` + compaction + notes | `checkpoints` table + a single summary string | No compaction needed until conversations get genuinely long (hundreds of messages). |
-| `update_lead_state` (funnel stage machine, CRM mirror) | *omitted* | You don't have a sales funnel with stages yet — an order is either placed or it isn't. |
-| `runBeforeSend` guardrail chain (7+ gates) | *omitted* | These all exist because a *chat bot promised something illegal* or *sent 8 messages in a row* in production. You'll add each one **after** you personally watch it happen once — not before. |
-| Multi-tenant (`organization_id` everywhere) | *omitted* — everything is scoped to one Ahmed | Add a `business_id` column later if you resell this to other shop owners. |
-| Operator/Conversador split, jailbreak classifier, promise-semantic gate | *omitted entirely* | Genuinely advanced, genuinely not needed at this stage. |
+| **Runtime & Language** | Node.js (v20+ / v22), TypeScript (Strict Mode) | Strong type safety and modern asynchronous execution. |
+| **Server Framework** | Express.js | High-throughput, lightweight webhook listener. |
+| **Database** | SQLite via `better-sqlite3` | In-process, ultra-low latency relational database with atomic transactions. |
+| **AI / LLM Engine** | Google Gemini (`gemini-flash-lite-latest`) | High-speed function calling with thought-signature preservation. |
+| **WhatsApp Gateway** | WAHA (WhatsApp HTTP API - Devlike) | Decoupled WhatsApp Web session management and message dispatch. |
+| **Concurrency Control** | In-Process Promise-Chain Mutex (`withSendLock`) | Guarantees FIFO message serialization across asynchronous turns. |
 
-## What to build in what order (matches Phase 1–4 from our chat)
+---
 
-- **Phase 1 (this skeleton):** one tool-less-ish loop, checkpoint memory, 4 basic tools.
-- **Phase 2:** wire up a real WhatsApp provider (WAHA self-hosted, or Cloud API) in `server.ts`.
-- **Phase 3:** once you *personally* hit a problem (bot spams messages, forgets a promise,
-  mixes up two customers), add exactly the guardrail that fixes *that* problem — copy the
-  pattern from the big file, not the whole file.
-- **Phase 4:** if you ever sell this to other shop owners, revisit multi-tenancy, budget
-  enforcement, and the job queue.
+## 📂 Project Structure
 
-## Setup
+```
+├── catalog.md                  # Human-maintainable product catalog & store FAQ
+├── db/
+│   └── schema.sql              # Relational SQLite schema (9 tables, audit ledger, checkpoints)
+├── scripts/
+│   ├── seed-catalog.ts         # Idempotent database seeder based on catalog.md
+│   └── test-v2-flow.ts         # Comprehensive deterministic test suite for orders & ledger
+├── src/
+│   ├── agent.ts                # Turn loop engine: OPEN -> LOOP -> CLOSE, send guardrails
+│   ├── analytics.ts            # Deterministic business intelligence report functions
+│   ├── catalog.ts              # Weighted keyword search engine for catalog.md
+│   ├── db.ts                   # SQLite singleton, startup migrations & schema integrity
+│   ├── followups.ts            # Derived follow-up tracking for unpaid orders
+│   ├── ledger.ts               # Double-entry debit/credit ledger and balance resolution
+│   ├── llm.ts                  # Single-seam LLM gateway for Google Gemini
+│   ├── orders.ts               # Order state machine (FSM), stock decrement & restore logic
+│   ├── owner.ts                # Fail-closed caller authentication for the shop owner
+│   ├── server.ts               # Express entry point for WhatsApp webhooks & turn dispatch
+│   ├── tools.ts                # Business actions & analytics tool definitions
+│   ├── types.ts                # Core domain TypeScript interfaces
+│   ├── channel/
+│   │   ├── types.ts            # Provider-agnostic ChannelAdapter interface
+│   │   └── waha.ts             # WAHA REST adapter with LID privacy-JID resolution
+│   ├── guardrails/
+│   │   ├── discount-rules.ts   # Regex-based 5% discount limit & retrospective checks
+│   │   ├── human-promise.ts    # Handoff promise detector
+│   │   ├── messaging-window.ts # Operational hours enforcement (07:00 - 22:00 PKT)
+│   │   ├── pacing/             # Anti-ban throttle engine (daily caps, warmup curves, jitter)
+│   │   └── spinning/           # Outbound text variation & anti-spam detection
+│   └── obs/
+│       └── logger.ts           # Structured JSON logger
+└── tsconfig.json               # Strict TypeScript configuration
+```
+
+---
+
+## ⚙️ Getting Started
+
+### Prerequisites
+* **Node.js**: v20 or higher
+* **Docker**: Required for running WAHA locally
+* **Google Gemini API Key**: [Google AI Studio](https://aistudio.google.com/)
+
+### 1. Installation
+Clone the repository and install dependencies:
+```bash
+git clone https://github.com/<your-username>/ahmed-whatsapp-assistant.git
+cd ahmed-whatsapp-assistant
+npm install
+```
+
+### 2. Environment Configuration
+Create an environment configuration (or set environment variables in your terminal):
+```bash
+export GEMINI_API_KEY="your-google-gemini-api-key"
+export WAHA_BASE_URL="http://localhost:3001"
+export WAHA_SESSION="default"
+export AHMED_OWNER_PHONE="923001234567"      # Owner's personal WhatsApp number
+export PORT=3000
+```
+
+### 3. Start WAHA (WhatsApp Gateway)
+Run the headless WhatsApp bridge using Docker:
+```bash
+docker run -it --name waha -p 3001:3001 -e "WHATSAPP_HOOK_URL=http://localhost:3000/webhook/whatsapp" -e "WHATSAPP_HOOK_EVENTS=message" devlikeapro/waha
+```
+* Open `http://localhost:3001` in your browser and link your WhatsApp account using QR code or pairing code.
+
+### 4. Seed the Product Inventory
+Populate the database with initial products from `catalog.md`:
+```bash
+npx tsx scripts/seed-catalog.ts
+```
+
+### 5. Start the Application
+Run the assistant server:
+```bash
+npm run dev
+# Or using the auto-restart loop:
+bash _tmp-run-loop.sh
+```
+
+The service will start on port `3000`, listening for inbound WhatsApp webhooks at `/webhook/whatsapp`.
+
+---
+
+## 🧪 Testing & Verification
+
+The repository includes deterministic, isolated test suites that verify the entire operational cycle without requiring live WhatsApp credits:
 
 ```bash
-npm install better-sqlite3 express
-npm install -D typescript @types/express @types/better-sqlite3 tsx
-export ANTHROPIC_API_KEY=sk-ant-...
-npx tsx src/server.ts
+# Run the complete Version 2 retail & ledger verification suite:
+npx tsx scripts/test-v2-flow.ts
 ```
+
+The test suite validates:
+* [x] **Live stock queries** via `check_stock`.
+* [x] **Order placement** with automated `ledger` debits and intact stock.
+* [x] **Order confirmation** with automated real-time stock decrements.
+* [x] **FSM enforcement**: Rejection of backward transitions or skipping steps.
+* [x] **Payment processing**: Dynamic ledger credits and balance updates.
+* [x] **Turn-close safety net**: Validation of unlogged orders and automatic handoffs.
+* [x] **Pre-shipping cancellations**: Full stock restoration and ledger debit reversal.
+* [x] **Overdue receivables**: Follow-up detection on unpaid orders over 2 days.
+
+---
+
+## 🛡️ Production Safety & Design Decisions
+
+1. **Anti-Ban Concurrency Protection (`withSendLock`)**:
+   Under high concurrent message bursts, typical asynchronous frameworks read stale last-sent timestamps. Our custom promise-chain mutex guarantees that every message strictly adheres to the 1,200ms throttle and daily send limits.
+2. **Double-Entry Financial Integrity**:
+   Instead of updating a fragile `balance_owed` column, balances are computed from immutable debit/credit entries in `ledger`. This provides an auditable paper trail for every transaction.
+3. **Fail-Closed Owner Recognition**:
+   Owner authentication is tied directly to the E.164 normalized phone number. If `AHMED_OWNER_PHONE` is not explicitly set, owner mode is completely locked down—preventing customer access to internal business analytics.
+4. **Teaching-Text Error Handling**:
+   When an LLM attempts an invalid action (e.g. confirming an already-shipped order or selecting a nonexistent product), the system never throws an unhandled exception. It returns structured, plain-language guidance allowing the model to recover and self-correct within the turn.
+
+---
+
+## 📄 License
+This project is licensed under the [MIT License](LICENSE).
