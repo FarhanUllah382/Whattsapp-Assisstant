@@ -47,7 +47,15 @@ app.post('/webhook/whatsapp', async (req, res) => {
     if (isOwner) {
       await runOwnerTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
     } else {
-      await runTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
+      const inboundEventKey = inbound.messageId
+        ? `${channel.channel}:${inbound.messageId}`
+        : undefined;
+      await runTurn(
+        inbound.phone,
+        inbound.text,
+        (body) => channel.sendText(inbound.phone, body),
+        inboundEventKey,
+      );
     }
     log.info('turn completed', { phone: inbound.phone, turnKind: isOwner ? 'owner' : 'customer' });
     res.sendStatus(200);

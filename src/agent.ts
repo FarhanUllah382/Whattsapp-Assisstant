@@ -23,8 +23,8 @@ import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from '
 import { recordCredit } from './ledger';
 import { callModel, type ModelMessage } from './llm';
 import { createLogger } from './obs/logger';
-import { baseTools, insertValidatedOrder, ownerTools, recordHandoff, validateOrderItems } from './tools';
-import type { Customer, ToolDef } from './types';
+import { baseTools, insertValidatedOrder, ownerTools, recordHandoff, runBookkeepingOnce, validateOrderItems } from './tools';
+import type { Customer, ToolContext, ToolDef } from './types';
 
 const log = createLogger();
 
@@ -339,6 +339,7 @@ export async function runTurn(
   phone: string,
   incomingText: string,
   sendToCustomer: (text: string) => Promise<void>,
+  inboundEventKey?: string,
 ): Promise<void> {
   const customer = getOrCreateCustomer(phone);
 
@@ -386,8 +387,12 @@ export async function runTurn(
   // Deterministic per-turn key: same customer + same inbound text → same key,
   // so a retried runTurn() call (e.g. a redelivered webhook after a crash)
   // reuses it and its send_message call collides with the prior attempt.
-  const turnKey = `${customer.id}:${incomingText}`;
+  const turnKey = inboundEventKey ?? `${customer.id}:${incomingText}`;
   const tools = [...baseTools, makeSendMessageTool(sendToCustomer, turnKey)];
+  const toolContext: ToolContext = {
+    customerId: customer.id,
+    idempotencyKey: inboundEventKey,
+  };
 
   // ── 2. LOOP — let the AI call tools, including send_message, until done ─
   const messages: ModelMessage[] = [{ role: 'user', content: openingText }];
@@ -416,7 +421,7 @@ export async function runTurn(
       toolsCalledThisTurn.add(call.name);
       const tool = tools.find((t) => t.name === call.name);
       const output = tool
-        ? await tool.execute(call.input, { customerId: customer.id })
+        ? await tool.execute(call.input, toolContext)
         : { error: `unknown tool ${call.name}` };
       if (call.name === 'send_message') {
         const sendOutput = output as { ok?: boolean; error?: string };
@@ -477,7 +482,7 @@ export async function runTurn(
       const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
       const fallbackResult = await sendMessageTool.execute(
         { body: FALLBACK_REPLY_TEXT },
-        { customerId: customer.id },
+        toolContext,
       );
       if (!(fallbackResult as { ok?: boolean })?.ok) {
         log.error('fallback reply itself failed to send', {
@@ -497,7 +502,7 @@ export async function runTurn(
         `Last reason: ${lastSendMessageError}`;
     await notifyOwnerTool.execute(
       { reason },
-      { customerId: customer.id },
+      toolContext,
     );
   }
 
@@ -600,8 +605,15 @@ export async function runTurn(
       if (unloggedOrder.confident === true && Array.isArray(unloggedOrder.items)) {
         const check = validateOrderItems(unloggedOrder.items);
         if (check.ok) {
-          const orderId = insertValidatedOrder(customer.id, unloggedOrder.items, check.total!);
-          log.info('safety-net order logged at turn close', { customerId: customer.id, orderId, total: check.total });
+          const result = runBookkeepingOnce(toolContext, 'record_order', () => {
+            const orderId = insertValidatedOrder(customer.id, unloggedOrder.items, check.total!);
+            return { ok: true, order_id: orderId, total: check.total! };
+          });
+          log.info('safety-net order logged at turn close', {
+            customerId: customer.id,
+            orderId: result.order_id,
+            total: result.total,
+          });
         } else {
           recordHandoff(
             customer.id,
@@ -616,7 +628,10 @@ export async function runTurn(
     if (!toolsCalledThisTurn.has('record_payment') && unloggedPayment) {
       const amount = unloggedPayment.amount;
       if (unloggedPayment.confident === true && typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
-        recordCredit(customer.id, amount);
+        runBookkeepingOnce(toolContext, 'record_payment', () => {
+          recordCredit(customer.id, amount);
+          return { ok: true, amount };
+        });
         log.info('safety-net payment logged at turn close', { customerId: customer.id, amount });
       } else if (typeof unloggedPayment.description === 'string' && unloggedPayment.description.trim() !== '') {
         recordHandoff(customer.id, `Possible unlogged payment needs Ahmed's confirmation: ${unloggedPayment.description.trim().slice(0, 400)}`);

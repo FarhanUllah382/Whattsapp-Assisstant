@@ -82,6 +82,17 @@ create table if not exists send_ledger (
   created_at text not null default (datetime('now'))
 );
 
+-- Atomic receipts for bookkeeping side effects triggered by one provider
+-- message. If WAHA retries the same webhook after a process crash, the tool
+-- returns its original result instead of inserting a second order/payment.
+create table if not exists bookkeeping_receipts (
+  id text primary key,
+  customer_id integer not null references customers(id),
+  effect text not null,
+  result_json text not null,
+  created_at text not null default (datetime('now'))
+);
+
 -- Durable, standalone facts about a customer (e.g. "prefers black"),
 -- distinct from `checkpoints.summary` which is the rolling state of the
 -- CURRENT conversation and gets overwritten every turn. Notes accumulate.

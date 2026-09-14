@@ -39,6 +39,13 @@ export interface CallModelResult {
   stop_reason: string;
 }
 
+export function normalizeGeminiFunctionResponse(response: unknown): Record<string, unknown> {
+  if (typeof response === 'object' && response !== null && !Array.isArray(response)) {
+    return response as Record<string, unknown>;
+  }
+  return { result: response };
+}
+
 function toGeminiParts(content: string | unknown[]): any[] {
   if (typeof content === 'string') return [{ text: content }];
   return (content as any[]).map((block) => {
@@ -59,7 +66,11 @@ function toGeminiParts(content: string | unknown[]): any[] {
       } catch {
         response = { result: block.content };
       }
-      return { functionResponse: { name, response } };
+      // Gemini's functionResponse.response is a protobuf Struct: the top
+      // level must be an object. Several real tools legitimately return an
+      // array (check_stock is the first live example), so wrap non-object
+      // results without changing what the model can read.
+      return { functionResponse: { name, response: normalizeGeminiFunctionResponse(response) } };
     }
     throw new Error(`unrecognized content block type: ${block.type}`);
   });

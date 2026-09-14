@@ -13,8 +13,8 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | 🟡 All 5 sub-versions (2.1-2.5) built and deterministically verified (2026-09-05) — none yet live-tested against a real conversation, see each sub-version's own status |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 and 3.2 built and locally verified (2026-09-05) under the explicit early-start exception below; 3.3 stays out of scope |
+| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified; customer-facing order/payment/status/stock behavior and the owner follow-up query passed against real WhatsApp messages. The deliberately non-repeatable safety-net branches and crash-retry bookkeeping receipt were verified directly and deterministically. |
+| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 is built and live-verified; 3.2 is built/local-verified and its `pending_followups` question is live-verified, while its other three owner analytics questions still need real-message verification. 3.3 remains out of scope/not started. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
 **Note on the 3.x exception, so anyone reading this later understands why
@@ -38,11 +38,14 @@ result of this exception, not a sign something was skipped by mistake.
 
 ## 0. Where things actually stand right now
 
-- **`ahmed-assistant` skeleton exists** (delivered earlier this
-  conversation): SQLite schema, single LLM-call seam, 4 business tools,
-  the open→loop→checkpoint-close turn pattern, and a webhook stub. This
-  already covers a real slice of 1.1 and 1.2 below — see those sections for
-  exactly what's done vs. still missing.
+- **Current implementation status (re-verified 2026-09-14):** Version 1 is
+  complete with its carried-forward gaps still described precisely in its
+  final-status section; Version 2 is complete after a real WhatsApp pass
+  plus deterministic checks for branches a live model cannot reliably be
+  forced to take; Version 3.1 is live-verified; Version 3.2 is built and
+  locally verified with one of its four owner questions (`pending_followups`)
+  live-verified; 3.3 and everything beyond the current 3.2 scope remain
+  untouched.
 - **A verified extraction of 20-21 reusable files from DeskcommCRM exists**,
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
@@ -1345,6 +1348,38 @@ model a retail order/ledger. At the end of v2, every order and payment
 discussed in a normal conversation is correctly recorded with zero manual
 data entry — but Ahmed still can't ask the bot about it; that's v3.
 
+**Final live-verification pass (2026-09-14): ✅ PASS.** Real WhatsApp
+messages exercised the normal customer path end to end: a grounded stock
+lookup returned the real 20-unit/Rs.800 value; order #29 recorded two units
+at the catalog price (not the customer's incorrect quoted price), created
+one Rs.1600 debit, confirmed and reserved stock 20→18; a real Rs.1600
+payment created one credit and moved the order to paid; an attempted
+backward paid→confirmed transition was rejected without changing order,
+stock, or ledger; pre-shipping cancellation restored stock 18→20 and wrote
+the traceable debit-reversal credit; order #30 then recorded/confirmed one
+unit and left stock at 19. For 2.5, order #30 was temporarily backdated,
+the real pending-followup query found it, and Ahmed's real owner-number
+question correctly reported its Rs.800 **store credit** rather than saying
+the customer owed Rs.800; the timestamp was restored exactly afterward.
+
+The live pass found and fixed four real integration defects before this
+version was closed: Gemini rejected array-valued tool results until the LLM
+seam wrapped them in a Struct-compatible object; a reconnect replay exposed
+that newsletter/community JIDs were being treated as customer phones, so
+the WAHA adapter now accepts only personal-chat JIDs and fails closed on an
+unresolved LID; the owner follow-up tool exposed a signed balance without
+semantics and the model inverted store credit, so it now emits an explicit
+`account_position`; and a crash/redelivery could repeat `record_order` or
+`record_payment`, so WAHA message IDs now key an atomic
+`bookkeeping_receipts` row committed in the same transaction as the effect.
+The last fix was first reproduced (one event created two orders/two debits),
+then verified fixed: the retry returned the original order ID and left one
+effect, while a distinct provider event still created a distinct order.
+Final verification: typecheck passed, permanent suite 39/39, complete V2
+flow passed, and all temporary scripts/rows were removed. The recurring
+Node v24/`better-sqlite3` native crash occurred repeatedly during this pass;
+the restart loop recovered, so it remains **mitigated, not fixed**.
+
 ### 2.1 — Retail data model
 - **Goal:** a place to put the facts of a sale.
 - **Depends on:** 1.1.
@@ -1429,11 +1464,11 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   reconstructable from ledger history rather than trusted as a single
   field (✅ verified above); an invalid status transition is rejected (✅
   verified above, four different shapes).
-- **Status:** ✅ Done — real ledger and forward-only order-status state
-  machine both built, migrated safely against the real dev database, and
-  verified deterministically. Now wired into a real AI-facing tool too
-  (2.2's `update_order_status`) and stock-aware (2.4) — not yet
-  live-tested against real messages, a separate, not-yet-made decision.
+- **Status:** ✅ Done and live-verified — the ledger, payment path,
+  cancellation reversal, and customer balance were exercised through real
+  WhatsApp orders #29/#30 in the 2026-09-14 final pass above. Crash/retry
+  bookkeeping is additionally protected and deterministically verified by
+  the atomic provider-event receipt described in that pass.
   **Correction, 2026-09-05, found while building 3.2:** the ledger debit
   `record_order` writes at creation was never reversed when an order was
   later cancelled — `get_customer_balance` would have silently overstated
@@ -1518,10 +1553,10 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   orders where status = ?`, not separately built as its own tool since
   nothing yet asks for it); an invalid backward transition is rejected (✅
   verified, both directly in 2.1 and now through the real tool above).
-- **Status:** ✅ Done — both halves complete: the state machine (2.1's
-  session) and now the conversational tool that actually exposes it to the
-  model, both verified deterministically. Not yet live-tested against a
-  real conversation; that remains a separate, explicit decision for later.
+- **Status:** ✅ Done and live-verified — real WhatsApp turns confirmed an
+  order, marked it paid, rejected a backward transition without side
+  effects, and cancelled it before shipping with the correct stock/ledger
+  effects (2026-09-14 final pass above).
 
 ### 2.3 — Automatic order & payment extraction
 - **Goal:** "20 shirts, medium, black, ₹5000" becomes a real order row
@@ -1609,9 +1644,12 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   both the auto-log and the flag-for-Ahmed paths, deterministically — not
   yet exercised through an actual live conversation, a separate decision
   same as 2.1/2.2 left it).
-- **Status:** ✅ Done — the safety net is built and verified
-  deterministically, on top of 2.1/2.2's already-working primary path. Not
-  yet live-tested against a real conversation.
+- **Status:** ✅ Done — the primary order/payment extraction path is
+  live-verified through real WhatsApp messages. The safety net is verified
+  deterministically (the correct method because a live model cannot be
+  reliably forced to omit a tool call): confident missed order auto-logs,
+  uncertain order hands off without booking, and a primary tool call cannot
+  be duplicated at close. All three were re-run successfully on 2026-09-14.
 
 ### 2.4 — Live stock-aware replies
 - **Goal:** "do you have 20 in stock" gets a real, current answer, and a
@@ -1671,10 +1709,10 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   reaching `confirmed`, which is where reservation actually happens
   operationally, not `delivered`; restoring on a pre-shipping cancellation
   was in this same session's explicit scope too and is verified above).
-- **Status:** ✅ Done — decrement-on-confirm and restore-on-cancel both
-  built and verified deterministically, including the double-
-  decrement/double-restore guarantees. Not yet live-tested against a real
-  conversation, same as 2.1-2.3 left it. **Note, 2026-09-05:** the same
+- **Status:** ✅ Done and live-verified — a real stock question returned the
+  current value, order confirmation decremented the exact quantity, and a
+  real pre-shipping cancellation restored it without double-adjustment in
+  the 2026-09-14 pass. **Note, 2026-09-05:** the same
   `transitionOrderStatus` function this sub-version's stock logic lives in
   was corrected while building 3.2 (a separate, ledger-side bug — the
   reversal-on-cancel fix, see 2.1's and 3.2's own entries) — re-verified
@@ -1746,10 +1784,10 @@ data entry — but Ahmed still can't ask the bot about it; that's v3.
   deliberately-derived-not-stored design); a query for "pending
   follow-ups" returns it correctly (✅ verified above, including sorting
   and the overdue flag).
-- **Status:** ✅ Done — the query/read path is built and verified
-  deterministically. Not yet exposed to Ahmed in any conversation (needs
-  Version 3.1's owner-recognition work first, out of scope here) and not
-  yet live-tested, same as every other Version 2 sub-version so far.
+- **Status:** ✅ Done and live-verified — the derived query found the
+  temporarily aged real order #30, and the owner-only WhatsApp path reported
+  it correctly, including the customer's Rs.800 store-credit direction.
+  The test timestamp was restored exactly afterward (2026-09-14).
 
 **v2 exit criteria:** every order and payment that happens in conversation
 is correctly recorded, stock is accurate, and follow-ups are tracked
@@ -1850,17 +1888,20 @@ the MVP-complete milestone.**
   deterministically), with no way for a customer message to trigger
   owner-mode answers (✅ verified above, including the adversarial case of
   an owner-style question from a customer number).
-- **Status:** ✅ Built and locally verified, deterministically — **not yet
-  live-tested against a real conversation**, same distinction as every
-  other Version 2/3 sub-version in this file. `AHMED_OWNER_PHONE` is not
-  yet configured in this environment; live testing this sub-version needs
-  that set to Ahmed's real number first, a separate, not-yet-made step.
+- **Status:** ✅ Done and live-verified (2026-09-14) —
+  `AHMED_OWNER_PHONE` was configured as the confirmed number ending 3460;
+  messages from it routed to `turnKind: owner`, while messages from other
+  real phones routed to the customer turn. The owner received real replies
+  without gaining any customer-write tools. The known owner-path
+  silent-no-reply/send-ledger gap above remains explicitly carried forward;
+  this status does not relabel it as fixed.
 
 ### 3.2 — Owner analytics Q&A tools
 - **Goal:** Ahmed's four example questions all work, in his own words.
-- **Depends on:** 3.1 (✅ built and locally verified, see its own entry),
-  version 2 complete (⚠️ still not live-verified — **built under the
-  2026-09-05 exception**, CLAUDE.md §3, same as 3.1; not scope drift).
+- **Depends on:** 3.1 (✅ complete/live-verified) and version 2
+  (✅ complete/live-verified as of 2026-09-14). The original build happened
+  under the documented 2026-09-05 early-start exception; that dependency is
+  now fully satisfied.
 - **Verified before starting, not assumed (2026-09-05):** `git status`
   clean, `grep` across `src/` for the four function names found only my
   own 3.1-era comment naming them as future work — nothing built yet.
@@ -1942,10 +1983,14 @@ the MVP-complete milestone.**
   phrasing/Roman-Urdu half of this specifically needs a live conversation
   through `runOwnerTurn()`, not yet done — same distinction as everywhere
   else in this file).
-- **Status:** ✅ Built and locally verified, deterministically — **not yet
-  live-tested against a real conversation**. Also fixed one real bug in
-  already-merged 2.1/2.4 code (ledger reversal on cancel) discovered while
-  building this.
+- **Status:** 🟡 Built and locally verified; partially live-verified
+  (2026-09-14). Ahmed asked the pending-followups question naturally from
+  the configured owner number, the real tool ran, and the corrected reply
+  identified order #30 plus Rs.800 store credit. `sales_today`,
+  `unpaid_customers`, and `top_selling_product` remain to be exercised by
+  real owner-number messages before 3.2 can be called complete. Also fixed
+  one real bug in already-merged 2.1/2.4 code (ledger reversal on cancel)
+  discovered while building this.
 
 ### 3.3 — WhatsApp-delivered alerts
 - **Goal:** things Ahmed should know about reach him without opening

@@ -15,7 +15,7 @@ import { getPendingFollowups } from './followups';
 import { getBalance, recordCredit, recordDebit } from './ledger';
 import { createLogger } from './obs/logger';
 import { ORDER_STATUSES, transitionOrderStatus, type OrderStatus } from './orders';
-import type { ToolDef } from './types';
+import type { ToolContext, ToolDef } from './types';
 
 const log = createLogger();
 
@@ -138,6 +138,33 @@ export function insertValidatedOrder(customerId: number, items: unknown[], total
   return orderId;
 }
 
+/**
+ * Runs one bookkeeping effect atomically for a provider event. The receipt
+ * and the order/payment write commit in the same SQLite transaction, so a
+ * crash can leave either both or neither—never an unreceipted committed write.
+ */
+export function runBookkeepingOnce<T>(
+  ctx: ToolContext,
+  effect: 'record_order' | 'record_payment',
+  operation: () => T,
+): T {
+  if (!ctx.idempotencyKey) return operation();
+
+  const receiptId = `${ctx.idempotencyKey}:${effect}`;
+  return db.transaction(() => {
+    const existing = db
+      .prepare('select result_json from bookkeeping_receipts where id = ?')
+      .get(receiptId) as { result_json: string } | undefined;
+    if (existing) return JSON.parse(existing.result_json) as T;
+
+    const result = operation();
+    db.prepare(
+      'insert into bookkeeping_receipts (id, customer_id, effect, result_json) values (?, ?, ?, ?)',
+    ).run(receiptId, ctx.customerId, effect, JSON.stringify(result));
+    return result;
+  })();
+}
+
 export const recordOrder: ToolDef = {
   name: 'record_order',
   description:
@@ -168,8 +195,10 @@ export const recordOrder: ToolDef = {
       if (!check.ok) {
         return { ok: false, error: check.error };
       }
-      const orderId = insertValidatedOrder(ctx.customerId, items, check.total!);
-      return { ok: true, order_id: orderId, total: check.total };
+      return runBookkeepingOnce(ctx, 'record_order', () => {
+        const orderId = insertValidatedOrder(ctx.customerId, items, check.total!);
+        return { ok: true, order_id: orderId, total: check.total };
+      });
     } catch {
       return { ok: false, error: 'Could not record the order — please try again.' };
     }
@@ -244,8 +273,10 @@ export const recordPayment: ToolDef = {
       if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
         return { ok: false, error: 'Payment amount must be a number greater than 0.' };
       }
-      recordCredit(ctx.customerId, amount);
-      return { ok: true };
+      return runBookkeepingOnce(ctx, 'record_payment', () => {
+        recordCredit(ctx.customerId, amount);
+        return { ok: true };
+      });
     } catch {
       return { ok: false, error: 'Could not record the payment — please try again.' };
     }
@@ -379,9 +410,20 @@ export const topSellingProductTool: ToolDef = {
 
 export const pendingFollowupsTool: ToolDef = {
   name: 'pending_followups',
-  description: 'Every unpaid order that has been sitting for a while, most overdue first.',
+  description:
+    'Every unpaid order that has been sitting for a while, most overdue first. Report account_position exactly: store_credit means Ahmed owes/holds credit for the customer, not that the customer owes money.',
   input_schema: { type: 'object', properties: {} },
-  execute: () => ({ pending_followups: getPendingFollowups() }),
+  execute: () => ({
+    pending_followups: getPendingFollowups().map(({ balance_owed, ...followup }) => ({
+      ...followup,
+      account_position:
+        balance_owed > 0
+          ? { kind: 'amount_owed', amount: balance_owed }
+          : balance_owed < 0
+            ? { kind: 'store_credit', amount: Math.abs(balance_owed) }
+            : { kind: 'settled', amount: 0 },
+    })),
+  }),
 };
 
 export const ownerTools: ToolDef[] = [salesToday, unpaidCustomersTool, topSellingProductTool, pendingFollowupsTool];

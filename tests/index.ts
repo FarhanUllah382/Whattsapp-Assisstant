@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
-import { checkOrderStatusTransition } from '../src/orders';
+import { checkOrderStatusTransition, OrderStateMachine } from '../src/orders';
+import { LedgerAccount } from '../src/ledger';
 import { checkDiscountRule } from '../src/guardrails/discount-rules';
 import { detectHumanPromise } from '../src/guardrails/human-promise';
 import { isOwnerPhone } from '../src/owner';
 import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog';
-import { wahaAdapter } from '../src/channel/waha';
+import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
+import { normalizeGeminiFunctionResponse } from '../src/llm';
+import { db } from '../src/db';
+import { recordOrder, recordPayment } from '../src/tools';
 
 let totalTests = 0;
 let passedTests = 0;
@@ -202,6 +206,66 @@ it('ignores group chat messages (@g.us)', () => {
   assert.equal(wahaAdapter.parseInboundWebhook(payload), null);
 });
 
+it('ignores newsletter and broadcast messages instead of treating their ids as phone numbers', () => {
+  for (const from of ['120363194339935425@newsletter', 'status@broadcast']) {
+    const payload = {
+      event: 'message',
+      payload: { fromMe: false, from, body: 'Non-customer feed text' },
+    };
+    assert.equal(wahaAdapter.parseInboundWebhook(payload), null);
+  }
+});
+
+it('rejects an unresolved privacy LID instead of replying to the pseudonymous id', () => {
+  const payload = {
+    event: 'message',
+    payload: { fromMe: false, from: '123456789@lid', body: 'Missing real JID' },
+  };
+  assert.equal(wahaAdapter.parseInboundWebhook(payload), null);
+});
+
+it('accepts a direct NOWEB phone-number JID', () => {
+  const payload = {
+    event: 'message',
+    payload: { fromMe: false, from: '923299144863@s.whatsapp.net', body: 'Direct text' },
+  };
+  assert.deepEqual(wahaAdapter.parseInboundWebhook(payload), {
+    phone: '923299144863',
+    text: 'Direct text',
+  });
+});
+
+it('preserves WAHA message ids needed to deduplicate crash retries', () => {
+  const direct = {
+    event: 'message',
+    payload: {
+      id: 'false_923332333460@c.us_DIRECT123',
+      fromMe: false,
+      from: '923332333460@c.us',
+      body: 'One hoodie please',
+    },
+  };
+  assert.deepEqual(wahaAdapter.parseInboundWebhook(direct), {
+    phone: '923332333460',
+    text: 'One hoodie please',
+    messageId: 'false_923332333460@c.us_DIRECT123',
+  });
+
+  const serializedFallback = {
+    event: 'message',
+    payload: {
+      fromMe: false,
+      from: '923332333460@c.us',
+      body: 'Paid 800',
+      _data: { id: { _serialized: 'false_923332333460@c.us_FALLBACK456' } },
+    },
+  };
+  assert.equal(
+    wahaAdapter.parseInboundWebhook(serializedFallback)?.messageId,
+    'false_923332333460@c.us_FALLBACK456',
+  );
+});
+
 it('resolves WhatsApp privacy LID identifiers to real phone numbers', () => {
   const payload = {
     event: 'message',
@@ -265,6 +329,140 @@ it('returns null when the customer query is completely ungrounded', () => {
   const sections = loadCatalogSections();
   const match = findBestMatch(sections, 'Where is the nearest spaceship repair workshop?');
   assert.equal(match, null);
+});
+
+// --- Suite 8: Object-Oriented Domain Entities & Polymorphism ---
+console.log('\n▶ Object-Oriented Domain Entities & Polymorphism (MLH Criterion 7)');
+it('OrderStateMachine encapsulates order state, validates transitions, and maintains audit history', () => {
+  const fsm = new OrderStateMachine('placed', 101);
+  assert.equal(fsm.status, 'placed');
+  assert.equal(fsm.orderId, 101);
+  assert.equal(fsm.isTerminal(), false);
+
+  // Valid forward moves
+  assert.equal(fsm.transition('confirmed').ok, true);
+  assert.equal(fsm.status, 'confirmed');
+
+  assert.equal(fsm.transition('paid').ok, true);
+  assert.equal(fsm.status, 'paid');
+
+  assert.equal(fsm.transition('shipped').ok, true);
+  assert.equal(fsm.status, 'shipped');
+
+  assert.equal(fsm.transition('delivered').ok, true);
+  assert.equal(fsm.status, 'delivered');
+  assert.equal(fsm.isTerminal(), true);
+
+  // Terminal state lockout
+  const invalidMove = fsm.transition('placed');
+  assert.equal(invalidMove.ok, false);
+
+  // Audit history integrity
+  const history = fsm.history;
+  assert.equal(history.length, 4);
+  assert.equal(history[0].from, 'placed');
+  assert.equal(history[0].to, 'confirmed');
+  assert.equal(history[3].from, 'shipped');
+  assert.equal(history[3].to, 'delivered');
+});
+
+it('OrderStateMachine enforces validation on construction and state skipping', () => {
+  assert.throws(() => new OrderStateMachine('nonexistent_status' as any), /Invalid initial order status/);
+
+  const fsm = new OrderStateMachine('placed');
+  const skipMove = fsm.transition('delivered');
+  assert.equal(skipMove.ok, false);
+  assert.equal(fsm.status, 'placed'); // state remained unchanged
+});
+
+it('LedgerAccount domain model enforces accounting invariants and derives balance', () => {
+  assert.throws(() => new LedgerAccount(-5), /customerId must be a positive integer/);
+
+  const account = new LedgerAccount(42);
+  assert.equal(account.customerId, 42);
+  assert.equal(account.getBalance(), 0);
+
+  // Accounting invariants
+  assert.throws(() => account.postDebit(-100, 1), /Debit amount must be strictly positive/);
+  assert.throws(() => account.postCredit(0), /Credit amount must be strictly positive/);
+
+  // Double-entry ledger events
+  account.postDebit(3500, 201); // order placed
+  assert.equal(account.getBalance(), 3500);
+
+  account.postCredit(1500); // partial payment
+  assert.equal(account.getBalance(), 2000);
+
+  account.postCredit(2000); // balance cleared
+  assert.equal(account.getBalance(), 0);
+
+  assert.equal(account.entries.length, 3);
+});
+
+it('WahaAdapter class encapsulates config and implements ChannelAdapter polymorphically', () => {
+  const customAdapter = new WahaAdapter({
+    baseUrl: 'https://whatsapp.example.com',
+    session: 'retail-store',
+    apiKey: 'secret-key-123',
+  });
+  assert.equal(customAdapter.channel, 'waha');
+  assert.equal(typeof customAdapter.sendText, 'function');
+  assert.equal(typeof customAdapter.parseInboundWebhook, 'function');
+});
+
+// --- Suite 9: Gemini function-response wire format ---
+console.log('\n▶ Gemini Function-Response Wire Format');
+it('preserves object tool results and wraps arrays or primitives in a Struct-compatible object', () => {
+  const objectResult = { found: false, message: 'no matching product' };
+  assert.equal(normalizeGeminiFunctionResponse(objectResult), objectResult);
+  assert.deepEqual(normalizeGeminiFunctionResponse([{ id: 3, stock: 20 }]), {
+    result: [{ id: 3, stock: 20 }],
+  });
+  assert.deepEqual(normalizeGeminiFunctionResponse('plain result'), { result: 'plain result' });
+  assert.deepEqual(normalizeGeminiFunctionResponse(null), { result: null });
+});
+
+// --- Suite 10: Bookkeeping crash-retry idempotency ---
+console.log('\n▶ Bookkeeping Crash-Retry Idempotency');
+it('deduplicates order/payment effects for one provider event but permits a new event', () => {
+  db.exec('begin');
+  try {
+    const product = db.prepare('select id, price from products order by id limit 1').get() as
+      | { id: number; price: number }
+      | undefined;
+    assert.ok(product, 'At least one seeded product is required');
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`retry-test-${Date.now()}`)
+      .lastInsertRowid as number;
+    const input = { items: [{ product_id: product.id, qty: 1, price: product.price }] };
+    const eventKey = `waha:test-order-${Date.now()}`;
+
+    const firstOrder = recordOrder.execute(input, { customerId, idempotencyKey: eventKey });
+    const retriedOrder = recordOrder.execute(input, { customerId, idempotencyKey: eventKey });
+    assert.deepEqual(retriedOrder, firstOrder);
+    assert.equal(
+      (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n,
+      1,
+    );
+
+    recordOrder.execute(input, { customerId, idempotencyKey: `${eventKey}-separate-message` });
+    assert.equal(
+      (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n,
+      2,
+    );
+
+    const paymentKey = `waha:test-payment-${Date.now()}`;
+    const firstPayment = recordPayment.execute({ amount: product.price }, { customerId, idempotencyKey: paymentKey });
+    const retriedPayment = recordPayment.execute({ amount: product.price }, { customerId, idempotencyKey: paymentKey });
+    assert.deepEqual(retriedPayment, firstPayment);
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as {
+        n: number;
+      }).n,
+      1,
+    );
+  } finally {
+    db.exec('rollback');
+  }
 });
 
 // --- Final Report & Clean Exit ---

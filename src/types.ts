@@ -33,5 +33,11 @@ export interface ToolDef {
     required?: string[];
   };
   // Runs the tool against our database and returns whatever the AI should see.
-  execute: (input: any, ctx: { customerId: number }) => Promise<unknown> | unknown;
+  execute: (input: any, ctx: ToolContext) => Promise<unknown> | unknown;
+}
+
+export interface ToolContext {
+  customerId: number;
+  /** Stable provider-event key. Present for real webhook turns, absent in direct/local calls. */
+  idempotencyKey?: string;
 }

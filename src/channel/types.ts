@@ -25,5 +25,5 @@ export interface ChannelAdapter {
    * caption, etc.) — the caller acknowledges those with 200 and does
    * nothing, rather than treating "not a message" as an error.
    */
-  parseInboundWebhook(payload: unknown): { phone: string; text: string } | null;
+  parseInboundWebhook(payload: unknown): { phone: string; text: string; messageId?: string } | null;
 }

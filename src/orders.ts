@@ -50,6 +50,65 @@ export function checkOrderStatusTransition(current: OrderStatus, next: OrderStat
   return { ok: true };
 }
 
+export interface TransitionLogEntry {
+  readonly from: OrderStatus;
+  readonly to: OrderStatus;
+  readonly timestamp: Date;
+}
+
+/**
+ * Object-Oriented Domain Entity encapsulating retail order state transitions,
+ * transition validation, terminal state enforcement, and transition audit history.
+ */
+export class OrderStateMachine {
+  private _status: OrderStatus;
+  private readonly _orderId?: number;
+  private readonly _history: TransitionLogEntry[] = [];
+
+  constructor(initialStatus: OrderStatus = 'placed', orderId?: number) {
+    if (!ORDER_STATUSES.includes(initialStatus)) {
+      throw new Error(`Invalid initial order status: "${initialStatus}"`);
+    }
+    this._status = initialStatus;
+    this._orderId = orderId;
+  }
+
+  get status(): OrderStatus {
+    return this._status;
+  }
+
+  get orderId(): number | undefined {
+    return this._orderId;
+  }
+
+  get history(): ReadonlyArray<TransitionLogEntry> {
+    return this._history;
+  }
+
+  canTransitionTo(next: OrderStatus): StatusCheckResult {
+    return checkOrderStatusTransition(this._status, next);
+  }
+
+  transition(next: OrderStatus): StatusCheckResult {
+    const check = this.canTransitionTo(next);
+    if (!check.ok) {
+      return check;
+    }
+    const from = this._status;
+    this._status = next;
+    this._history.push({ from, to: next, timestamp: new Date() });
+    return { ok: true };
+  }
+
+  isTerminal(): boolean {
+    return ALLOWED_TRANSITIONS[this._status].length === 0;
+  }
+
+  getAllowedTransitions(): readonly OrderStatus[] {
+    return ALLOWED_TRANSITIONS[this._status];
+  }
+}
+
 export type TransitionResult =
   | { ok: true; order_id: number; from: OrderStatus; to: OrderStatus }
   | { ok: false; error: string };

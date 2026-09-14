@@ -88,6 +88,11 @@ The application delivers against all four commercial business promises:
   - `top_selling_product`: All-time volume and revenue leader across completed orders.
   - `pending_followups`: Overdue unpaid orders sitting for $>2$ days (flagged overdue if $>7$ days).
 
+### 5. Object-Oriented Domain Entities & Abstractions
+- **`OrderStateMachine` (`src/orders.ts`)**: Encapsulates forward-only state progression (`placed → confirmed → paid → shipped → delivered`), validates transitions, prevents state skipping, and maintains an in-memory audit history log.
+- **`LedgerAccount` (`src/ledger.ts`)**: Domain entity that enforces double-entry accounting invariants (positive amounts, dynamic derivation, immutability of historical ledger entries).
+- **`WahaAdapter implements ChannelAdapter` (`src/channel/waha.ts`)**: Polymorphic provider abstraction encapsulating HTTP connection parameters, session routing, and privacy LID resolution.
+
 ---
 
 ## 🛠️ Technology Stack
