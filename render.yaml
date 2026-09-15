@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: ahmed-assistant-portfolio
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run demo:build
+    startCommand: npm run demo:start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_VERSION
+        value: 24.8.0

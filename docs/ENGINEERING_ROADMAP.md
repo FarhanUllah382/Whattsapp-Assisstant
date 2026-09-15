@@ -2105,6 +2105,50 @@ fully met.
 
 ---
 
+## Portfolio Demo Frontend — not part of Ahmed's four promises
+
+This is a developer portfolio/recruiter artifact, deliberately separate from
+the product version sequence. It is **not Version 4 or Version 5**, does not add
+anything to Ahmed's daily operation, and does not change any Version 1–3
+business path.
+
+- **Data boundary:** a deterministic build-time seed creates
+  `portfolio-demo/data/portfolio-demo.db`, a separate ignored SQLite file with
+  three invented customer names, clearly non-dialable `DEMO-CUSTOMER-*`
+  identifiers, synthetic order/ledger history, and twelve written-for-demo
+  chat messages. The real `ahmed.db` is never copied or opened by this feature;
+  a hash-before/hash-after build verification proved it remained byte-for-byte
+  unchanged.
+- **Read-only boundary:** the generated deployment bundle copies the existing
+  `analytics.ts` and `followups.ts` readers unchanged, with only their pure
+  pacing helpers, a demo-only balance reader, and a demo-only SQLite adapter.
+  SQLite is opened with `readonly: true`, `fileMustExist: true`, and
+  `query_only = ON`; a deterministic test proves an attempted insert fails.
+  The public runtime contains no WhatsApp adapter, model client, credentials,
+  production database, order writer, alert sender, or messaging tool. Its API
+  exposes GET-only summary, orders, conversation, and health routes.
+- **Views built:** sales-today, unpaid-customer count and total, top-selling
+  product, and pending-follow-up summary cards use the real readers against the
+  synthetic database; recent orders visibly exercise all six retail statuses;
+  and three WhatsApp-style conversations demonstrate cross-day memory recall,
+  a correctly refused discount, and an honest owner handoff for an out-of-scope
+  request. The interface is responsive, keyboard-accessible, and labels the
+  data as synthetic throughout.
+- **Verification (2026-09-15):** isolated build and demo typecheck passed;
+  `demo:verify` proved fake identifiers, all six statuses, the expected real
+  analytics results, and database-level write rejection; HTTP health returned
+  200 while POST and unknown API routes returned 404; desktop and narrow-screen
+  browser renders were inspected; the full existing product suite remained
+  39/39 green, plus the activation-date/shared-pacing and durable-alert suites,
+  and the production typecheck passed.
+- **Hosting:** Render free Web Service, configured by root `render.yaml` with a
+  generated ephemeral demo database and no secrets. **Public deployment is the
+  only remaining step**; replace this sentence with the live URL and deployed
+  verification result once Render finishes.
+- **Status:** ✅ Built and locally verified; ⏳ public deployment pending.
+
+---
+
 ## Version 4 — Stretch / polish (beyond the original spec)
 
 Lower priority; sequence freely once v1–v3 exist.

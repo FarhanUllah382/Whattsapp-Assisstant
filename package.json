@@ -10,7 +10,11 @@
     "test": "tsx tests/index.ts && tsx tests/pacing-activation.test.ts && tsx tests/alerts.test.ts",
     "test:e2e": "tsx scripts/test-v2-flow.ts",
     "typecheck": "tsc --noEmit",
-    "seed": "tsx scripts/seed-catalog.ts"
+    "seed": "tsx scripts/seed-catalog.ts",
+    "demo:seed": "tsx scripts/seed-portfolio-demo.ts",
+    "demo:build": "npm run demo:seed && tsx scripts/build-portfolio-demo.ts",
+    "demo:start": "tsx .portfolio-runtime/server.ts",
+    "demo:verify": "tsx scripts/verify-portfolio-demo.ts"
   },
   "dependencies": {
     "better-sqlite3": "12.10.0",
