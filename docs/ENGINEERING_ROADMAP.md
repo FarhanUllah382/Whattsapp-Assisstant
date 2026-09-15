@@ -2141,11 +2141,19 @@ business path.
   browser renders were inspected; the full existing product suite remained
   39/39 green, plus the activation-date/shared-pacing and durable-alert suites,
   and the production typecheck passed.
-- **Hosting:** Render free Web Service, configured by root `render.yaml` with a
-  generated ephemeral demo database and no secrets. **Public deployment is the
-  only remaining step**; replace this sentence with the live URL and deployed
-  verification result once Render finishes.
-- **Status:** ✅ Built and locally verified; ⏳ public deployment pending.
+- **Hosting/live verification (2026-09-15):** deployed as a Render free Web
+  Service at `https://ahmed-assistant-portfolio.onrender.com`. The public
+  homepage and `/health` returned HTTP 200; health explicitly reported
+  `synthetic-demo-only` and `read-only`. All four summary calculations matched
+  the local proof (Rs.7,200 today, 3 customers/Rs.10,400 unpaid, Everyday Polo
+  top with 5 units, 2 pending follow-ups), all 9 orders and all 3 conversations
+  loaded, and all six status badges were present. POST and unknown API paths
+  both returned 404. A scan of every public JSON response found zero real-phone
+  patterns and zero credential/API-key patterns; the expected CSP,
+  no-referrer, and no-sniff headers were present. A full deployed-page browser
+  render confirmed the summary, complete order table, WhatsApp-style viewer,
+  and privacy architecture section all render correctly.
+- **Status:** ✅ Built, locally verified, publicly deployed, and live-verified.
 
 ---
 
