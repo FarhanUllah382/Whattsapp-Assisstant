@@ -15,13 +15,15 @@ async function runV2Verification(): Promise<void> {
   console.log('=== Starting Comprehensive Version 2 Verification ===\n');
 
   // Clean test setup
-  const testPhone = `test-v2-${Date.now()}`;
+  const testRunId = Date.now();
+  const testPhone = `test-v2-${testRunId}`;
+  const testProductName = `test-shirt-${testRunId}`;
   const customerResult = db.prepare('insert into customers (phone, name) values (?, ?)').run(testPhone, 'Test Customer');
   const customerId = customerResult.lastInsertRowid as number;
 
   const productResult = db.prepare(
     'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)'
-  ).run('test-shirt', 'medium', 'black', 2500, 10);
+  ).run(testProductName, 'medium', 'black', 2500, 10);
   const productId = productResult.lastInsertRowid as number;
 
   const ctx = { customerId };
@@ -29,7 +31,7 @@ async function runV2Verification(): Promise<void> {
   try {
     // 1. Stock Check
     console.log('Test 1: Stock checking via check_stock');
-    const stockCheck: any = checkStock.execute({ name: 'test-shirt', size: 'medium', color: 'black' }, ctx);
+    const stockCheck: any = checkStock.execute({ name: testProductName, size: 'medium', color: 'black' }, ctx);
     assert(Array.isArray(stockCheck) && stockCheck.length === 1, 'Found product by name, size, color');
     assert(stockCheck[0].stock === 10, 'Initial stock is 10');
 

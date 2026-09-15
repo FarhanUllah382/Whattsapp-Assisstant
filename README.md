@@ -1,7 +1,7 @@
 # Ahmed's WhatsApp Assistant
 
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-22%2B-green.svg?style=flat-square&logo=node.js)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-24_LTS-green.svg?style=flat-square&logo=node.js)](https://nodejs.org/)
 [![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57.svg?style=flat-square&logo=sqlite)](https://github.com/WiseLibs/better-sqlite3)
 [![Gemini](https://img.shields.io/badge/LLM-Google%20Gemini-orange.svg?style=flat-square&logo=google)](https://ai.google.dev/)
 [![WAHA](https://img.shields.io/badge/Channel-WAHA%20(WhatsApp%20API)-25D366.svg?style=flat-square&logo=whatsapp)](https://waha.devlike.pro/)
@@ -99,7 +99,7 @@ The application delivers against all four commercial business promises:
 
 | Layer | Technology | Purpose |
 |---|---|---|
-| **Runtime & Language** | Node.js (v20+ / v22), TypeScript (Strict Mode) | Strong type safety and modern asynchronous execution. |
+| **Runtime & Language** | Node.js 24 LTS, TypeScript (Strict Mode) | Pinned runtime line with a Node-24-compatible native SQLite binding. |
 | **Server Framework** | Express.js | High-throughput, lightweight webhook listener. |
 | **Database** | SQLite via `better-sqlite3` | In-process, ultra-low latency relational database with atomic transactions. |
 | **AI / LLM Engine** | Google Gemini (`gemini-flash-lite-latest`) | High-speed function calling with thought-signature preservation. |
@@ -149,7 +149,7 @@ The application delivers against all four commercial business promises:
 ## ⚙️ Getting Started
 
 ### Prerequisites
-* **Node.js**: v20 or higher
+* **Node.js**: v24 LTS (`.nvmrc` pins the project runtime line)
 * **Docker**: Required for running WAHA locally
 * **Google Gemini API Key**: [Google AI Studio](https://aistudio.google.com/)
 
@@ -188,8 +188,6 @@ npx tsx scripts/seed-catalog.ts
 Run the assistant server:
 ```bash
 npm run dev
-# Or using the auto-restart loop:
-bash _tmp-run-loop.sh
 ```
 
 The service will start on port `3000`, listening for inbound WhatsApp webhooks at `/webhook/whatsapp`.

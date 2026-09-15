@@ -2,6 +2,9 @@
   "name": "ahmed-assistant",
   "version": "0.1.0",
   "private": true,
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "dev": "node --env-file-if-exists=.env --import tsx src/server.ts",
     "test": "tsx tests/index.ts && tsx tests/pacing-activation.test.ts && tsx tests/alerts.test.ts",
@@ -10,7 +13,7 @@
     "seed": "tsx scripts/seed-catalog.ts"
   },
   "dependencies": {
-    "better-sqlite3": "^11.3.0",
+    "better-sqlite3": "12.10.0",
     "express": "^4.19.2"
   },
   "devDependencies": {

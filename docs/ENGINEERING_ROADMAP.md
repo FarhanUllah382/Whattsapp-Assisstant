@@ -46,6 +46,20 @@ result of this exception, not a sign something was skipped by mistake.
   `top_selling_product`, and `pending_followups`); 3.3 is complete after the
   already-existing pending alert was delivered exactly once to the owner via
   real WhatsApp. Version 4 remains untouched.
+- **Current runtime reliability status (verified 2026-09-15):** the Node 24
+  native SQLite crash is now **fixed**. The project was still loading
+  `better-sqlite3` 11.10.0, a pre-Node-24-support binding, on Node 24.19.0
+  (ABI 137). It now pins `better-sqlite3` 12.10.0, whose published engine
+  range and prebuilds include Node 24, and pins the project runtime to the
+  Node 24 LTS line through `package.json` and `.nvmrc`. Verification after
+  replacement: typecheck passed; 100 separate native open/write/cleanup
+  processes passed; the complete permanent suite passed 15 consecutive
+  times; the complete Version 2 database flow passed; and the live worker was
+  restarted directly without the old restart loop. The new worker remained
+  healthy (expected HTTP 404 at the app root), WAHA returned pong, and no
+  restart-loop process remained. The older dated entries below accurately
+  describe when this issue was only mitigated; this entry supersedes them as
+  the current status.
 - **A verified extraction of 20-21 reusable files from DeskcommCRM exists**,
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
@@ -1312,8 +1326,6 @@ shared decision function; nothing bypasses anti-ban pacing.
 
 ### Explicitly carried forward, unresolved — Version 1 completion does not mean any of these are fixed
 
-- **Node v24 native crash** — mitigated by a dev-only restart loop only;
-  root cause unresolved (see above).
 - **Per-number health circuit** (`health/defaults.ts`) — staged in
   `EXTRACTED-FOR-AHMED/`, never pulled in; no current requirement forced it
   yet.
@@ -2042,8 +2054,9 @@ the MVP-complete milestone.**
   explicitly hides and then restores genuine live pending alerts so a mock
   can never mark production work delivered. The older Version 2 end-to-end
   runner could not complete on this
-  pass because the known Node v24/`better-sqlite3` native crash recurred;
-  that crash remains **mitigated by the restart loop, not fixed**.
+  pass because the then-unresolved Node v24/`better-sqlite3` native crash
+  recurred. That historical failure was subsequently fixed by the runtime
+  dependency correction recorded in §0's current-status section.
 - **Precise remaining caveat:** like the pre-existing customer and owner send
   paths, an unavoidable crash in the tiny interval after WAHA accepts the
   message but before SQLite marks the alert `sent` can still duplicate it on
@@ -2079,9 +2092,10 @@ the MVP-complete milestone.**
 - **Verification detail:** typecheck passed; the original permanent suite
   passed 39/39; the activation-date/shared-pacing and durable-alert suites
   passed separately. The combined command was interrupted after the original
-  39 checks by the known Node v24/`better-sqlite3` native cleanup assertion
-  before the later files ran, so those were rerun independently. That native
-  crash remains **mitigated by restart, not fixed**.
+  39 checks by the then-unresolved Node v24/`better-sqlite3` native cleanup
+  assertion before the later files ran, so those were rerun independently.
+  The native crash was subsequently fixed and stress-verified as recorded in
+  §0's current runtime reliability status.
 - **Status:** ✅ Done and live-verified (2026-09-15). Exactly one real WhatsApp
   alert reached the owner number ending 2409, sourced from the pre-existing
   customer-triggered pending record; no duplicate was sent.
