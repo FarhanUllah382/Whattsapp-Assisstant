@@ -121,3 +121,31 @@ create table if not exists handoff_ledger (
   reason text not null,
   created_at text not null default (datetime('now'))
 );
+
+-- Version 3.3: durable owner alerts. `owner_alert_events` gives every source
+-- event a stable idempotency key, while the partial unique index permits only
+-- one pending alert of each kind. If several matching conditions happen while
+-- delivery is pending, they accumulate on that one alert instead of flooding
+-- Ahmed with parallel duplicates. Successfully delivered alerts remain as an
+-- audit trail; a later, genuinely new source event may create a new alert.
+create table if not exists owner_alerts (
+  id integer primary key autoincrement,
+  kind text not null,
+  status text not null default 'pending' check (status in ('pending', 'sent')),
+  occurrence_count integer not null default 1 check (occurrence_count > 0),
+  first_customer_id integer not null references customers(id),
+  latest_customer_id integer not null references customers(id),
+  latest_reason text not null,
+  created_at text not null default (datetime('now')),
+  updated_at text not null default (datetime('now')),
+  sent_at text
+);
+
+create unique index if not exists owner_alerts_one_pending_per_kind
+  on owner_alerts(kind) where status = 'pending';
+
+create table if not exists owner_alert_events (
+  event_key text primary key,
+  alert_id integer not null references owner_alerts(id),
+  created_at text not null default (datetime('now'))
+);

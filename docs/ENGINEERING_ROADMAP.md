@@ -14,7 +14,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
 | 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified; customer-facing order/payment/status/stock behavior and the owner follow-up query passed against real WhatsApp messages. The deliberately non-repeatable safety-net branches and crash-retry bookkeeping receipt were verified directly and deterministically. |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 and 3.2 are built, locally verified, and live-verified through real owner-number WhatsApp messages. 3.3 remains out of scope/not started. |
+| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 and 3.2 are complete and live-verified. 3.3 is built and locally verified; its real WhatsApp alert-delivery pass is pending. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
 **Note on the 3.x exception, so anyone reading this later understands why
@@ -44,8 +44,9 @@ result of this exception, not a sign something was skipped by mistake.
   plus deterministic checks for branches a live model cannot reliably be
   forced to take; Versions 3.1 and 3.2 are complete and live-verified across
   all four owner questions (`sales_today`, `unpaid_customers`,
-  `top_selling_product`, and `pending_followups`); 3.3 and everything beyond
-  the current 3.2 scope remain untouched.
+  `top_selling_product`, and `pending_followups`); 3.3 is now built and
+  locally verified, with its real WhatsApp alert-delivery pass still pending.
+  Version 4 remains untouched.
 - **A verified extraction of 20-21 reusable files from DeskcommCRM exists**,
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
@@ -1319,11 +1320,12 @@ throttle doing its job, not a defect.
   the sending window correctly does not fire immediately, but nothing
   auto-fires it later on its own either; that needs genuinely new
   infrastructure, not a wiring task.
-- **`notify_owner` handoff delivery is still log-only** — satisfies
-  CLAUDE.md §8's literal wording (a handoff is triggered, not a guess), but
-  Ahmed only sees a log line today, not an actual WhatsApp message to his
-  own number. The blocker that originally deferred this (1.3 unverified) is
-  gone; the upgrade itself simply hasn't been built yet.
+- **`notify_owner` handoff delivery is no longer log-only in the current
+  build** — Version 3.3 now records a durable, retry-deduplicated owner alert
+  and sends it through the configured owner-number WhatsApp path. This is
+  locally verified but not yet live-verified, so it is not called complete;
+  the historical Version 1 behavior described above remains accurate for
+  the version at that time.
 - ~~`catalog.md`'s content is still placeholder text~~ — **resolved
   2026-09-05**, later the same day this list was written: Ahmed provided
   real product/payment/delivery/return/exchange content, written in and
@@ -2015,7 +2017,50 @@ the MVP-complete milestone.**
   it's simple.
 - **Definition of done:** trigger a condition that should alert Ahmed — he
   receives exactly one WhatsApp message, not a flood of duplicates on retry.
-- **Status:** 🔲 Not started.
+- **Built (2026-09-15):** `notify_owner`, customer reply-failure alerts, and
+  the Version 2.3 unlogged-order/unlogged-payment safety-net handoffs now
+  create durable `owner_alerts` records before attempting delivery to the
+  configured `AHMED_OWNER_PHONE`. Stable provider-event keys are recorded in
+  `owner_alert_events`, so a successfully delivered event is not sent again
+  on an ordinary webhook retry. A partial unique index permits only one
+  pending alert per kind; another condition of the same kind accumulates on
+  that row while delivery is pending instead of creating a parallel flood.
+  Alert sends reuse the existing shared send lock and pacing decision, and
+  successful alert texts are recorded in the same outbound `messages`
+  history as every other send from the one WhatsApp number. A narrow
+  Version-3.3-only retry worker checks durable pending owner alerts once per
+  minute, including immediately at server startup, so a pacing veto or
+  temporary WAHA failure does not strand the alert; this is not the general
+  customer-message async queue that remains explicitly unbuilt.
+- **Locally verified (2026-09-15):** a real SQLite-backed regression check
+  proved first delivery, same-event retry suppression (one send total), a
+  simulated gateway failure remaining pending, recovery by the automatic
+  pending-alert retry path without a new event, and two pending alerts of one
+  kind grouping into one delivered WhatsApp body. The permanent suite is
+  39/39 green plus this new alert regression check. The test transaction
+  explicitly hides and then restores genuine live pending alerts so a mock
+  can never mark production work delivered. The older Version 2 end-to-end
+  runner could not complete on this
+  pass because the known Node v24/`better-sqlite3` native crash recurred;
+  that crash remains **mitigated by the restart loop, not fixed**.
+- **Precise remaining caveat:** like the pre-existing customer and owner send
+  paths, an unavoidable crash in the tiny interval after WAHA accepts the
+  message but before SQLite marks the alert `sent` can still duplicate it on
+  retry; no provider-side idempotency key exists in the current WAHA adapter.
+  Ordinary retries after the successful local status write are deduplicated.
+- **First live attempt (2026-09-15): not a pass yet.** The requested discount
+  text arrived from the owner number ending 2409, so it correctly entered the
+  owner turn and did not create a customer handoff. A later real message from
+  non-owner number ending 3460 did create alert #1 (`reply_failure`) after the
+  customer reply was blocked by the already-exhausted 20/day warm-up cap.
+  That alert is durably `pending`; delivery to 2409 was correctly blocked by
+  the same shared anti-ban cap rather than bypassing it. This real result
+  exposed the missing automatic pending retry described above, which is now
+  fixed and locally verified. The live worker is running the fix and will
+  retry alert #1 when pacing allows; receipt on 2409 is still required.
+- **Status:** 🟡 Built and locally verified; live WhatsApp verification
+  pending. Do not mark complete until a real non-owner customer condition
+  produces exactly one alert on the confirmed owner number ending 2409.
 
 **v3 exit criteria:** all four promises in `ahmed-whatsapp-assistant.md` are
 fully met.

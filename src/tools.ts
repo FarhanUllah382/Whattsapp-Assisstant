@@ -316,46 +316,67 @@ export const searchCatalog: ToolDef = {
 };
 
 // Shared between notify_owner's own execute() and the Version 2.3 safety
-// net in agent.ts's CLOSE step (flagging a possible order/payment the
-// model wasn't confident enough to auto-log). Real WhatsApp delivery to
-// Ahmed's own number still isn't built (1.3 itself has been live-verified
-// since 2026-09-04 — that's not what's blocking this, the upgrade itself
-// just hasn't been done yet, see PROJECT-TRACKER-FINAL.md's Version 1
-// final-status note). Until then, this log line + ledger row IS the
-// handoff delivery mechanism: a distinct, greppable marker Ahmed (or
-// whoever's watching the logs) can act on directly.
-export function recordHandoff(customerId: number, reason: string): void {
-  db.prepare('insert into handoff_ledger (customer_id, reason) values (?, ?)').run(customerId, reason);
+// net in agent.ts's CLOSE step (flagging a possible order/payment the model
+// wasn't confident enough to auto-log). This remains the durable handoff
+// audit row and visible log marker. Version 3.3 adds WhatsApp delivery on top
+// through createNotifyOwnerTool's injected callback; it does not replace or
+// weaken this original record.
+export function recordHandoff(customerId: number, reason: string): number {
+  const result = db.prepare('insert into handoff_ledger (customer_id, reason) values (?, ?)').run(customerId, reason);
   log.warn('NEEDS AHMED', { customerId, reason });
+  return Number(result.lastInsertRowid);
 }
 
-export const notifyOwner: ToolDef = {
-  name: 'notify_owner',
-  description:
-    "Hand this conversation off to Ahmed directly — use when you genuinely can't resolve " +
-    'something yourself (a question outside what you know, a customer asking for a bigger ' +
-    'discount than you can approve, anything needing his judgment). Always call this BEFORE ' +
-    "telling the customer someone will follow up with them — that promise isn't allowed to " +
-    'send otherwise.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      reason: { type: 'string', description: "what Ahmed needs to look at, and why" },
+type HandoffAlertDelivery = (input: {
+  customerId: number;
+  reason: string;
+  eventKey: string;
+}) => Promise<{ ok: boolean; status?: string; alertId?: number; error?: string }>;
+
+export function createNotifyOwnerTool(deliverAlert?: HandoffAlertDelivery): ToolDef {
+  return {
+    name: 'notify_owner',
+    description:
+      "Hand this conversation off to Ahmed directly — use when you genuinely can't resolve " +
+      'something yourself (a question outside what you know, a customer asking for a bigger ' +
+      'discount than you can approve, anything needing his judgment). Always call this BEFORE ' +
+      "telling the customer someone will follow up with them — that promise isn't allowed to " +
+      'send otherwise.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: "what Ahmed needs to look at, and why" },
+      },
+      required: ['reason'],
     },
-    required: ['reason'],
-  },
-  execute: ({ reason }, ctx) => {
-    if (typeof reason !== 'string' || reason.trim() === '') {
-      return { ok: false, error: 'Please describe what Ahmed needs to look at.' };
-    }
-    try {
-      recordHandoff(ctx.customerId, reason.trim());
-      return { ok: true };
-    } catch {
-      return { ok: false, error: 'Could not record the handoff — please try again.' };
-    }
-  },
-};
+    execute: async ({ reason }, ctx) => {
+      if (typeof reason !== 'string' || reason.trim() === '') {
+        return { ok: false, error: 'Please describe what Ahmed needs to look at.' };
+      }
+      try {
+        const cleanReason = reason.trim();
+        const handoffId = recordHandoff(ctx.customerId, cleanReason);
+        if (!deliverAlert) return { ok: true, handoff_id: handoffId };
+
+        const delivery = await deliverAlert({
+          customerId: ctx.customerId,
+          reason: cleanReason,
+          eventKey: `customer_handoff:${ctx.idempotencyKey ?? `handoff:${handoffId}`}`,
+        });
+        return delivery.ok
+          ? { ok: true, handoff_id: handoffId, alert_status: delivery.status, alert_id: delivery.alertId }
+          : { ok: false, handoff_id: handoffId, error: delivery.error };
+      } catch {
+        return { ok: false, error: 'Could not record the handoff — please try again.' };
+      }
+    },
+  };
+}
+
+// The default remains useful for direct tool execution and fail-closed local
+// environments. runTurn() replaces it with the delivery-enabled instance when
+// a configured owner WhatsApp sender is available.
+export const notifyOwner: ToolDef = createNotifyOwnerTool();
 
 // `send_message` is deliberately NOT here — it's wired up in agent.ts
 // because it needs access to the actual WhatsApp-sending function, which

@@ -15,16 +15,20 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import express from 'express';
-import { runOwnerTurn, runTurn } from './agent';
+import { retryOwnerAlerts, runOwnerTurn, runTurn } from './agent';
 import { wahaAdapter } from './channel/waha';
 import { createLogger } from './obs/logger';
-import { isOwnerPhone } from './owner';
+import { AHMED_OWNER_PHONE, isOwnerPhone } from './owner';
 
 const app = express();
 app.use(express.json());
 
 const channel = wahaAdapter;
 const log = createLogger();
+const configuredOwnerPhone = AHMED_OWNER_PHONE;
+const sendOwnerAlert = configuredOwnerPhone
+  ? (body: string) => channel.sendText(configuredOwnerPhone, body)
+  : undefined;
 
 app.post('/webhook/whatsapp', async (req, res) => {
   const inbound = channel.parseInboundWebhook(req.body);
@@ -55,6 +59,7 @@ app.post('/webhook/whatsapp', async (req, res) => {
         inbound.text,
         (body) => channel.sendText(inbound.phone, body),
         inboundEventKey,
+        sendOwnerAlert,
       );
     }
     log.info('turn completed', { phone: inbound.phone, turnKind: isOwner ? 'owner' : 'customer' });
@@ -70,4 +75,17 @@ app.post('/webhook/whatsapp', async (req, res) => {
 });
 
 const PORT = process.env.PORT ?? 3000;
-app.listen(PORT, () => log.info('listening', { port: PORT, channel: channel.channel }));
+app.listen(PORT, () => {
+  log.info('listening', { port: PORT, channel: channel.channel });
+  if (sendOwnerAlert) {
+    const retry = (): void => {
+      void retryOwnerAlerts(sendOwnerAlert).catch((err) => {
+        log.error('pending owner alert retry failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    };
+    retry();
+    setInterval(retry, 60_000).unref();
+  }
+});

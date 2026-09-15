@@ -13,6 +13,7 @@
 
 import { createHash } from 'node:crypto';
 
+import { deliverOwnerAlert, retryPendingOwnerAlerts, type OwnerAlertKind } from './alerts';
 import { db } from './db';
 import { checkDiscountRule } from './guardrails/discount-rules';
 import { detectHumanPromise } from './guardrails/human-promise';
@@ -23,7 +24,8 @@ import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from '
 import { recordCredit } from './ledger';
 import { callModel, type ModelMessage } from './llm';
 import { createLogger } from './obs/logger';
-import { baseTools, insertValidatedOrder, ownerTools, recordHandoff, runBookkeepingOnce, validateOrderItems } from './tools';
+import { AHMED_OWNER_PHONE } from './owner';
+import { baseTools, createNotifyOwnerTool, insertValidatedOrder, ownerTools, recordHandoff, runBookkeepingOnce, validateOrderItems } from './tools';
 import type { Customer, ToolContext, ToolDef } from './types';
 
 const log = createLogger();
@@ -329,6 +331,20 @@ function getOrCreateCustomer(phone: string): Customer {
     .get(result.lastInsertRowid) as Customer;
 }
 
+function makePacedOwnerAlertSend(
+  sendToOwner?: (text: string) => Promise<void>,
+): ((body: string) => Promise<void>) | undefined {
+  if (!sendToOwner || !AHMED_OWNER_PHONE) return undefined;
+  const owner = getOrCreateCustomer(AHMED_OWNER_PHONE.replace(/\D/g, ''));
+  return async (body: string): Promise<void> => {
+    const output = await makeOwnerSendTool(sendToOwner).execute(
+      { body },
+      { customerId: owner.id },
+    ) as { ok?: boolean; error?: string };
+    if (!output.ok) throw new Error(output.error ?? 'Owner alert send failed.');
+  };
+}
+
 /**
  * The public entry point — this is what server.ts calls when a WhatsApp
  * message arrives. Compare to `runAgentTurn` in the big file: same job,
@@ -340,6 +356,7 @@ export async function runTurn(
   incomingText: string,
   sendToCustomer: (text: string) => Promise<void>,
   inboundEventKey?: string,
+  sendToOwner?: (text: string) => Promise<void>,
 ): Promise<void> {
   const customer = getOrCreateCustomer(phone);
 
@@ -388,10 +405,39 @@ export async function runTurn(
   // so a retried runTurn() call (e.g. a redelivered webhook after a crash)
   // reuses it and its send_message call collides with the prior attempt.
   const turnKey = inboundEventKey ?? `${customer.id}:${incomingText}`;
-  const tools = [...baseTools, makeSendMessageTool(sendToCustomer, turnKey)];
+  const pacedOwnerAlertSend = makePacedOwnerAlertSend(sendToOwner);
+  const deliverConfiguredAlert = pacedOwnerAlertSend
+    ? (kind: OwnerAlertKind, eventKey: string, customerId: number, reason: string) =>
+        deliverOwnerAlert({ kind, eventKey, customerId, reason, send: pacedOwnerAlertSend })
+    : undefined;
+  const notifyOwnerTool = createNotifyOwnerTool(
+    deliverConfiguredAlert
+      ? ({ customerId, reason, eventKey }) =>
+          deliverConfiguredAlert('customer_handoff', eventKey, customerId, reason)
+      : undefined,
+  );
+  const tools = [
+    ...baseTools.filter((tool) => tool.name !== 'notify_owner'),
+    notifyOwnerTool,
+    makeSendMessageTool(sendToCustomer, turnKey),
+  ];
   const toolContext: ToolContext = {
     customerId: customer.id,
     idempotencyKey: inboundEventKey,
+  };
+
+  const recordAndAlertHandoff = async (kind: OwnerAlertKind, reason: string): Promise<void> => {
+    const handoffId = recordHandoff(customer.id, reason);
+    if (!deliverConfiguredAlert) return;
+    const eventKey = `${kind}:${inboundEventKey ?? `handoff:${handoffId}`}`;
+    const delivery = await deliverConfiguredAlert(kind, eventKey, customer.id, reason);
+    if (!delivery.ok) {
+      log.error('recorded handoff alert remains pending', {
+        customerId: customer.id,
+        alertId: delivery.alertId,
+        kind,
+      });
+    }
   };
 
   // ── 2. LOOP — let the AI call tools, including send_message, until done ─
@@ -493,17 +539,13 @@ export async function runTurn(
       }
     }
 
-    const notifyOwnerTool = tools.find((t) => t.name === 'notify_owner')!;
     const reason = !wasCalled
       ? `Bot failed to reply on its own (no send_message call this turn). ` +
         `Tools called: ${[...toolsCalledThisTurn].join(', ') || 'none'}. ` +
         `Discarded model text: "${lastAssistantText}"`
       : `Bot tried to reply but send_message was blocked every time this turn. ` +
         `Last reason: ${lastSendMessageError}`;
-    await notifyOwnerTool.execute(
-      { reason },
-      toolContext,
-    );
+    await recordAndAlertHandoff('reply_failure', reason);
   }
 
   // ── 3. CLOSE — force a summary + any new durable facts, save both ──────
@@ -615,13 +657,16 @@ export async function runTurn(
             total: result.total,
           });
         } else {
-          recordHandoff(
-            customer.id,
+          await recordAndAlertHandoff(
+            'unlogged_order',
             `Possible order the bot couldn't auto-log (${check.error}): ${String(unloggedOrder.description ?? '').slice(0, 400)}`,
           );
         }
       } else if (typeof unloggedOrder.description === 'string' && unloggedOrder.description.trim() !== '') {
-        recordHandoff(customer.id, `Possible unlogged order needs Ahmed's confirmation: ${unloggedOrder.description.trim().slice(0, 400)}`);
+        await recordAndAlertHandoff(
+          'unlogged_order',
+          `Possible unlogged order needs Ahmed's confirmation: ${unloggedOrder.description.trim().slice(0, 400)}`,
+        );
       }
     }
 
@@ -634,7 +679,10 @@ export async function runTurn(
         });
         log.info('safety-net payment logged at turn close', { customerId: customer.id, amount });
       } else if (typeof unloggedPayment.description === 'string' && unloggedPayment.description.trim() !== '') {
-        recordHandoff(customer.id, `Possible unlogged payment needs Ahmed's confirmation: ${unloggedPayment.description.trim().slice(0, 400)}`);
+        await recordAndAlertHandoff(
+          'unlogged_payment',
+          `Possible unlogged payment needs Ahmed's confirmation: ${unloggedPayment.description.trim().slice(0, 400)}`,
+        );
       }
     }
   } catch (err) {
@@ -726,6 +774,21 @@ function makeOwnerSendTool(sendToOwner: (text: string) => Promise<void>): ToolDe
       }
     },
   };
+}
+
+export async function retryOwnerAlerts(
+  sendToOwner: (text: string) => Promise<void>,
+): Promise<void> {
+  const send = makePacedOwnerAlertSend(sendToOwner);
+  if (!send) return;
+  const results = await retryPendingOwnerAlerts(send);
+  if (results.length > 0) {
+    log.info('pending owner alerts checked', {
+      total: results.length,
+      sent: results.filter((result) => result.ok).length,
+      stillPending: results.filter((result) => !result.ok).length,
+    });
+  }
 }
 
 /**

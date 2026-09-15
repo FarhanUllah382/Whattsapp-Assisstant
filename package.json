@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx src/server.ts",
-    "test": "tsx tests/index.ts",
+    "test": "tsx tests/index.ts && tsx tests/alerts.test.ts",
     "test:e2e": "tsx scripts/test-v2-flow.ts",
     "typecheck": "tsc --noEmit",
     "seed": "tsx scripts/seed-catalog.ts"
