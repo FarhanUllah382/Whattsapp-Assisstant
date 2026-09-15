@@ -18,7 +18,12 @@ import { db } from './db';
 import { checkDiscountRule } from './guardrails/discount-rules';
 import { detectHumanPromise } from './guardrails/human-promise';
 import { PACING_DEFAULTS } from './guardrails/pacing/defaults';
-import { dayStartInTz, decidePacing, type PacingState } from './guardrails/pacing/engine';
+import { decideSharedPacing } from './guardrails/pacing/configured';
+import {
+  dayStartInTz,
+  parseActivationDateInTz,
+  type PacingState,
+} from './guardrails/pacing/engine';
 import { SPINNING_DEFAULTS } from './guardrails/spinning/defaults';
 import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from './guardrails/spinning/engine';
 import { recordCredit } from './ledger';
@@ -108,13 +113,13 @@ function nowSql(): string {
 // aggregate, not any single customer's thread — so both look at sends across
 // ALL customers, not just the one this turn is talking to.
 
-function getPacingState(timezone: string): PacingState {
+function getPacingState(timezone: string, now: Date = new Date()): PacingState {
   const last = db
     .prepare("select created_at from messages where direction = 'outbound' order by id desc limit 1")
     .get() as { created_at: string } | undefined;
   const lastSentAt = last ? new Date(last.created_at.replace(' ', 'T') + 'Z') : null;
 
-  const todayStart = dayStartInTz(new Date(), timezone);
+  const todayStart = dayStartInTz(now, timezone);
   const todayStartSql = todayStart.toISOString().slice(0, 19).replace('T', ' ');
   const sentToday = (
     db
@@ -122,10 +127,11 @@ function getPacingState(timezone: string): PacingState {
       .get(todayStartSql) as { c: number }
   ).c;
 
-  // No real WhatsApp connection yet (that's separate follow-up work), so there's
-  // no genuine "number activation date" to read — treat it as unknown, which
-  // the engine itself already treats as the most conservative warm-up step.
-  return { lastSentAt, sentToday, numberActivatedAt: null };
+  const numberActivatedAt = parseActivationDateInTz(
+    process.env.PACING_NUMBER_ACTIVATED_ON,
+    timezone,
+  );
+  return { lastSentAt, sentToday, numberActivatedAt };
 }
 
 // Percentages already on record for this customer — from their own
@@ -229,12 +235,11 @@ function makeSendMessageTool(
           // real job queue yet to defer to, and literally sleeping for hours would
           // hang this request. Only the short throttle/jitter gap (at most a couple
           // seconds by default) is worth actually blocking on.
-          const pacingDecision = decidePacing({
-            now: new Date(),
-            knobs: PACING_DEFAULTS,
-            state: getPacingState(PACING_DEFAULTS.timezone),
-            crmDailyLimit: null,
-          });
+          const now = new Date();
+          const pacingDecision = decideSharedPacing(
+            now,
+            getPacingState(PACING_DEFAULTS.timezone, now),
+          );
           if (!pacingDecision.allow) {
             return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
           }
@@ -746,12 +751,11 @@ function makeOwnerSendTool(sendToOwner: (text: string) => Promise<void>): ToolDe
       }
       try {
         return await withSendLock(async () => {
-          const pacingDecision = decidePacing({
-            now: new Date(),
-            knobs: PACING_DEFAULTS,
-            state: getPacingState(PACING_DEFAULTS.timezone),
-            crmDailyLimit: null,
-          });
+          const now = new Date();
+          const pacingDecision = decideSharedPacing(
+            now,
+            getPacingState(PACING_DEFAULTS.timezone, now),
+          );
           if (!pacingDecision.allow) {
             return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
           }

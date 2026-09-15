@@ -64,8 +64,8 @@ export const PACING_DEFAULTS: PacingKnobs = {
   // via PACING_TIMEZONE (an IANA zone) for any future shop in another zone;
   // this is just the correct default now that the real one is known.
   timezone: process.env.PACING_TIMEZONE ?? 'Asia/Karachi',
-  // Número sem linha em channel_knobs é tratado como idade 0 (o degrau mais
-  // conservador) até alguém registrar number_activated_at.
+  // Missing/invalid PACING_NUMBER_ACTIVATED_ON is treated as age 0 (the most
+  // conservative stage); parsing lives beside the pacing engine.
   warmupDailyCaps: [
     { minAgeDays: 0, cap: 20 },
     { minAgeDays: 4, cap: 50 },

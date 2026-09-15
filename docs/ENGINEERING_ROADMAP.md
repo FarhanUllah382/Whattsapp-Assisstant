@@ -1,11 +1,10 @@
 # Ahmed's WhatsApp Assistant — THE Tracker (v3, canonical)
 
-**Use this file. It replaces `PROJECT-TRACKER.md` and `PROJECT-TRACKER-v2.md`
-— both are now obsolete, keep them only as historical record.** It also
-replaces `roadmap.md` as a standalone reference — that document's structure
-and rigor were better than v2's, so this file adopts its shape, but corrects
-the one thing it got wrong (it was written as if nothing had been built yet)
-and restores the permanent-exclusions list it was missing.
+**Use this file. The former root `PROJECT-TRACKER-FINAL.md` was renamed to
+this path in commit `9550d2a`; there is no second live tracker and the old
+filename must not be recreated.** This file also replaces
+`PROJECT-TRACKER.md`, `PROJECT-TRACKER-v2.md`, and `roadmap.md` — those names
+are historical references only.
 
 Each major version delivers exactly one of Ahmed's four original promises,
 in dependency order. Version 4 is stretch work beyond the original spec.
@@ -14,7 +13,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
 | 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified; customer-facing order/payment/status/stock behavior and the owner follow-up query passed against real WhatsApp messages. The deliberately non-repeatable safety-net branches and crash-retry bookkeeping receipt were verified directly and deterministically. |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 and 3.2 are complete and live-verified. 3.3 is built and locally verified; its real WhatsApp alert-delivery pass is pending. |
+| 3.x | Promise 4 — Ahmed can just ask it questions | ✅ **Done (2026-09-15)** — 3.1/3.2 owner Q&A and 3.3 WhatsApp-delivered alerts are built, locally verified, and live-verified. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
 **Note on the 3.x exception, so anyone reading this later understands why
@@ -44,9 +43,9 @@ result of this exception, not a sign something was skipped by mistake.
   plus deterministic checks for branches a live model cannot reliably be
   forced to take; Versions 3.1 and 3.2 are complete and live-verified across
   all four owner questions (`sales_today`, `unpaid_customers`,
-  `top_selling_product`, and `pending_followups`); 3.3 is now built and
-  locally verified, with its real WhatsApp alert-delivery pass still pending.
-  Version 4 remains untouched.
+  `top_selling_product`, and `pending_followups`); 3.3 is complete after the
+  already-existing pending alert was delivered exactly once to the owner via
+  real WhatsApp. Version 4 remains untouched.
 - **A verified extraction of 20-21 reusable files from DeskcommCRM exists**,
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
@@ -1299,14 +1298,17 @@ being marked done. Nothing here was declared complete on inspection alone.
   Version 1 completion, nor by any Version 2 work since** — do not read
   anything above as implying otherwise.
 
-### Standing operational fact, not a bug
+### Resolved operational configuration defect (2026-09-15)
 
-The test number's daily warm-up cap (20/day for a day-0 number, per
-`pacing/defaults.ts`'s conservative warm-up schedule) is **exhausted** from
-today's own testing volume and resets at the next local-midnight window
-open (Asia/Karachi). Real customer traffic will queue behind this same cap,
-same as any test message would, until it resets — this is the anti-ban
-throttle doing its job, not a defect.
+The number was repeatedly reported as day 0 because `getPacingState()`
+hardcoded `numberActivatedAt: null`; this was one shared stale assumption,
+not a genuinely new number. Fixed with the persistent, gitignored
+`PACING_NUMBER_ACTIVATED_ON=2026-09-04`, interpreted as a local calendar date
+in `Asia/Karachi`. On 2026-09-15 that is age 11, selecting the existing
+8–14-day **100/day** stage. The 1.2–2.0-second throttle, 7h–22h window,
+Sunday setting, and fail-closed 20/day behavior for a missing/invalid date
+remain active. Both customer replies and owner/alert sends use the same
+shared decision function; nothing bypasses anti-ban pacing.
 
 ### Explicitly carried forward, unresolved — Version 1 completion does not mean any of these are fixed
 
@@ -1323,9 +1325,8 @@ throttle doing its job, not a defect.
 - **`notify_owner` handoff delivery is no longer log-only in the current
   build** — Version 3.3 now records a durable, retry-deduplicated owner alert
   and sends it through the configured owner-number WhatsApp path. This is
-  locally verified but not yet live-verified, so it is not called complete;
-  the historical Version 1 behavior described above remains accurate for
-  the version at that time.
+  now locally and live-verified; the historical Version 1 behavior described
+  above remains accurate for the version at that time.
 - ~~`catalog.md`'s content is still placeholder text~~ — **resolved
   2026-09-05**, later the same day this list was written: Ahmed provided
   real product/payment/delivery/return/exchange content, written in and
@@ -2048,19 +2049,42 @@ the MVP-complete milestone.**
   message but before SQLite marks the alert `sent` can still duplicate it on
   retry; no provider-side idempotency key exists in the current WAHA adapter.
   Ordinary retries after the successful local status write are deduplicated.
-- **First live attempt (2026-09-15): not a pass yet.** The requested discount
-  text arrived from the owner number ending 2409, so it correctly entered the
-  owner turn and did not create a customer handoff. A later real message from
-  non-owner number ending 3460 did create alert #1 (`reply_failure`) after the
-  customer reply was blocked by the already-exhausted 20/day warm-up cap.
-  That alert is durably `pending`; delivery to 2409 was correctly blocked by
-  the same shared anti-ban cap rather than bypassing it. This real result
-  exposed the missing automatic pending retry described above, which is now
-  fixed and locally verified. The live worker is running the fix and will
-  retry alert #1 when pacing allows; receipt on 2409 is still required.
-- **Status:** 🟡 Built and locally verified; live WhatsApp verification
-  pending. Do not mark complete until a real non-owner customer condition
-  produces exactly one alert on the confirmed owner number ending 2409.
+- **Pacing root cause fixed and live verification completed (2026-09-15):**
+  `getPacingState()` had
+  exactly one hardcoded `numberActivatedAt: null`; both customer and owner
+  sends consumed it, keeping the shared number on day 0 forever. New
+  `PACING_NUMBER_ACTIVATED_ON` parsing treats `YYYY-MM-DD` as midnight in
+  `PACING_TIMEZONE` using local calendar-day age. Missing, malformed,
+  impossible, or timezone-invalid values return `null` and retain the safest
+  20/day stage. The conservative, tracker-proven first-live-use date
+  2026-09-04 gives age 11 on 2026-09-15 and therefore the existing 100/day
+  stage—not an unlimited bypass. A new shared configured-decision function is
+  called by both customer `send_message` and owner/alert `send_message`; the
+  deterministic regression proved send 21 is allowed but waits the remaining
+  throttle interval, while send 101 is vetoed. `.env.example` documents the
+  settings, `npm run dev` loads a local gitignored `.env`, and the live `.env`
+  now persists the owner, WAHA/model credentials, timezone, and activation
+  date across application restarts without committing any secret.
+- **Existing-alert proof, not a fresh substitute:** restarting the live worker
+  with that configuration caused the already-existing real alert #1 to move
+  from `pending` to `sent` at 2026-09-15 13:02:02 UTC (18:02 Karachi). The
+  alert remained occurrence count 1; the owner conversation for the confirmed
+  number ending 2409 gained one matching outbound row, and WAHA's real chat
+  history independently showed exactly one copy of the same alert. App root
+  returned the expected HTTP 404 and WAHA `/ping` returned pong afterward.
+  A second deliberate worker restart loaded the same `.env`, returned on a
+  new process ID, kept alert #1 `sent`, and left the matching outbound count
+  at exactly one. This satisfies persistent configuration, real
+  customer-triggered delivery, and retry-dedup DoD.
+- **Verification detail:** typecheck passed; the original permanent suite
+  passed 39/39; the activation-date/shared-pacing and durable-alert suites
+  passed separately. The combined command was interrupted after the original
+  39 checks by the known Node v24/`better-sqlite3` native cleanup assertion
+  before the later files ran, so those were rerun independently. That native
+  crash remains **mitigated by restart, not fixed**.
+- **Status:** ✅ Done and live-verified (2026-09-15). Exactly one real WhatsApp
+  alert reached the owner number ending 2409, sourced from the pre-existing
+  customer-triggered pending record; no duplicate was sent.
 
 **v3 exit criteria:** all four promises in `ahmed-whatsapp-assistant.md` are
 fully met.

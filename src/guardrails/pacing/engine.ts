@@ -16,7 +16,7 @@ export interface PacingState {
   lastSentAt: Date | null;
   /** Envios deste número desde a meia-noite LOCAL do tenant. */
   sentToday: number;
-  /** Ativação do número (channel_knobs.number_activated_at); null = idade 0 (conservador). */
+  /** Number activation instant; null = conservative age 0. */
   numberActivatedAt: Date | null;
 }
 
@@ -29,8 +29,8 @@ export interface PacingInput {
    * mesmo banco agora: o chamador lê por query direta, não por edge HTTP.
    * null = sem limite conhecido. O Deskcomm também tem channel_sessions
    * warmup_started_at/warmup_completed_at/is_warmup_complete, mas o warm-up DESTE
-   * motor é o cálculo próprio por idade (channel_knobs.number_activated_at +
-   * degraus) — não os campos do CRM.
+   * motor é o cálculo próprio por idade (PACING_NUMBER_ACTIVATED_ON + degraus)
+   * — não os campos do CRM.
    */
   crmDailyLimit: number | null;
   /**
@@ -77,11 +77,11 @@ export function decidePacing(input: PacingInput): PacingDecision {
   // SEMPRE — desarmar as duas juntas acordaria cliente às 3h (invariante 3).
   if (!banRisk) return { allow: true, waitMs: 0 };
 
-  // Clamp em >= 0: number_activated_at no futuro (typo do admin / clock skew
+  // Clamp em >= 0: activation date in the future (config typo / clock skew
   // daemon↔DB) cai no degrau MAIS conservador — warm-up falha FECHADO, nunca
   // vira "número formado" por idade negativa.
   const ageDays = state.numberActivatedAt
-    ? Math.max(0, Math.floor((now.getTime() - state.numberActivatedAt.getTime()) / DAY_MS))
+    ? numberAgeDaysInTz(now, state.numberActivatedAt, knobs.timezone)
     : 0;
   const wCap = warmupCapFor(ageDays, knobs.warmupDailyCaps);
   const effectiveCap = Math.min(wCap ?? Infinity, crmDailyLimit ?? Infinity);
@@ -123,6 +123,43 @@ export function warmupCapFor(ageDays: number, steps: WarmupStep[]): number | nul
     if (ageDays >= step.minAgeDays) cap = step.cap;
   }
   return cap;
+}
+
+/**
+ * Parses YYYY-MM-DD as midnight in the configured shop timezone. Missing,
+ * malformed, impossible, or timezone-invalid input returns null so callers
+ * stay on the conservative day-0 warm-up stage.
+ */
+export function parseActivationDateInTz(value: string | undefined, timezone: string): Date | null {
+  if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const [year, month, day] = value.split('-').map(Number);
+  const calendarCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendarCheck.getUTCFullYear() !== year ||
+    calendarCheck.getUTCMonth() !== month - 1 ||
+    calendarCheck.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  try {
+    const instant = instantFromWall(year, month, day, 0, timezone);
+    const wall = wallClock(instant, timezone);
+    return wall.y === year && wall.mo === month && wall.d === day && wall.h === 0
+      ? instant
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Calendar-day age in the shop timezone, not elapsed UTC 24-hour blocks. */
+export function numberAgeDaysInTz(now: Date, activatedAt: Date, timezone: string): number {
+  const current = wallClock(now, timezone);
+  const activated = wallClock(activatedAt, timezone);
+  const currentDay = Date.UTC(current.y, current.mo - 1, current.d);
+  const activatedDay = Date.UTC(activated.y, activated.mo - 1, activated.d);
+  return Math.max(0, Math.floor((currentDay - activatedDay) / DAY_MS));
 }
 
 function jitterOf(rng: () => number, knobs: PacingKnobs): number {
