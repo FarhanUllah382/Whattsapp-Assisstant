@@ -668,11 +668,11 @@ export async function runTurn(
 // number," customer or owner; which turn KIND runs is decided by
 // `isOwnerPhone()` in server.ts, never by whether a `customers` row exists.
 //
-// Known, explicitly-flagged gap, not fixed here: no silent-no-reply safety
-// net (1.3) and no send-ledger idempotency (1.1) for this path yet — a
-// crash between send and the pacing-state write could in theory duplicate
-// or drop an owner reply. Out of scope for "the owner-turn kind itself,
-// full stop"; revisit if 3.2's real usage makes it a live concern.
+// The owner path still has no send-ledger idempotency (1.1): a crash between
+// send and the pacing-state write could in theory duplicate or drop an owner
+// reply. The separate silent-text case is covered below: if the model returns
+// its final answer as ordinary text instead of calling send_message, that text
+// is sent through the same paced owner-send tool before the turn can finish.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const OWNER_SYSTEM_PROMPT = `You are Ahmed's own private assistant. You are talking directly to Ahmed,
@@ -737,6 +737,7 @@ export async function runOwnerTurn(
   phone: string,
   incomingText: string,
   sendToOwner: (text: string) => Promise<void>,
+  modelCaller: typeof callModel = callModel,
 ): Promise<void> {
   const owner = getOrCreateCustomer(phone);
   db.prepare(
@@ -745,20 +746,32 @@ export async function runOwnerTurn(
 
   const tools = [...ownerTools, makeOwnerSendTool(sendToOwner)];
   const messages: ModelMessage[] = [{ role: 'user', content: incomingText }];
+  let lastAssistantText = '';
+  let sendMessageWasCalled = false;
+  let sendMessageSucceeded = false;
 
   for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-    const result = await callModel(OWNER_SYSTEM_PROMPT, messages, tools);
+    const result = await modelCaller(OWNER_SYSTEM_PROMPT, messages, tools);
     messages.push({ role: 'assistant', content: result.content });
+
+    const textBlocks = result.content.filter((b: any) => b.type === 'text');
+    if (textBlocks.length > 0) {
+      lastAssistantText = textBlocks.map((b: any) => b.text).join('\n').trim();
+    }
 
     const toolCalls = result.content.filter((b: any) => b.type === 'tool_use');
     if (toolCalls.length === 0) break; // model produced only text — nothing left to do, same discard rule as the customer turn
 
     const toolResults = [];
     for (const call of toolCalls) {
+      if (call.name === 'send_message') sendMessageWasCalled = true;
       const tool = tools.find((t) => t.name === call.name);
       const output = tool
         ? await tool.execute(call.input, { customerId: owner.id })
         : { error: `unknown tool ${call.name}` };
+      if (call.name === 'send_message' && (output as { ok?: boolean })?.ok) {
+        sendMessageSucceeded = true;
+      }
       toolResults.push({
         type: 'tool_result',
         tool_use_id: call.id,
@@ -768,6 +781,26 @@ export async function runOwnerTurn(
     messages.push({ role: 'user', content: toolResults });
 
     if (result.stop_reason !== 'tool_use') break;
+  }
+
+  // Gemini can correctly call an analytics tool and then return the final
+  // human-readable answer as plain text. Plain text is not itself delivered
+  // to WhatsApp, so without this guard the webhook returns 200 while Ahmed
+  // receives nothing. Send that final text through the normal owner tool. If
+  // the model explicitly tried send_message and it failed, do not retry here:
+  // the send may have reached WhatsApp before its local write failed, and the
+  // owner path does not yet have the customer's durable send ledger.
+  if (!sendMessageSucceeded && !sendMessageWasCalled) {
+    const body = lastAssistantText || "Sorry, I couldn't prepare that report right now. Please try again.";
+    const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
+    const fallbackResult = await sendMessageTool.execute({ body }, { customerId: owner.id });
+    if (!(fallbackResult as { ok?: boolean })?.ok) {
+      log.error('owner fallback reply failed to send', {
+        phone,
+        customerId: owner.id,
+        fallbackResult,
+      });
+    }
   }
 
   log.info('owner turn completed', { phone });

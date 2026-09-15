@@ -14,7 +14,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
 | 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified; customer-facing order/payment/status/stock behavior and the owner follow-up query passed against real WhatsApp messages. The deliberately non-repeatable safety-net branches and crash-retry bookkeeping receipt were verified directly and deterministically. |
-| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 is built and live-verified; 3.2 is built/local-verified and its `pending_followups` question is live-verified, while its other three owner analytics questions still need real-message verification. 3.3 remains out of scope/not started. |
+| 3.x | Promise 4 — Ahmed can just ask it questions | 🟡 3.1 and 3.2 are built, locally verified, and live-verified through real owner-number WhatsApp messages. 3.3 remains out of scope/not started. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
 **Note on the 3.x exception, so anyone reading this later understands why
@@ -38,14 +38,14 @@ result of this exception, not a sign something was skipped by mistake.
 
 ## 0. Where things actually stand right now
 
-- **Current implementation status (re-verified 2026-09-14):** Version 1 is
+- **Current implementation status (re-verified 2026-09-15):** Version 1 is
   complete with its carried-forward gaps still described precisely in its
   final-status section; Version 2 is complete after a real WhatsApp pass
   plus deterministic checks for branches a live model cannot reliably be
-  forced to take; Version 3.1 is live-verified; Version 3.2 is built and
-  locally verified with one of its four owner questions (`pending_followups`)
-  live-verified; 3.3 and everything beyond the current 3.2 scope remain
-  untouched.
+  forced to take; Versions 3.1 and 3.2 are complete and live-verified across
+  all four owner questions (`sales_today`, `unpaid_customers`,
+  `top_selling_product`, and `pending_followups`); 3.3 and everything beyond
+  the current 3.2 scope remain untouched.
 - **A verified extraction of 20-21 reusable files from DeskcommCRM exists**,
   staged at `EXTRACTED-FOR-AHMED/` (checked file-by-file, cross-referenced
   against the manifest, not yet wired into the actual project). See each
@@ -1847,12 +1847,17 @@ the MVP-complete milestone.**
   `getOrCreateCustomer`) purely so pacing state can see owner sends too —
   which turn *kind* runs is decided entirely by `isOwnerPhone()`, never by
   a row merely existing.
-- **Known, explicitly-flagged gap, not fixed here:** no silent-no-reply
-  safety net (1.3) and no send-ledger idempotency (1.1) for this path yet
-  — a crash between an owner send and the pacing-state write could in
-  theory duplicate or drop a reply to Ahmed. Out of scope for "the
-  owner-turn kind itself, full stop"; revisit if 3.2's real usage makes it
-  a live concern.
+- **Owner-path reliability status, updated 2026-09-15:** live 3.2 testing
+  reproduced the silent-no-reply case: Gemini called the report tool, then
+  returned its final answer as ordinary text instead of calling
+  `send_message`; the webhook returned 200 while Ahmed received nothing.
+  **Fixed** in `runOwnerTurn()` by tracking the final assistant text and
+  sending it through the same paced owner-send tool when the model made no
+  `send_message` call. A focused injected-model test reproduced that exact
+  tool-result-then-text sequence, and the subsequent real `sales_today`
+  message delivered the correct reply. **Still not fixed:** owner sends do
+  not yet use the customer's durable send-ledger idempotency. A crash around
+  an owner send can still theoretically duplicate or drop that reply.
 - **Verified locally, deterministically — 19 checks across 3 scripts (split
   for the same Windows/Node 24/better-sqlite3 native-crash flakiness
   already on record — not a defect in this code):** exact match, "+"/spaced
@@ -1888,13 +1893,14 @@ the MVP-complete milestone.**
   deterministically), with no way for a customer message to trigger
   owner-mode answers (✅ verified above, including the adversarial case of
   an owner-style question from a customer number).
-- **Status:** ✅ Done and live-verified (2026-09-14) —
-  `AHMED_OWNER_PHONE` was configured as the confirmed number ending 3460;
-  messages from it routed to `turnKind: owner`, while messages from other
-  real phones routed to the customer turn. The owner received real replies
-  without gaining any customer-write tools. The known owner-path
-  silent-no-reply/send-ledger gap above remains explicitly carried forward;
-  this status does not relabel it as fixed.
+- **Status:** ✅ Done and live-verified (re-verified 2026-09-15) — owner
+  routing was first proved with the confirmed number ending 3460. When that
+  number became unavailable, `AHMED_OWNER_PHONE` was deliberately replaced
+  with the newly confirmed number ending 2409; a real greeting and the live
+  `top_selling_product` question both routed through the owner turn. Other
+  senders remain customer turns regardless of whether their text says
+  "Ahmed here." The silent text-only reply failure is fixed as described
+  above; owner send-ledger idempotency remains an explicit open gap.
 
 ### 3.2 — Owner analytics Q&A tools
 - **Goal:** Ahmed's four example questions all work, in his own words.
@@ -1978,19 +1984,23 @@ the MVP-complete milestone.**
   part of the whole project.
 - **Definition of done:** each of Ahmed's four example questions, asked in
   natural language (including Roman Urdu/Hindi phrasing), gets a correct
-  answer sourced from real data (✅ the underlying functions are verified
-  correct against hand-checked expectations above; the natural-language
-  phrasing/Roman-Urdu half of this specifically needs a live conversation
-  through `runOwnerTurn()`, not yet done — same distinction as everywhere
-  else in this file).
-- **Status:** 🟡 Built and locally verified; partially live-verified
-  (2026-09-14). Ahmed asked the pending-followups question naturally from
-  the configured owner number, the real tool ran, and the corrected reply
-  identified order #30 plus Rs.800 store credit. `sales_today`,
-  `unpaid_customers`, and `top_selling_product` remain to be exercised by
-  real owner-number messages before 3.2 can be called complete. Also fixed
-  one real bug in already-merged 2.1/2.4 code (ledger reversal on cancel)
-  discovered while building this.
+  answer sourced from real data (✅ locally verified against hand-checked
+  expectations and now live-verified through real WhatsApp messages).
+- **Status:** ✅ Done and live-verified (2026-09-15). The four real owner
+  questions and verified answers were: `pending_followups` — order #30 and
+  Rs.800 store credit; `sales_today` — Rs.0 with no order today;
+  `unpaid_customers` — no positive customer balance; and
+  `top_selling_product` — product #3, one unit and Rs.800 revenue. The first
+  live sales attempt exposed the owner text-only no-reply bug documented in
+  3.1; it was fixed and the same question then passed live. Docker/WAHA
+  dropped the unpaid question while its gateway was being recovered, so the
+  latest verified WhatsApp message was replayed exactly once through the
+  real webhook after confirming it had no prior DB receipt; its live reply
+  reached the owner and matched the ledger. The owner number was then
+  changed from the unavailable 3460 number to the newly confirmed 2409
+  number, and the top-product question passed through that new owner route.
+  The earlier cancellation ledger-reversal bug found while building 3.2
+  remains fixed and covered by the existing deterministic checks.
 
 ### 3.3 — WhatsApp-delivered alerts
 - **Goal:** things Ahmed should know about reach him without opening
