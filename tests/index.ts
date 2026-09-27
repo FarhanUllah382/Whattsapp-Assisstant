@@ -9,6 +9,13 @@ import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
 import { db } from '../src/db';
 import { recordOrder, recordPayment } from '../src/tools';
+import {
+  claimInboundEvent,
+  completeInboundEvent,
+  failInboundEvent,
+  initializeInboundReplayGuard,
+  parseInboundAcceptAfter,
+} from '../src/inbound-events';
 
 let totalTests = 0;
 let passedTests = 0;
@@ -266,6 +273,20 @@ it('preserves WAHA message ids needed to deduplicate crash retries', () => {
   );
 });
 
+it('preserves WAHA original Unix timestamps for retained-message detection', () => {
+  const parsed = wahaAdapter.parseInboundWebhook({
+    event: 'message',
+    payload: {
+      id: 'timestamped-message',
+      timestamp: 1_757_865_600.125,
+      fromMe: false,
+      from: '923332333460@c.us',
+      body: 'Fresh message',
+    },
+  });
+  assert.equal(parsed?.occurredAt?.toISOString(), '2025-09-14T16:00:00.125Z');
+});
+
 it('resolves WhatsApp privacy LID identifiers to real phone numbers', () => {
   const payload = {
     event: 'message',
@@ -518,6 +539,120 @@ it('deduplicates order/payment effects for one provider event but permits a new 
     );
   } finally {
     db.exec('rollback');
+  }
+});
+
+// --- Suite 12: Inbound webhook replay protection ---
+console.log('\n▶ Inbound Webhook Replay Protection');
+it('requires an unambiguous timezone on configured rollout cutoffs', () => {
+  assert.equal(parseInboundAcceptAfter(undefined), null);
+  assert.equal(parseInboundAcceptAfter(''), null);
+  assert.equal(
+    parseInboundAcceptAfter('2026-09-27T19:00:00+05:00')?.toISOString(),
+    '2026-09-27T14:00:00.000Z',
+  );
+  assert.throws(() => parseInboundAcceptAfter('2026-09-27T19:00:00'), /explicit UTC offset/);
+  assert.throws(() => parseInboundAcceptAfter('not-a-date'), /explicit UTC offset/);
+});
+
+it('stores the initial cutoff once and reuses it across later restarts', () => {
+  db.exec('begin');
+  try {
+    db.prepare('delete from inbound_guard_state').run();
+    const first = initializeInboundReplayGuard(
+      new Date('2026-09-27T14:00:00.987Z'),
+      '2026-09-27T19:00:00+05:00',
+    );
+    const afterRestart = initializeInboundReplayGuard(
+      new Date('2026-10-01T10:00:00.000Z'),
+      '2026-10-01T15:00:00+05:00',
+    );
+    assert.equal(first.toISOString(), '2026-09-27T14:00:00.000Z');
+    assert.equal(afterRestart.toISOString(), first.toISOString());
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('accepts a fresh message once and deduplicates it before either agent path', () => {
+  const suffix = `${Date.now()}-fresh`;
+  const messageId = `inbound-test-${suffix}`;
+  const eventKey = `waha:${messageId}`;
+  try {
+    const first = claimInboundEvent({
+      channel: 'waha',
+      messageId,
+      occurredAt: new Date('2026-09-27T14:00:01.000Z'),
+      acceptAfter: new Date('2026-09-27T14:00:00.000Z'),
+      now: new Date('2026-09-27T14:00:02.000Z'),
+    });
+    assert.deepEqual(first, { action: 'process', eventKey, reason: 'new' });
+    completeInboundEvent(eventKey, new Date('2026-09-27T14:00:03.000Z'));
+    assert.deepEqual(
+      claimInboundEvent({
+        channel: 'waha',
+        messageId,
+        occurredAt: new Date('2026-09-27T14:00:01.000Z'),
+        acceptAfter: new Date('2026-09-27T14:00:00.000Z'),
+        now: new Date('2026-09-27T14:00:04.000Z'),
+      }),
+      { action: 'duplicate', eventKey, reason: 'completed' },
+    );
+  } finally {
+    db.prepare('delete from inbound_events where event_key = ?').run(eventKey);
+  }
+});
+
+it('quarantines retained history and remembers the ignored id', () => {
+  const messageId = `inbound-test-${Date.now()}-historical`;
+  const eventKey = `waha:${messageId}`;
+  const input = {
+    channel: 'waha',
+    messageId,
+    occurredAt: new Date('2026-09-27T13:59:59.000Z'),
+    acceptAfter: new Date('2026-09-27T14:00:00.000Z'),
+    now: new Date('2026-09-27T14:00:02.000Z'),
+  };
+  try {
+    assert.deepEqual(claimInboundEvent(input), { action: 'ignore', eventKey, reason: 'historical' });
+    assert.deepEqual(claimInboundEvent(input), { action: 'duplicate', eventKey, reason: 'ignored' });
+  } finally {
+    db.prepare('delete from inbound_events where event_key = ?').run(eventKey);
+  }
+});
+
+it('fails closed when message identity or provider timestamp is missing', () => {
+  const cutoff = new Date('2026-09-27T14:00:00.000Z');
+  assert.deepEqual(
+    claimInboundEvent({ channel: 'waha', occurredAt: cutoff, acceptAfter: cutoff, now: cutoff }),
+    { action: 'ignore', reason: 'missing_message_id' },
+  );
+  assert.deepEqual(
+    claimInboundEvent({ channel: 'waha', messageId: 'no-time', acceptAfter: cutoff, now: cutoff }),
+    { action: 'ignore', eventKey: 'waha:no-time', reason: 'missing_timestamp' },
+  );
+});
+
+it('allows a failed turn to retry but blocks a concurrent in-progress duplicate', () => {
+  const messageId = `inbound-test-${Date.now()}-retry`;
+  const eventKey = `waha:${messageId}`;
+  const input = {
+    channel: 'waha',
+    messageId,
+    occurredAt: new Date('2026-09-27T14:00:01.000Z'),
+    acceptAfter: new Date('2026-09-27T14:00:00.000Z'),
+    now: new Date('2026-09-27T14:00:02.000Z'),
+  };
+  try {
+    assert.equal(claimInboundEvent(input).action, 'process');
+    assert.deepEqual(claimInboundEvent(input), { action: 'duplicate', eventKey, reason: 'processing' });
+    failInboundEvent(eventKey, new Error('transient model failure'), new Date('2026-09-27T14:00:03.000Z'));
+    assert.deepEqual(
+      claimInboundEvent({ ...input, now: new Date('2026-09-27T14:00:04.000Z') }),
+      { action: 'process', eventKey, reason: 'retry' },
+    );
+  } finally {
+    db.prepare('delete from inbound_events where event_key = ?').run(eventKey);
   }
 });
 

@@ -93,6 +93,34 @@ create table if not exists bookkeeping_receipts (
   created_at text not null default (datetime('now'))
 );
 
+-- Webhook entrance idempotency and retained-history quarantine. This ledger
+-- sits BEFORE both the customer and owner agent paths, so a provider retry or
+-- reconnect replay cannot create another AI turn, conversation row, reply, or
+-- business side effect. The singleton cutoff is initialized once on rollout
+-- and survives application restarts; it is not advanced on each restart.
+create table if not exists inbound_guard_state (
+  id integer primary key check (id = 1),
+  accept_after text not null,
+  created_at text not null default (datetime('now'))
+);
+
+create table if not exists inbound_events (
+  event_key text primary key,
+  channel text not null,
+  message_id text not null,
+  occurred_at text not null,
+  status text not null check (status in ('processing', 'completed', 'failed', 'ignored_historical', 'ignored_invalid_timestamp')),
+  attempt_count integer not null default 1 check (attempt_count > 0),
+  processing_started_at text,
+  completed_at text,
+  last_error text,
+  created_at text not null default (datetime('now')),
+  updated_at text not null default (datetime('now')),
+  unique (channel, message_id)
+);
+
+create index if not exists inbound_events_status_idx on inbound_events(status);
+
 -- Durable, standalone facts about a customer (e.g. "prefers black"),
 -- distinct from `checkpoints.summary` which is the rolling state of the
 -- CURRENT conversation and gets overwritten every turn. Notes accumulate.

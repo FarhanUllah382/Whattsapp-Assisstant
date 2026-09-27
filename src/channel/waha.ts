@@ -3,7 +3,7 @@
 // or WhatsApp chatId format — server.ts talks to it only through the
 // ChannelAdapter interface, and agent.ts/tools.ts don't import this file at
 // all.
-import type { ChannelAdapter } from './types';
+import type { ChannelAdapter, InboundMessage } from './types';
 
 const WAHA_BASE_URL = process.env.WAHA_BASE_URL ?? 'http://localhost:3001';
 const WAHA_SESSION = process.env.WAHA_SESSION ?? 'default';
@@ -63,7 +63,7 @@ export class WahaAdapter implements ChannelAdapter {
     }
   }
 
-  parseInboundWebhook(payload: unknown): { phone: string; text: string; messageId?: string } | null {
+  parseInboundWebhook(payload: unknown): InboundMessage | null {
     if (typeof payload !== 'object' || payload === null) return null;
     const event = (payload as Record<string, unknown>).event;
     if (event !== 'message') return null; // ignore session.status, message.ack, etc.
@@ -120,7 +120,28 @@ export class WahaAdapter implements ChannelAdapter {
           ? rawMessageId._serialized
           : undefined;
 
-    return messageId ? { phone, text: m.body, messageId } : { phone, text: m.body };
+    // WAHA documents payload.timestamp as Unix seconds (sometimes with a
+    // fractional part). Keep the provider's original event time: the HTTP
+    // receipt time cannot distinguish a fresh message from retained history
+    // replayed during a WAHA reconnect.
+    const rawTimestamp = m.timestamp;
+    const timestampSeconds =
+      typeof rawTimestamp === 'number'
+        ? rawTimestamp
+        : typeof rawTimestamp === 'string' && rawTimestamp.trim() !== ''
+          ? Number(rawTimestamp)
+          : Number.NaN;
+    const occurredAt = Number.isFinite(timestampSeconds) && timestampSeconds > 0
+      ? new Date(timestampSeconds * 1000)
+      : undefined;
+    const validOccurredAt = occurredAt && !Number.isNaN(occurredAt.getTime()) ? occurredAt : undefined;
+
+    return {
+      phone,
+      text: m.body,
+      ...(messageId ? { messageId } : {}),
+      ...(validOccurredAt ? { occurredAt: validOccurredAt } : {}),
+    };
   }
 }
 

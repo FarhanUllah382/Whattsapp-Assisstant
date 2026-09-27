@@ -19,6 +19,12 @@ import { retryOwnerAlerts, runOwnerTurn, runTurn } from './agent';
 import { wahaAdapter } from './channel/waha';
 import { createLogger } from './obs/logger';
 import { AHMED_OWNER_PHONE, isOwnerPhone } from './owner';
+import {
+  claimInboundEvent,
+  completeInboundEvent,
+  failInboundEvent,
+  initializeInboundReplayGuard,
+} from './inbound-events';
 
 const app = express();
 app.use(express.json());
@@ -26,6 +32,7 @@ app.use(express.json());
 const channel = wahaAdapter;
 const log = createLogger();
 const configuredOwnerPhone = AHMED_OWNER_PHONE;
+const inboundAcceptAfter = initializeInboundReplayGuard();
 const sendOwnerAlert = configuredOwnerPhone
   ? (body: string) => channel.sendText(configuredOwnerPhone, body)
   : undefined;
@@ -41,6 +48,22 @@ app.post('/webhook/whatsapp', async (req, res) => {
     return;
   }
 
+  const claim = claimInboundEvent({
+    channel: channel.channel,
+    messageId: inbound.messageId,
+    occurredAt: inbound.occurredAt,
+    acceptAfter: inboundAcceptAfter,
+  });
+  if (claim.action !== 'process') {
+    log.info('inbound event skipped', {
+      eventKey: claim.eventKey,
+      action: claim.action,
+      reason: claim.reason,
+    });
+    res.sendStatus(200);
+    return;
+  }
+
   // Version 3.1: the ONLY place this routing decision is made. isOwnerPhone
   // is fail-closed (see owner.ts) — an unconfigured/misconfigured owner
   // number just means every sender is treated as a customer, never the
@@ -51,20 +74,19 @@ app.post('/webhook/whatsapp', async (req, res) => {
     if (isOwner) {
       await runOwnerTurn(inbound.phone, inbound.text, (body) => channel.sendText(inbound.phone, body));
     } else {
-      const inboundEventKey = inbound.messageId
-        ? `${channel.channel}:${inbound.messageId}`
-        : undefined;
       await runTurn(
         inbound.phone,
         inbound.text,
         (body) => channel.sendText(inbound.phone, body),
-        inboundEventKey,
+        claim.eventKey,
         sendOwnerAlert,
       );
     }
+    completeInboundEvent(claim.eventKey);
     log.info('turn completed', { phone: inbound.phone, turnKind: isOwner ? 'owner' : 'customer' });
     res.sendStatus(200);
   } catch (err) {
+    failInboundEvent(claim.eventKey, err);
     log.error('turn failed', {
       phone: inbound.phone,
       turnKind: isOwner ? 'owner' : 'customer',
@@ -76,7 +98,11 @@ app.post('/webhook/whatsapp', async (req, res) => {
 
 const PORT = process.env.PORT ?? 3000;
 app.listen(PORT, () => {
-  log.info('listening', { port: PORT, channel: channel.channel });
+  log.info('listening', {
+    port: PORT,
+    channel: channel.channel,
+    inboundAcceptAfter: inboundAcceptAfter.toISOString(),
+  });
   if (sendOwnerAlert) {
     const retry = (): void => {
       void retryOwnerAlerts(sendOwnerAlert).catch((err) => {

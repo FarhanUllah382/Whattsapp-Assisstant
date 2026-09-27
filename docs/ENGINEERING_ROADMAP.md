@@ -1343,21 +1343,36 @@ shared decision function; nothing bypasses anti-ban pacing.
   auto-fires it later on its own either; that needs genuinely new
   infrastructure, not a wiring task.
 - **WAHA retained-message replay on application restart (observed live
-  2026-09-27)** — starting the webhook consumer while the existing WAHA
-  session was active replayed older personal-message events into the app.
-  In the 92-second window before the app was stopped, the database gained
-  261 message rows (239 inbound, 22 outbound), 2 customer rows, 2 handoffs,
-  2 sent owner-alert records, and 16 sent-ledger rows; orders and ledger
-  remained unchanged. Gemini was simultaneously returning quota-limit 429s.
-  The app was stopped and, after explicit owner approval, only rows created
-  inside the verified replay window were removed in one transaction: all
-  counts returned to the pre-replay baseline (39 customers, 578 messages,
-  2 orders, 4 ledger entries, 12 owner alerts), `integrity_check` returned
-  `ok`, and `foreign_key_check` returned zero violations. A gitignored
-  pre-cleanup backup remains at `backups/ahmed-post-replay-20260927-1837.db`.
-  Cleanup is complete, but **root-cause prevention is not fixed** and external
-  WhatsApp sends cannot be undone. Before the next live restart, retained
-  webhook replay must be controlled or safely deduplicated.
+  2026-09-27; prevention built and locally verified, live restart pending)** —
+  starting the webhook consumer while the existing WAHA session was active
+  replayed older personal-message events into the app. In the 92-second window
+  before the app was stopped, the database gained 261 message rows (239
+  inbound, 22 outbound), 2 customer rows, 2 handoffs, 2 sent owner-alert
+  records, and 16 sent-ledger rows; orders and ledger remained unchanged.
+  Gemini was simultaneously returning quota-limit 429s. After explicit owner
+  approval, only rows created inside the verified replay window were removed
+  in one transaction: all counts returned to the pre-replay baseline (39
+  customers, 578 messages, 2 orders, 4 ledger entries, 12 owner alerts),
+  `integrity_check` returned `ok`, and `foreign_key_check` returned zero
+  violations. A gitignored pre-cleanup backup remains at
+  `backups/ahmed-post-replay-20260927-1837.db`; external WhatsApp sends cannot
+  be undone.
+
+  Root-cause prevention now exists at the webhook entrance: WAHA's stable
+  message id is claimed in a durable `inbound_events` ledger before either the
+  owner or customer agent path runs, and the original WAHA Unix timestamp is
+  compared with a one-time `inbound_guard_state` rollout cutoff that survives
+  application restarts. Pre-cutoff history, duplicate/completing deliveries,
+  missing ids, missing timestamps, and implausibly future timestamps are
+  acknowledged without entering the AI. Genuine failed turns may retry, and a
+  five-minute processing lease recovers a claim abandoned by a process crash.
+  The configured cutoff requires `Z` or an explicit offset, avoiding another
+  UTC-vs-Karachi ambiguity. Deterministic parser, cutoff persistence,
+  historical quarantine, fail-closed, duplicate, concurrent, and failed-retry
+  tests pass. This is **locally verified, not yet live-verified**: the app stays
+  stopped until Gemini quota is usable and a controlled WAHA restart confirms
+  retained events are quarantined and one genuinely new message is handled
+  exactly once.
 - **`notify_owner` handoff delivery is no longer log-only in the current
   build** — Version 3.3 now records a durable, retry-deduplicated owner alert
   and sends it through the configured owner-number WhatsApp path. This is

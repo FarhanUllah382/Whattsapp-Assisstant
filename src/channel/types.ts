@@ -12,6 +12,15 @@
 // queue and no billing (see CLAUDE.md §6). What's kept is the part that
 // actually applies here: a named channel, "send text to this phone," and
 // "turn a raw webhook payload into (phone, text), or nothing."
+export interface InboundMessage {
+  phone: string;
+  text: string;
+  /** Stable provider id used to make webhook delivery idempotent. */
+  messageId?: string;
+  /** Original provider event time, not the time our HTTP server received it. */
+  occurredAt?: Date;
+}
+
 export interface ChannelAdapter {
   /** Stable id for logs/telemetry, e.g. 'waha'. */
   readonly channel: string;
@@ -25,5 +34,5 @@ export interface ChannelAdapter {
    * caption, etc.) — the caller acknowledges those with 200 and does
    * nothing, rather than treating "not a message" as an error.
    */
-  parseInboundWebhook(payload: unknown): { phone: string; text: string; messageId?: string } | null;
+  parseInboundWebhook(payload: unknown): InboundMessage | null;
 }
