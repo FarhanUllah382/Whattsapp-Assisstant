@@ -422,7 +422,63 @@ it('preserves object tool results and wraps arrays or primitives in a Struct-com
   assert.deepEqual(normalizeGeminiFunctionResponse(null), { result: null });
 });
 
-// --- Suite 10: Bookkeeping crash-retry idempotency ---
+// --- Suite 10: Server-authoritative order pricing ---
+console.log('\n▶ Server-Authoritative Order Pricing');
+it('ignores a model-supplied price and records the product database price', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`price-test-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db
+      .prepare('insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)')
+      .run(`server-priced-kurta-${Date.now()}`, 'medium', 'black', 3200, 5).lastInsertRowid as number;
+
+    // `price` is deliberately malicious extra input. The tool schema no longer
+    // advertises it, and server validation must ignore it even if a caller
+    // bypasses the schema and invokes the tool directly.
+    const result = recordOrder.execute(
+      { items: [{ product_id: productId, qty: 2, price: 1 }] },
+      { customerId, idempotencyKey: `price-test-event-${Date.now()}` },
+    ) as { ok: boolean; order_id?: number; total?: number };
+
+    assert.equal(result.ok, true);
+    assert.equal(result.total, 6400);
+    const order = db.prepare('select items_json, total from orders where id = ?').get(result.order_id) as {
+      items_json: string;
+      total: number;
+    };
+    assert.equal(order.total, 6400);
+    assert.deepEqual(JSON.parse(order.items_json), [{ product_id: productId, qty: 2, price: 3200 }]);
+    const debit = db
+      .prepare("select amount from ledger where order_id = ? and kind = 'debit'")
+      .get(result.order_id) as { amount: number };
+    assert.equal(debit.amount, 6400);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('records an order when the model supplies only product_id and quantity', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`price-shape-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db
+      .prepare('insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)')
+      .run(`server-priced-shirt-${Date.now()}`, 'large', 'navy', 2750, 3).lastInsertRowid as number;
+    const result = recordOrder.execute(
+      { items: [{ product_id: productId, qty: 1 }] },
+      { customerId },
+    ) as { ok: boolean; order_id?: number; total?: number };
+    assert.equal(result.ok, true);
+    assert.equal(typeof result.order_id, 'number');
+    assert.equal(result.total, 2750);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+// --- Suite 11: Bookkeeping crash-retry idempotency ---
 console.log('\n▶ Bookkeeping Crash-Retry Idempotency');
 it('deduplicates order/payment effects for one provider event but permits a new event', () => {
   db.exec('begin');
@@ -433,7 +489,7 @@ it('deduplicates order/payment effects for one provider event but permits a new 
     assert.ok(product, 'At least one seeded product is required');
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`retry-test-${Date.now()}`)
       .lastInsertRowid as number;
-    const input = { items: [{ product_id: product.id, qty: 1, price: product.price }] };
+    const input = { items: [{ product_id: product.id, qty: 1 }] };
     const eventKey = `waha:test-order-${Date.now()}`;
 
     const firstOrder = recordOrder.execute(input, { customerId, idempotencyKey: eventKey });

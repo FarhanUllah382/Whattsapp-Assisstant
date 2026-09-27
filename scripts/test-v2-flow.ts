@@ -38,7 +38,7 @@ async function runV2Verification(): Promise<void> {
     // 2. Order Placement (status: placed)
     console.log('\nTest 2: Order placement & initial ledger debit');
     const orderResult: any = recordOrder.execute({
-      items: [{ product_id: productId, qty: 2, price: 2500 }],
+      items: [{ product_id: productId, qty: 2 }],
     }, ctx);
     assert(orderResult.ok === true, 'record_order succeeded');
     const orderId = orderResult.order_id;
@@ -80,10 +80,11 @@ async function runV2Verification(): Promise<void> {
 
     // 6. Safety Net Validation
     console.log('\nTest 6: Safety net validation logic');
-    const validCheck = validateOrderItems([{ product_id: productId, qty: 1, price: 2500 }]);
-    assert(validCheck.ok === true && validCheck.total === 2500, 'Valid order payload passes');
+    const validCheck = validateOrderItems([{ product_id: productId, qty: 1, price: 1 }]);
+    assert(validCheck.ok === true && validCheck.total === 2500, 'Server uses catalog price, not a supplied price');
+    assert(validCheck.ok === true && validCheck.items[0].price === 2500, 'Normalized item stores catalog price');
 
-    const invalidCheck = validateOrderItems([{ product_id: 999999, qty: 1, price: 2500 }]);
+    const invalidCheck = validateOrderItems([{ product_id: 999999, qty: 1 }]);
     assert(invalidCheck.ok === false, 'Invalid product_id rejected by safety net');
 
     // 7. Cancellation before shipping -> Stock Restores & Ledger Reverses

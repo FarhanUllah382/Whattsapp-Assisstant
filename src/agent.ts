@@ -571,12 +571,13 @@ export async function runTurn(
       'Also: if the customer just now clearly agreed to a NEW order or made a NEW payment that ' +
       'you have NOT already logged with record_order/record_payment THIS turn, report it as a ' +
       'safety net so it is not lost — but do NOT guess exact numbers you are not sure of.\n' +
-      '"unlogged_order": null, or {"confident": true/false, "items": [{"product_id":N,"qty":N,' +
-      '"price":N}] or null, "description": "plain text of what you believe happened"}\n' +
+      '"unlogged_order": null, or {"confident": true/false, "items": [{"product_id":N,"qty":N}] ' +
+      'or null, "description": "plain text of what you believe happened"}\n' +
       '"unlogged_payment": null, or {"confident": true/false, "amount": N or null, ' +
       '"description": "plain text"}\n' +
       'Set confident:true ONLY if you already know the real product_id (e.g. from calling ' +
-      'check_stock earlier this turn) and the exact qty/price or amount. Otherwise set ' +
+      'check_stock earlier this turn) and the exact quantity or payment amount. Order prices are ' +
+      'always loaded from the product database by the server. Otherwise set ' +
       "confident:false and just describe it — Ahmed will confirm it himself, never guess a " +
       'number into the books. Most turns have neither.\n\n' +
       'Reply with ONLY a JSON object, nothing else, in this exact shape:\n' +
@@ -653,8 +654,8 @@ export async function runTurn(
         const check = validateOrderItems(unloggedOrder.items);
         if (check.ok) {
           const result = runBookkeepingOnce(toolContext, 'record_order', () => {
-            const orderId = insertValidatedOrder(customer.id, unloggedOrder.items, check.total!);
-            return { ok: true, order_id: orderId, total: check.total! };
+            const orderId = insertValidatedOrder(customer.id, check.items, check.total);
+            return { ok: true, order_id: orderId, total: check.total };
           });
           log.info('safety-net order logged at turn close', {
             customerId: customer.id,

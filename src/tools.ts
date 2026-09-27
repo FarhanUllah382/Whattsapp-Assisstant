@@ -92,11 +92,16 @@ export const getCustomerNote: ToolDef = {
   },
 };
 
-export interface ValidateOrderItemsResult {
-  ok: boolean;
-  error?: string;
-  total?: number;
+export interface ServerPricedOrderItem {
+  product_id: number;
+  qty: number;
+  /** Price snapshot loaded from products.price by the server, never trusted from model input. */
+  price: number;
 }
+
+export type ValidateOrderItemsResult =
+  | { ok: true; items: ServerPricedOrderItem[]; total: number }
+  | { ok: false; error: string };
 
 // Shared between record_order's own execute() and the Version 2.3 safety
 // net in agent.ts's CLOSE step (a possible order the model confirmed in
@@ -106,9 +111,10 @@ export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
   if (!Array.isArray(items) || items.length === 0) {
     return { ok: false, error: 'Please list at least one item to order.' };
   }
+  const serverPricedItems: ServerPricedOrderItem[] = [];
   for (const it of items as any[]) {
     if (typeof it !== 'object' || it === null) {
-      return { ok: false, error: 'Each order item must be a product, quantity, and price.' };
+      return { ok: false, error: 'Each order item must contain a product and quantity.' };
     }
     if (!Number.isInteger(it.product_id) || it.product_id <= 0) {
       return { ok: false, error: 'Each item needs a valid product.' };
@@ -116,16 +122,22 @@ export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
     if (!Number.isInteger(it.qty) || it.qty <= 0) {
       return { ok: false, error: 'Quantity must be a whole number greater than 0.' };
     }
-    if (typeof it.price !== 'number' || !Number.isFinite(it.price) || it.price < 0) {
-      return { ok: false, error: 'Price must be a number 0 or greater.' };
-    }
-    const product = db.prepare('select id from products where id = ?').get(it.product_id);
+    const product = db
+      .prepare('select id, price from products where id = ?')
+      .get(it.product_id) as { id: number; price: number } | undefined;
     if (!product) {
       return { ok: false, error: `Product ${it.product_id} does not exist — check the product first.` };
     }
+    if (typeof product.price !== 'number' || !Number.isFinite(product.price) || product.price < 0) {
+      return { ok: false, error: `Product ${it.product_id} has an invalid catalog price — ask the owner to correct it.` };
+    }
+    serverPricedItems.push({ product_id: product.id, qty: it.qty, price: product.price });
   }
-  const total = (items as any[]).reduce((sum, it) => sum + it.qty * it.price, 0);
-  return { ok: true, total };
+  const total = serverPricedItems.reduce((sum, it) => sum + it.qty * it.price, 0);
+  if (!Number.isFinite(total)) {
+    return { ok: false, error: 'The server could not calculate a valid order total.' };
+  }
+  return { ok: true, items: serverPricedItems, total };
 }
 
 /** Assumes `items`/`total` already passed validateOrderItems — no re-validation here. */
@@ -169,7 +181,8 @@ export const recordOrder: ToolDef = {
   name: 'record_order',
   description:
     'Record a new order for this customer. Only call this once the customer has ' +
-    'clearly confirmed what they want (product, size, color, quantity).',
+    'clearly confirmed what they want (product, size, color, quantity). Send only the ' +
+    'product_id and quantity; the server always loads the authoritative catalog price.',
   input_schema: {
     type: 'object',
     properties: {
@@ -181,9 +194,8 @@ export const recordOrder: ToolDef = {
           properties: {
             product_id: { type: 'number' },
             qty: { type: 'number' },
-            price: { type: 'number' },
           },
-          required: ['product_id', 'qty', 'price'],
+          required: ['product_id', 'qty'],
         },
       },
     },
@@ -196,7 +208,7 @@ export const recordOrder: ToolDef = {
         return { ok: false, error: check.error };
       }
       return runBookkeepingOnce(ctx, 'record_order', () => {
-        const orderId = insertValidatedOrder(ctx.customerId, items, check.total!);
+        const orderId = insertValidatedOrder(ctx.customerId, check.items, check.total);
         return { ok: true, order_id: orderId, total: check.total };
       });
     } catch {

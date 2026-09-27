@@ -108,14 +108,22 @@ written to any books, and Ahmed still can't ask it anything.**
   - Strict server-side input validation on all 4 tools in `src/tools.ts`
     (`check_stock`, `get_customer_balance`, `record_order`,
     `record_payment`) — types, required fields, and ranges (e.g. `qty > 0`,
-    `price >= 0`, `product_id` must reference a real product) are checked
-    before anything touches the database. `record_order` and
-    `record_payment` previously could throw and crash the whole turn on
-    malformed input (e.g. a non-numeric `product_id`); both are now wrapped
-    so any failure returns `{ok: false, error: "..."}`, a teaching-text
-    sentence the model can read and recover from mid-turn, same pattern
-    `check_stock` already used for a missing product. Tool schemas
-    (`input_schema`) were left unchanged — only `execute()` got stricter.
+    `product_id` must reference a real product) are checked before anything
+    touches the database. **Current correction, 2026-09-27:** order price is
+    no longer a model input at all. `record_order`'s schema accepts only
+    `product_id` + `qty`; the shared server validator loads `products.price`,
+    returns normalized price-snapshot items, and computes the total used by
+    both the normal tool path and the turn-close safety net. Even a direct
+    adversarial call that bypasses the schema and supplies `price: 1` for a
+    Rs.3,200 product is ignored: quantity 2 stored Rs.3,200 per item, returned
+    and persisted total Rs.6,400, and wrote one Rs.6,400 ledger debit.
+    `record_order` and `record_payment` remain wrapped so malformed input or
+    database failure returns `{ok: false, error: "..."}` rather than crashing
+    the turn. Verified by typecheck, the permanent suite (41/41), pacing and
+    owner-alert suites, and the complete Version 2 regression flow. This is
+    deterministic server-side validation, so direct-code verification is the
+    appropriate proof; a live model call cannot reliably reproduce a forged
+    tool price on demand.
   - Idempotent send protection: a new `send_ledger` table (`db/schema.sql`)
     keyed by a sha256 hash of (customer, inbound text that triggered the
     turn, exact outbound body). `send_message`'s `execute()` in
@@ -1334,6 +1342,22 @@ shared decision function; nothing bypasses anti-ban pacing.
   the sending window correctly does not fire immediately, but nothing
   auto-fires it later on its own either; that needs genuinely new
   infrastructure, not a wiring task.
+- **WAHA retained-message replay on application restart (observed live
+  2026-09-27)** — starting the webhook consumer while the existing WAHA
+  session was active replayed older personal-message events into the app.
+  In the 92-second window before the app was stopped, the database gained
+  261 message rows (239 inbound, 22 outbound), 2 customer rows, 2 handoffs,
+  2 sent owner-alert records, and 16 sent-ledger rows; orders and ledger
+  remained unchanged. Gemini was simultaneously returning quota-limit 429s.
+  The app was stopped and, after explicit owner approval, only rows created
+  inside the verified replay window were removed in one transaction: all
+  counts returned to the pre-replay baseline (39 customers, 578 messages,
+  2 orders, 4 ledger entries, 12 owner alerts), `integrity_check` returned
+  `ok`, and `foreign_key_check` returned zero violations. A gitignored
+  pre-cleanup backup remains at `backups/ahmed-post-replay-20260927-1837.db`.
+  Cleanup is complete, but **root-cause prevention is not fixed** and external
+  WhatsApp sends cannot be undone. Before the next live restart, retained
+  webhook replay must be controlled or safely deduplicated.
 - **`notify_owner` handoff delivery is no longer log-only in the current
   build** — Version 3.3 now records a durable, retry-deduplicated owner alert
   and sends it through the configured owner-number WhatsApp path. This is
