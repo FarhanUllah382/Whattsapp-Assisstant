@@ -8,9 +8,10 @@ import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog
 import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
 import { db } from '../src/db';
-import { baseTools, ownerTools, recordOrder, recordPayment, updateOrderStatus } from '../src/tools';
+import { baseTools, checkStock, ownerTools, recordOrder, recordPayment, updateOrderStatus } from '../src/tools';
 import { createPaymentClaim, pendingPaymentClaims, resolvePaymentClaim } from '../src/payments';
 import { minorToRupees, multiplyMinor, positiveRupeesToMinor, rupeesToMinor } from '../src/money';
+import { importInventoryCsv, parseInventoryCsv } from '../src/inventory';
 import {
   claimInboundEvent,
   completeInboundEvent,
@@ -88,6 +89,111 @@ it('database constraints reject fractional paisas in every financial table', () 
     );
   } finally {
     db.exec('rollback');
+  }
+});
+
+// --- Suite 0B: CSV Inventory Onboarding ---
+console.log('\n▶ CSV Inventory Onboarding');
+it('parses quoted CSV fields, exact prices, aliases, and normalized sizes', () => {
+  const rows = parseInventoryCsv(
+    'sku,name,category,size,color,price,stock,active,aliases\n' +
+      'TEST-CSV-1,"Shirt, Casual",shirts,M,Navy,10.29,3,yes,"shirt|tee"\n',
+  );
+  assert.deepEqual(rows, [{
+    sku: 'TEST-CSV-1',
+    name: 'Shirt, Casual',
+    category: 'shirts',
+    size: 'medium',
+    color: 'navy',
+    priceMinor: 1029,
+    stock: 3,
+    active: true,
+    aliases: ['shirt', 'tee'],
+  }]);
+  assert.throws(
+    () => parseInventoryCsv('sku,name,category,size,color,price,stock,active,aliases\nTEST-2,"Broken"text,shirts,M,black,1,1,true,\n'),
+    /Unexpected text after a closing quote/,
+  );
+});
+
+it('database constraints reject invalid SKU, active state, and alias JSON', () => {
+  db.exec('begin');
+  try {
+    assert.throws(
+      () => db.prepare('insert into products (sku, name, price_minor, stock) values (?, ?, ?, ?)').run('X', 'bad sku', 100, 1),
+      /product sku must contain|CHECK constraint failed/,
+    );
+    assert.throws(
+      () => db.prepare('insert into products (sku, name, price_minor, stock, active) values (?, ?, ?, ?, ?)').run(`ACTIVE-${Date.now()}`, 'bad active', 100, 1, 2),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () => db.prepare('insert into products (sku, name, price_minor, stock, aliases_json) values (?, ?, ?, ?, ?)').run(`ALIAS-${Date.now()}`, 'bad aliases', 100, 1, '{}'),
+      /CHECK constraint failed/,
+    );
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rejects the complete CSV before writing when any row is invalid', () => {
+  const sku = `ATOMIC-${Date.now()}`;
+  const before = (db.prepare('select count(*) n from products where sku = ?').get(sku) as { n: number }).n;
+  const csv =
+    'sku,name,category,size,color,price,stock,active,aliases\n' +
+    `${sku},Valid Shirt,shirts,M,black,2500,2,true,shirt\n` +
+    `BROKEN-${Date.now()},Broken Shirt,shirts,M,black,25.001,2,true,shirt\n`;
+  assert.throws(() => importInventoryCsv(csv, true), /price must be/);
+  assert.equal((db.prepare('select count(*) n from products where sku = ?').get(sku) as { n: number }).n, before);
+});
+
+it('previews safely, upserts by SKU, searches aliases, and hides inactive products', () => {
+  const sku = `UPSERT-${Date.now()}`;
+  const header = 'sku,name,category,size,color,price,stock,active,aliases\n';
+  try {
+    const firstCsv = header + `${sku},Everyday Shirt,shirts,M,navy,2750,4,true,shirt|tee\n`;
+    const preview = importInventoryCsv(firstCsv, false);
+    assert.equal(preview.applied, false);
+    assert.equal(preview.inserted, 1);
+    assert.equal(preview.reconciliation.catalogOnlyCategories.includes('product'), false);
+    assert.equal((db.prepare('select count(*) n from products where sku = ?').get(sku) as { n: number }).n, 0);
+
+    const first = importInventoryCsv(firstCsv, true);
+    assert.deepEqual({ applied: first.applied, inserted: first.inserted, updated: first.updated }, {
+      applied: true,
+      inserted: 1,
+      updated: 0,
+    });
+    const original = db.prepare('select id, price_minor, stock, created_at, updated_at from products where sku = ?').get(sku) as {
+      id: number;
+      price_minor: number;
+      stock: number;
+      created_at: string;
+      updated_at: string;
+    };
+    assert.deepEqual({ price_minor: original.price_minor, stock: original.stock }, { price_minor: 275000, stock: 4 });
+    assert.equal(typeof original.created_at, 'string');
+    assert.equal(typeof original.updated_at, 'string');
+
+    const aliasResult = checkStock.execute({ name: 'tee', size: 'M', color: 'NAVY' }, { customerId: 1 }) as Array<{ id: number }>;
+    assert.equal(aliasResult.some((row) => row.id === original.id), true);
+
+    const updatedCsv = header + `${sku},Everyday Shirt,shirts,medium,navy,2800,7,true,shirt|tee\n`;
+    const updated = importInventoryCsv(updatedCsv, true);
+    assert.equal(updated.inserted, 0);
+    assert.equal(updated.updated, 1);
+    const replacement = db.prepare('select id, price_minor, stock from products where sku = ?').get(sku) as {
+      id: number;
+      price_minor: number;
+      stock: number;
+    };
+    assert.deepEqual(replacement, { id: original.id, price_minor: 280000, stock: 7 });
+
+    importInventoryCsv(header + `${sku},Everyday Shirt,shirts,M,navy,2800,7,false,shirt|tee\n`, true);
+    const hidden = checkStock.execute({ name: 'tee', size: 'M' }, { customerId: 1 });
+    assert.deepEqual(hidden, { found: false, message: 'no matching product' });
+  } finally {
+    db.prepare('delete from products where sku = ?').run(sku);
   }
 });
 

@@ -12,6 +12,7 @@ import { getSalesToday, getTopSellingProduct, getUnpaidCustomers } from './analy
 import { findBestMatch, loadCatalogSections } from './catalog';
 import { db } from './db';
 import { getPendingFollowups } from './followups';
+import { normalizeSize } from './inventory';
 import { getBalance, recordCredit, recordDebitMinor } from './ledger';
 import { minorToRupees, multiplyMinor } from './money';
 import { createLogger } from './obs/logger';
@@ -44,15 +45,25 @@ export const checkStock: ToolDef = {
       return { ok: false, error: 'Color must be plain text, like "black".' };
     }
 
-    let sql = 'select * from products where name like ?';
-    const params: unknown[] = [`%${name}%`];
+    const escapeLike = (value: string) => value.toLowerCase().replace(/[\\%_]/g, '\\$&');
+    const namePattern = `%${escapeLike(name.trim())}%`;
+    let sql = `select id, sku, name, category, size, color, price_minor, stock
+      from products
+      where active = 1 and (
+        lower(name) like ? escape '\\'
+        or exists (
+          select 1 from json_each(products.aliases_json)
+          where lower(cast(json_each.value as text)) like ? escape '\\'
+        )
+      )`;
+    const params: unknown[] = [namePattern, namePattern];
     if (size) {
-      sql += ' and size = ?';
-      params.push(size);
+      sql += ' and lower(size) = ?';
+      params.push(normalizeSize(size));
     }
     if (color) {
-      sql += ' and color = ?';
-      params.push(color);
+      sql += ' and lower(color) = ?';
+      params.push(color.trim().toLowerCase());
     }
     const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown> & { price_minor: number }>;
     return rows.length > 0
@@ -127,7 +138,7 @@ export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
       return { ok: false, error: 'Quantity must be a whole number greater than 0.' };
     }
     const product = db
-      .prepare('select id, price_minor from products where id = ?')
+      .prepare('select id, price_minor from products where id = ? and active = 1')
       .get(it.product_id) as { id: number; price_minor: number } | undefined;
     if (!product) {
       return { ok: false, error: `Product ${it.product_id} does not exist — check the product first.` };

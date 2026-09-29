@@ -1,0 +1,4 @@
+sku,name,category,size,color,price,stock,active,aliases
+SHIRT-BLK-M,Casual Shirt,shirts,M,black,2750,12,true,shirt|casual tee
+KURTA-WHT-L,Classic Kurta,kurtas,L,white,3200,8,true,kurta|traditional kurta
+TROUSER-GRY-M,Everyday Trouser,trousers,medium,grey,4100,10,true,trouser|pants

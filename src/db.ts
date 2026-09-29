@@ -128,12 +128,20 @@ function migrateExactMoney(): void {
       db.exec(`
       create table products_money_new (
         id integer primary key autoincrement,
+        sku text collate nocase
+          check (sku is null or length(trim(sku)) between 2 and 64),
         name text not null,
+        category text,
         size text,
         color text,
         price_minor integer not null
           check (typeof(price_minor) = 'integer' and price_minor >= 0),
-        stock integer not null default 0
+        stock integer not null default 0,
+        active integer not null default 1 check (active in (0, 1)),
+        aliases_json text not null default '[]'
+          check (json_valid(aliases_json) and json_type(aliases_json) = 'array'),
+        created_at text not null default (datetime('now')),
+        updated_at text not null default (datetime('now'))
       );
       create table orders_money_new (
         id integer primary key autoincrement,
@@ -204,3 +212,38 @@ function migrateExactMoney(): void {
 }
 
 migrateExactMoney();
+
+// Real-inventory onboarding metadata. These additions are deliberately
+// nullable/defaulted so existing order-linked products keep their ids and
+// history. CSV-imported variants require a stable SKU in application code.
+ensureColumn(
+  'products',
+  'sku',
+  "sku text collate nocase check (sku is null or length(trim(sku)) between 2 and 64)",
+);
+ensureColumn('products', 'category', 'category text');
+ensureColumn('products', 'active', 'active integer not null default 1 check (active in (0, 1))');
+ensureColumn(
+  'products',
+  'aliases_json',
+  "aliases_json text not null default '[]' check (json_valid(aliases_json) and json_type(aliases_json) = 'array')",
+);
+ensureColumn('products', 'created_at', 'created_at text');
+ensureColumn('products', 'updated_at', 'updated_at text');
+db.exec(`
+  update products set created_at = coalesce(created_at, datetime('now'));
+  update products set updated_at = coalesce(updated_at, datetime('now'));
+  create unique index if not exists products_sku_unique_idx on products(sku);
+  create trigger if not exists products_sku_valid_insert
+  before insert on products
+  when new.sku is not null and length(trim(new.sku)) not between 2 and 64
+  begin
+    select raise(abort, 'product sku must contain 2-64 characters');
+  end;
+  create trigger if not exists products_sku_valid_update
+  before update of sku on products
+  when new.sku is not null and length(trim(new.sku)) not between 2 and 64
+  begin
+    select raise(abort, 'product sku must contain 2-64 characters');
+  end;
+`);

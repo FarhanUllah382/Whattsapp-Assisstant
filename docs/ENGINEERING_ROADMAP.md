@@ -1875,6 +1875,24 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   reversal-on-cancel fix, see 2.1's and 3.2's own entries) — re-verified
   directly that this sub-version's own stock-restore behavior still fires
   correctly and was not regressed by that fix.
+  **Production inventory-onboarding correction, built and locally verified
+  2026-09-29:** products now support stable case-insensitive SKU, category,
+  active/inactive state, aliases, and timestamps without changing existing IDs
+  or historical order references. The new CSV importer validates the entire
+  file before one atomic upsert transaction, previews unless `--apply` is
+  explicitly supplied, updates repeated SKUs in place, normalizes size aliases
+  (`M` → `medium`), hides inactive variants from both stock search and new-order
+  validation, and reports catalog-only/database-only/unclassified categories.
+  Strict quoted-field parsing, malformed-row all-or-nothing behavior, database
+  constraints, preview non-mutation, re-import identity, alias lookup, and
+  inactive filtering are deterministic tests; the permanent suite passes
+  72/72 plus build, pacing/alerts, and the complete Version 2 flow. A verified
+  backup preceded the compatible schema addition. The real database still
+  contains only the preserved temporary hoodie (now explicitly reported as
+  unclassified); the example CSV was previewed and **not applied**. Therefore
+  the onboarding mechanism is built and locally verified, while real inventory
+  import and any resulting live WhatsApp verification remain pending an
+  owner-approved CSV.
 
 ### 2.5 — Follow-up tracking tied to unpaid orders
 - **Goal:** the system knows which customers still owe money or are waiting

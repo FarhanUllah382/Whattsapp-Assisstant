@@ -78,32 +78,34 @@ The following are release blockers for a real paying client. A pilot must not be
 
 ### 6.1 Real inventory must replace test data
 
-**Current risk:** The catalog says the store sells clothing categories that are absent from the database, while the database contains a temporary hoodie product. The assistant can therefore describe products that cannot be ordered or fail to find products the business actually sells.
+**Current status (2026-09-29): the safe CSV onboarding path is built and locally verified; real business inventory is not yet imported.** Products now support a case-insensitive stable SKU, category, active/inactive state, search aliases, and created/updated timestamps while preserving existing product IDs and order history. `scripts/import-inventory.ts` previews by default and requires explicit `--apply`; it parses quoted CSV correctly, validates the complete file before writing, and applies every accepted row in one transaction. Re-importing a SKU updates that row in place rather than duplicating it. Size aliases such as `M` → `medium` normalize consistently, inactive products disappear from stock lookup and new-order validation, and a catalog reconciliation report identifies missing/unclassified categories. A dry run of the example CSV reported three inserts, no catalog-only categories, and the one existing temporary hoodie as unclassified; a database hash proved preview mode made no change. The permanent suite passes 72/72 plus build, pacing/alerts, and the complete Version 2 flow.
+
+**Remaining risk:** The catalog still advertises shirts, kurtas, and trousers while the real database still contains only the preserved temporary hoodie. No example row has been applied as if it were real stock. An owner-approved CSV is still required before this blocker is complete.
 
 **Required outcome:**
 
-- Obtain an owner-approved inventory file.
-- Import SKU, product name, category, size, color, authoritative price, stock, active state, and optional aliases.
-- Reject malformed rows and report them without partially importing an inconsistent file.
-- Support safe re-import/upsert by stable SKU or variant key.
-- Mark discontinued products inactive instead of deleting history used by prior orders.
-- Reconcile `catalog.md` categories and policies with the imported inventory.
-- Remove the temporary test product only after an export/backup and explicit target verification.
+- **Still required:** obtain an owner-approved inventory CSV.
+- **Completed locally:** import SKU, product name, category, size, color, authoritative price, stock, active state, and optional aliases.
+- **Completed locally:** reject malformed rows before any write; accepted files apply atomically.
+- **Completed locally:** safe case-insensitive re-import/upsert by stable SKU.
+- **Completed locally:** mark discontinued products inactive instead of deleting history used by prior orders.
+- **Built locally; real-data pass pending:** reconcile `catalog.md` categories with imported inventory.
+- **Still required:** remove the temporary test product only after an export/backup and explicit target verification.
 
 **Code locations:**
 
-- `db/schema.sql`: expand the product representation and add uniqueness constraints.
-- `scripts/seed-catalog.ts`: replace sample-only seeding with a validated onboarding/import path.
-- `src/tools.ts`: normalize size/color aliases and exclude inactive variants.
+- `db/schema.sql`: product SKU/category/active/aliases/timestamps and uniqueness are complete.
+- `scripts/import-inventory.ts` and `src/inventory.ts`: validated preview/apply importer and reconciliation are complete; sample seeding remains development-only.
+- `src/tools.ts`: size aliases and inactive-variant exclusion are complete; color matching is case-normalized.
 - `catalog.md`: client-approved general catalog and policies, never manually maintained exact stock.
 
 **Acceptance criteria:**
 
-- Every advertised product category has at least one valid active database variant, or the catalog explicitly says it is unavailable.
-- “M,” “medium,” and configured aliases resolve consistently.
-- Zero-stock and inactive variants are never described as available.
-- Importing the same file twice does not duplicate variants.
-- A reconciliation report lists database-only and catalog-only products.
+- **Pending real CSV:** every advertised product category has at least one valid active database variant, or the catalog explicitly says it is unavailable.
+- **Passed locally:** “M,” “medium,” and configured aliases resolve consistently.
+- **Passed locally:** inactive variants are excluded; zero stock remains visible as zero rather than described as available by server data.
+- **Passed locally:** importing the same SKU twice updates one variant without duplication.
+- **Passed locally:** the reconciliation report lists database-only, catalog-only, and unclassified product categories.
 
 ### 6.2 Price must be authoritative on the server
 
@@ -221,8 +223,8 @@ listed the real pending claim and explicitly approved it. Claim #1 became
 with zero foreign-key violations.
 
 **Still required before production:** actual trusted shipped/delivered command
-or integration paths, external payment-provider verification, and exact-money
-migration remain proposed work; this change does not claim those are complete.
+or integration paths and external payment-provider verification remain proposed
+work. Exact-money storage was completed separately on 2026-09-29.
 
 **Actor/source audit hardening (2026-09-29): built and locally verified.** A
 new append-only application history records initial `placed` state and every
@@ -254,9 +256,8 @@ slice intentionally exposes no new owner/courier/provider mutation tool.
 - `src/tools.ts`: customer claim/status permissions and owner-only claim tools.
 - `db/schema.sql`: durable payment claims and payment references.
 
-**Remaining code locations:**
+**Remaining code location:**
 
-- `db/schema.sql`: complete the exact-money migration.
 - A future explicitly approved integration must authenticate real provider or
   courier events before calling the already-restricted domain function.
 
@@ -696,7 +697,7 @@ Triggers for immediate pause include incorrect prices, duplicate charges/orders,
 |---|---|---|
 | Business identity | `.env.example`, `src/agent.ts`, `src/tools.ts`, `src/alerts.ts`, `src/owner.ts` | Replace functional Ahmed-specific hardcoding with validated single-business configuration. |
 | Catalog | `catalog.md`, `src/catalog.ts` | Install owner-approved policies; improve aliases/search only where evidence requires it. |
-| Inventory import | `scripts/seed-catalog.ts`, new importer | Replace sample seeding with validated, repeatable real inventory onboarding. |
+| Inventory import | `scripts/import-inventory.ts`, `src/inventory.ts` | Validated repeatable CSV onboarding is complete; obtain, preview, approve, and apply the real shop CSV. |
 | Product/order schema | `db/schema.sql`, reviewed migrations | Exact money, order-status audit history, and payment claims are complete; add SKU, active variants, relational order items, fulfilment, and any later approved jobs. |
 | Price/order validation | `src/tools.ts` | Derive price and totals from the database and validate required fulfilment data. |
 | Atomic state changes | `src/orders.ts`, `src/ledger.ts` | Transactional stock, status, payment, cancellation, and history. |

@@ -14,12 +14,20 @@ create table if not exists customers (
 
 create table if not exists products (
   id integer primary key autoincrement,
+  sku text collate nocase
+    check (sku is null or length(trim(sku)) between 2 and 64),
   name text not null,        -- e.g. "shirt"
+  category text,
   size text,                 -- e.g. "medium"
   color text,                -- e.g. "black"
   price_minor integer not null
     check (typeof(price_minor) = 'integer' and price_minor >= 0), -- Pakistani paisas
-  stock integer not null default 0
+  stock integer not null default 0,
+  active integer not null default 1 check (active in (0, 1)),
+  aliases_json text not null default '[]'
+    check (json_valid(aliases_json) and json_type(aliases_json) = 'array'),
+  created_at text not null default (datetime('now')),
+  updated_at text not null default (datetime('now'))
 );
 
 -- SQLite cannot add a CHECK constraint to an existing table in place. These
