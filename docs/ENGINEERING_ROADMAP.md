@@ -123,7 +123,11 @@ written to any books, and Ahmed still can't ask it anything.**
     owner-alert suites, and the complete Version 2 regression flow. This is
     deterministic server-side validation, so direct-code verification is the
     appropriate proof; a live model call cannot reliably reproduce a forged
-    tool price on demand.
+    tool price on demand. **Live normal-path confirmation, 2026-09-29:** a real
+    customer asked for one black medium hoodie. The assistant quoted the
+    database price of Rs.800, created confirmed order `#41` with normalized
+    item `{"product_id":3,"qty":1,"price":800}` and total Rs.800, wrote one
+    matching Rs.800 debit, and reduced stock from 19 to 18.
   - Idempotent send protection: a new `send_ledger` table (`db/schema.sql`)
     keyed by a sha256 hash of (customer, inbound text that triggered the
     turn, exact outbound body). `send_message`'s `execute()` in
@@ -1365,11 +1369,16 @@ shared decision function; nothing bypasses anti-ban pacing.
   passed, but the 2026-09-29 live restart disproved the assumption that a
   one-time cutoff was sufficient: WAHA replayed messages created while the app
   was offline *after* the 2026-09-27 cutoff. The app was stopped immediately.
-  That attempt added 22 inbound message rows, 1 outbound row, 2 customers, 3
-  send-ledger rows, and 21 inbound-event rows; orders, ledger, handoffs, and
+  That attempt added 22 inbound message rows, 1 outbound row, 2 customers, 1
+  send-ledger row, and 19 inbound-event rows; orders, ledger, handoffs, and
   owner alerts did not change. Database integrity remained `ok` with zero
-  foreign-key violations. No cleanup has been performed without owner
-  approval. A gitignored post-incident backup is at
+  foreign-key violations. After explicit owner approval, exactly those 23
+  message rows, 2 customer rows, 1 send-ledger row, and 19 inbound-event rows
+  were removed in one transaction; legitimate September 27 records were
+  preserved. Post-cleanup counts were 39 customers, 582 messages, 2 orders, 4
+  ledger entries, 101 send-ledger rows, and 2 completed inbound events, with
+  integrity still `ok` and zero foreign-key violations. A gitignored
+  post-incident backup is at
   `backups/ahmed-post-replay-20260929-0919.db`; any external WhatsApp send
   cannot be undone. Gemini also returned quota-limit 429s during this attempt.
 
@@ -1382,10 +1391,18 @@ shared decision function; nothing bypasses anti-ban pacing.
   same-process retry handling remains fail-closed; configured timestamps still
   require `Z` or an explicit offset. All 49 deterministic core tests plus the
   pacing and owner-alert suites, type-check, and build pass. This revised
-  prevention is **locally verified, not yet live-verified**. The application
-  remains stopped until the 2026-09-29 test rows are explicitly handled,
-  Gemini quota is usable, and a new controlled restart proves that backlog is
-  quarantined while one genuinely new message is handled exactly once.
+  prevention is **locally verified and partially live-verified**. After the
+  cleanup, a controlled restart advanced the cutoff to
+  `2026-09-29T04:32:33Z` without changing any business-table count. A direct
+  old WAHA-shaped webhook was acknowledged as `ignored_historical` and created
+  no customer/message row, after which its synthetic audit row was removed. A
+  real owner message and five distinct real customer messages each completed
+  once with `attempt_count = 1`; the customer path quoted the real Rs.800
+  product price and then created order `#41` exactly once. Gemini worked with
+  the replacement key. The application is running. What remains unproven is
+  an actual future WAHA reconnect delivering a retained backlog and having
+  every such event visibly quarantined; do not relabel that narrower provider
+  replay proof as complete until it is observed live.
 - **`notify_owner` handoff delivery is no longer log-only in the current
   build** — Version 3.3 now records a durable, retry-deduplicated owner alert
   and sends it through the configured owner-number WhatsApp path. This is
