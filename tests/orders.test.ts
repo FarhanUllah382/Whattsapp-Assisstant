@@ -4,6 +4,13 @@ import { db } from '../src/db';
 import { checkOrderStatusTransition, transitionOrderStatus } from '../src/orders';
 import { getBalance } from '../src/ledger';
 
+const customerAudit = (customerId: number, evidence = 'Deterministic customer transition test.') => ({
+  actorType: 'customer' as const,
+  actorCustomerId: customerId,
+  source: 'deterministic_test',
+  evidence,
+});
+
 describe('Order State Machine (FSM)', () => {
   describe('checkOrderStatusTransition (Pure Function)', () => {
     it('allows valid forward transitions: placed -> confirmed -> paid -> shipped -> delivered', () => {
@@ -66,6 +73,7 @@ describe('Order State Machine (FSM)', () => {
 
     after(() => {
       db.prepare('delete from ledger where customer_id = ?').run(customerId);
+      db.prepare('delete from order_status_events where order_id in (select id from orders where customer_id = ?)').run(customerId);
       db.prepare('delete from orders where customer_id = ?').run(customerId);
       db.prepare('delete from customers where id = ?').run(customerId);
       db.prepare('delete from products where id = ?').run(productId);
@@ -84,7 +92,7 @@ describe('Order State Machine (FSM)', () => {
       assert.equal(initialStock.stock, 20);
 
       // Confirm order
-      const transResult = transitionOrderStatus(orderId, 'confirmed');
+      const transResult = transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId));
       assert.equal(transResult.ok, true);
 
       // Stock should have dropped to 17
@@ -107,12 +115,12 @@ describe('Order State Machine (FSM)', () => {
       );
 
       // Confirm (stock 17 -> 15)
-      transitionOrderStatus(orderId, 'confirmed');
+      transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId));
       const confirmedStock: any = db.prepare('select stock from products where id = ?').get(productId);
       assert.equal(confirmedStock.stock, 15);
 
       // Cancel order
-      const cancelResult = transitionOrderStatus(orderId, 'cancelled');
+      const cancelResult = transitionOrderStatus(orderId, 'cancelled', customerAudit(customerId));
       assert.equal(cancelResult.ok, true);
 
       // Stock restored to 17

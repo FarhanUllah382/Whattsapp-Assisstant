@@ -685,6 +685,13 @@ it('does not retry a failed event that became historical across a restart', () =
 
 // --- Suite 13: Atomic stock reservation ---
 console.log('\n▶ Atomic Stock Reservation');
+const customerAudit = (customerId: number, evidence = 'Deterministic customer transition test.') => ({
+  actorType: 'customer' as const,
+  actorCustomerId: customerId,
+  source: 'deterministic_test',
+  evidence,
+});
+
 it('rejects an over-stock confirmation without changing status, stock, or ledger', () => {
   db.exec('begin');
   try {
@@ -701,7 +708,7 @@ it('rejects an over-stock confirmation without changing status, stock, or ledger
       .run(customerId, orderId, 6400);
 
     const beforeLedger = (db.prepare('select count(*) n from ledger where order_id = ?').get(orderId) as { n: number }).n;
-    const result = transitionOrderStatus(orderId, 'confirmed');
+    const result = transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId));
     assert.equal(result.ok, false);
     if (!result.ok) assert.match(result.error, /requested 2, available 1/);
     assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'placed');
@@ -730,8 +737,8 @@ it('allows exactly one of two competing orders to reserve the final unit', () =>
     const firstId = insertOrder.run(customerId, items, 2500).lastInsertRowid as number;
     const secondId = insertOrder.run(customerId, items, 2500).lastInsertRowid as number;
 
-    assert.equal(transitionOrderStatus(firstId, 'confirmed').ok, true);
-    assert.equal(transitionOrderStatus(secondId, 'confirmed').ok, false);
+    assert.equal(transitionOrderStatus(firstId, 'confirmed', customerAudit(customerId)).ok, true);
+    assert.equal(transitionOrderStatus(secondId, 'confirmed', customerAudit(customerId)).ok, false);
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 0);
     const statuses = db.prepare('select id, status from orders where id in (?, ?) order by id').all(firstId, secondId) as {
       id: number;
@@ -761,7 +768,7 @@ it('rolls back earlier item reservations when a later item is unavailable', () =
       { product_id: unavailableId, qty: 1, price: 1000 },
     ]), 2000).lastInsertRowid as number;
 
-    assert.equal(transitionOrderStatus(orderId, 'confirmed').ok, false);
+    assert.equal(transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId)).ok, false);
     assert.equal((db.prepare('select stock from products where id = ?').get(availableId) as { stock: number }).stock, 2);
     assert.equal((db.prepare('select stock from products where id = ?').get(unavailableId) as { stock: number }).stock, 0);
     assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'placed');
@@ -800,7 +807,7 @@ it('rolls back cancellation status and stock when its ledger reversal fails', ()
       .lastInsertRowid as number;
     db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)")
       .run(customerId, orderId, 1200);
-    assert.equal(transitionOrderStatus(orderId, 'confirmed').ok, true);
+    assert.equal(transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId)).ok, true);
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
 
     db.exec(`
@@ -811,7 +818,7 @@ it('rolls back cancellation status and stock when its ledger reversal fails', ()
         select raise(abort, 'simulated ledger failure');
       end;
     `);
-    const result = transitionOrderStatus(orderId, 'cancelled');
+    const result = transitionOrderStatus(orderId, 'cancelled', customerAudit(customerId));
     assert.equal(result.ok, false);
     assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'confirmed');
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
@@ -824,7 +831,173 @@ it('rolls back cancellation status and stock when its ledger reversal fails', ()
   }
 });
 
-// --- Suite 14: Trusted payment claims ---
+// --- Suite 14: Order status authority and audit history ---
+console.log('\n▶ Order Status Authority & Audit History');
+it('fails closed without audit context and enforces actor-specific transition authority', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-customer-${Date.now()}`)
+      .lastInsertRowid as number;
+    const otherCustomerId = db.prepare('insert into customers (phone) values (?)').run(`audit-other-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-shirt', 'medium', 'navy', 1000, 5).lastInsertRowid as number;
+    const order = recordOrder.execute(
+      { items: [{ product_id: productId, qty: 1 }] },
+      { customerId, idempotencyKey: `waha:audit-create-${Date.now()}` },
+    ) as { ok: boolean; order_id: number };
+    assert.equal(order.ok, true);
+
+    const creation = db.prepare('select * from order_status_events where order_id = ?').get(order.order_id) as {
+      from_status: string | null;
+      to_status: string;
+      actor_type: string;
+      actor_customer_id: number;
+      source: string;
+      source_event_key: string;
+      evidence: string;
+    };
+    assert.equal(creation.from_status, null);
+    assert.equal(creation.to_status, 'placed');
+    assert.equal(creation.actor_type, 'customer');
+    assert.equal(creation.actor_customer_id, customerId);
+    assert.equal(creation.source, 'whatsapp_customer_tool');
+    assert.match(creation.evidence, /confirmed the order contents/i);
+
+    const missingAudit = (transitionOrderStatus as any)(order.order_id, 'confirmed') as { ok: boolean; error: string };
+    assert.equal(missingAudit.ok, false);
+    assert.match(missingAudit.error, /actor is required/i);
+    const wrongCustomer = transitionOrderStatus(order.order_id, 'confirmed', customerAudit(otherCustomerId));
+    assert.equal(wrongCustomer.ok, false);
+    const providerConfirm = transitionOrderStatus(order.order_id, 'confirmed', {
+      actorType: 'payment_provider',
+      source: 'provider_webhook',
+      sourceEventKey: 'provider-confirm-forbidden',
+      evidence: 'Provider event cannot confirm merchandise selection.',
+    });
+    assert.equal(providerConfirm.ok, false);
+    const systemConfirm = transitionOrderStatus(order.order_id, 'confirmed', {
+      actorType: 'system',
+      source: 'background_worker',
+      evidence: 'A background worker attempted an unauthorized transition.',
+    });
+    assert.equal(systemConfirm.ok, false);
+    assert.equal((db.prepare('select status from orders where id = ?').get(order.order_id) as { status: string }).status, 'placed');
+    assert.equal((db.prepare('select count(*) n from order_status_events where order_id = ?').get(order.order_id) as { n: number }).n, 1);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('records every permitted actor transition with source and evidence', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-chain-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-kurta', 'large', 'black', 2000, 2).lastInsertRowid as number;
+    const order = recordOrder.execute(
+      { items: [{ product_id: productId, qty: 1 }] },
+      { customerId, idempotencyKey: `waha:audit-chain-${Date.now()}` },
+    ) as { ok: boolean; order_id: number };
+    assert.equal(order.ok, true);
+    assert.equal(transitionOrderStatus(order.order_id, 'confirmed', customerAudit(customerId, 'Customer confirmed order.')).ok, true);
+    const providerWithoutEventKey = transitionOrderStatus(order.order_id, 'paid', {
+      actorType: 'payment_provider',
+      source: 'easypaisa_webhook',
+      evidence: 'Unidentifiable provider event.',
+    });
+    assert.equal(providerWithoutEventKey.ok, false);
+    assert.equal(transitionOrderStatus(order.order_id, 'paid', {
+      actorType: 'payment_provider',
+      source: 'easypaisa_webhook',
+      sourceEventKey: 'EP-AUDIT-1',
+      evidence: 'Verified provider settlement event.',
+    }).ok, true);
+    assert.equal(transitionOrderStatus(order.order_id, 'shipped', {
+      actorType: 'courier',
+      source: 'courier_webhook',
+      sourceEventKey: 'SHIP-AUDIT-1',
+      evidence: 'Courier accepted parcel and issued tracking.',
+    }).ok, true);
+    assert.equal(transitionOrderStatus(order.order_id, 'delivered', {
+      actorType: 'courier',
+      source: 'courier_webhook',
+      sourceEventKey: 'DELIVERY-AUDIT-1',
+      evidence: 'Courier delivery confirmation event.',
+    }).ok, true);
+
+    const events = db.prepare(`
+      select from_status, to_status, actor_type, source, source_event_key, evidence
+      from order_status_events where order_id = ? order by id
+    `).all(order.order_id) as Array<{ from_status: string | null; to_status: string; actor_type: string; source: string; source_event_key: string | null; evidence: string }>;
+    assert.deepEqual(events.map((event) => event.to_status), ['placed', 'confirmed', 'paid', 'shipped', 'delivered']);
+    assert.deepEqual(events.map((event) => event.actor_type), ['customer', 'customer', 'payment_provider', 'courier', 'courier']);
+    assert.ok(events.every((event) => event.source.length > 0 && event.evidence.length > 0));
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rolls back status and stock when the audit event cannot be written', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-rollback-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-rollback-shirt', 'small', 'white', 900, 1).lastInsertRowid as number;
+    const orderId = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price: 900 }]), 900).lastInsertRowid as number;
+    db.exec(`
+      create trigger test_reject_order_status_audit
+      before insert on order_status_events
+      when new.order_id = ${orderId}
+      begin
+        select raise(abort, 'simulated audit failure');
+      end;
+    `);
+
+    const result = transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId));
+    assert.equal(result.ok, false);
+    assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'placed');
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 1);
+    assert.equal((db.prepare('select count(*) n from order_status_events where order_id = ?').get(orderId) as { n: number }).n, 0);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rolls back order and debit when the initial audit event cannot be written', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-create-rollback-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-create-rollback', 'medium', 'grey', 1100, 2).lastInsertRowid as number;
+    db.exec(`
+      create trigger test_reject_initial_order_audit
+      before insert on order_status_events
+      when new.source = 'direct_customer_tool'
+      begin
+        select raise(abort, 'simulated initial audit failure');
+      end;
+    `);
+    const beforeOrders = (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n;
+    const result = recordOrder.execute({ items: [{ product_id: productId, qty: 1 }] }, { customerId }) as { ok: boolean };
+    assert.equal(result.ok, false);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, beforeOrders);
+    assert.equal((db.prepare('select count(*) n from ledger where customer_id = ?').get(customerId) as { n: number }).n, 0);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+// --- Suite 15: Trusted payment claims ---
 console.log('\n▶ Trusted Payment Claims');
 it('exposes claims—not verified-payment mutation—to customers and keeps resolution owner-only', () => {
   assert.equal(baseTools.some((tool) => tool.name === 'record_payment'), false);

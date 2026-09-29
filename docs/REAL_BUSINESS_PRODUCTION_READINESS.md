@@ -149,7 +149,8 @@ reject any direct negative-stock write as a database backstop.
 debit is written at `placed`, before stock is reserved at `confirmed`. Changing
 when money becomes owed requires the explicit owner decision listed in section
 20 and is not silently bundled into stock safety. Transition actor/source and
-status audit history also remain the separate proposed work described below.
+status audit history were completed separately on 2026-09-29 as described in
+section 6.4.
 The concurrency/rollback invariant is proven deterministically, not by trying
 to manufacture a timing race through two real WhatsApp customers.
 
@@ -163,15 +164,15 @@ to manufacture a timing race through two real WhatsApp customers.
 - **Completed locally:** return a clear recoverable result when another
   customer bought the final item first.
 - **Completed locally:** preserve exactly-once reservation and restoration.
-- **Still proposed:** transition actor/source and persistent status audit
-  history (not part of this narrow stock-integrity slice).
+- **Completed separately:** transition actor/source and persistent status
+  audit history (section 6.4).
 
 **Code locations:**
 
 - `src/orders.ts`: transactional, conditional stock reservation is completed.
 - `src/tools.ts`: return actionable errors to the model without guessing alternatives.
 - `db/schema.sql`: negative-stock triggers are completed for existing and new
-  databases; order-status history remains proposed.
+  databases; order-status history is now also implemented separately.
 
 **Acceptance criteria:**
 
@@ -219,10 +220,20 @@ listed the real pending claim and explicitly approved it. Claim #1 became
 5→6), and order #41 remained `confirmed`. Database integrity returned `ok`
 with zero foreign-key violations.
 
-**Still required before production:** trusted shipped/delivered operations,
-actor/source/evidence transition history, external payment-provider
-verification, and exact-money migration remain proposed work; this change does
-not claim those are complete.
+**Still required before production:** actual trusted shipped/delivered command
+or integration paths, external payment-provider verification, and exact-money
+migration remain proposed work; this change does not claim those are complete.
+
+**Actor/source audit hardening (2026-09-29): built and locally verified.** A
+new append-only application history records initial `placed` state and every
+successful transition with from/to status, actor type, actor customer when
+applicable, source, source-event key, evidence, and timestamp. The core state
+machine fails closed without valid context and independently enforces customer,
+owner, payment-provider, courier, and system actor boundaries. Each event is in
+the same transaction as order, ledger, and stock effects, so an audit-write
+failure rolls everything back. Existing orders remain without fabricated
+history because their original actor/evidence cannot be reconstructed. This
+slice intentionally exposes no new owner/courier/provider mutation tool.
 
 **Required outcome:**
 
@@ -230,7 +241,8 @@ not claim those are complete.
 - Only a trusted owner action or verified payment-provider event records payment.
 - Only trusted owner/courier operations mark an order shipped.
 - Delivery confirmation rules are explicitly chosen by the business.
-- Every sensitive transition records actor, source, timestamp, and evidence/reference.
+- **Completed locally:** every new creation and sensitive transition records
+  actor, source, timestamp, and evidence/reference.
 - Owner analytics remain read-only; a separate minimal trusted operational command path may be designed only after explicit approval. It must not become a general CRM.
 
 **Implemented code locations:**
@@ -244,9 +256,9 @@ not claim those are complete.
 
 **Remaining code locations:**
 
-- `src/orders.ts`: add explicit transition authority/source.
-- `db/schema.sql`: add transition audit history and complete the exact-money
-  migration.
+- `db/schema.sql`: complete the exact-money migration.
+- A future explicitly approved integration must authenticate real provider or
+  courier events before calling the already-restricted domain function.
 
 **Acceptance criteria:**
 
@@ -466,7 +478,9 @@ Required improvements:
 - Never run a destructive migration without a tested rollback/restore path.
 - Add indexes for high-frequency queries: customer messages, order status/date, ledger by customer/order, pending alerts, inbox/outbox states.
 - Add constraints for stock, monetary values, product uniqueness, and recognized state values.
-- Add immutable order-status history and actor/source attribution.
+- **Completed locally 2026-09-29:** append-only application order-status
+  history and actor/source/evidence attribution. Existing history was not
+  fabricated; database-admin retention/tamper policy remains operational work.
 - Test database recovery from the actual backup artifact, not only backup creation.
 
 Suggested data additions, subject to detailed design:
@@ -474,7 +488,8 @@ Suggested data additions, subject to detailed design:
 - `products`: SKU, category, active, price minor units, timestamps.
 - `orders`: fulfilment snapshot, payment method, shipping amount, currency, timestamps.
 - `order_items`: product ID, SKU/name snapshot, quantity, unit price, discount, line total.
-- `order_status_events`: from/to, actor type, source ID, timestamp.
+- `order_status_events`: **implemented** with from/to, actor type, actor
+  customer, source, source-event key, evidence, and timestamp.
 - `payment_claims` and/or `payments`: reference, amount, method, verification status, provider event ID.
 - `customers`: structured name, opt-out/consent fields.
 - `inbound_jobs` and `outbound_jobs`: durable processing and retry state.
@@ -707,7 +722,9 @@ The first approved production-hardening package should contain only the highest-
 4. ~~Separate customer payment claims from verified payments.~~ **Built and
    locally verified 2026-09-29; also live-verified through a real customer
    claim, exactly-once owner alert, owner lookup, and explicit owner approval.**
-5. Add transition actor/source and order-status audit history.
+5. ~~Add transition actor/source and order-status audit history.~~ **Built and
+   locally verified 2026-09-29; no historical rows were fabricated and no new
+   trusted mutation channel was exposed.**
 6. Add deterministic adversarial and concurrency tests.
 7. Re-run the existing complete test suite and a controlled live order flow.
 

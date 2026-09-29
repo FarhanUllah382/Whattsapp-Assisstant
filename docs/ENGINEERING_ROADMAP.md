@@ -1603,8 +1603,12 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   set status back to `'placed'` is rejected too, with no special-casing
   needed — `orders.ts`'s own `ALLOWED_TRANSITIONS` never lists it as a
   valid target for any current state, so the existing state machine
-  already covers it.
-- **Verified locally, deterministically — 21 checks, all through the real
+  already covers it. **Current authority correction (2026-09-29):** the
+  customer-facing tool is now deliberately limited to `confirmed` and
+  pre-shipping `cancelled`; customers cannot mark orders paid, shipped, or
+  delivered. The core state machine independently enforces the same ownership
+  and actor permissions instead of trusting only the tool wrapper.
+- **Historical verification (2026-09-05) — 21 checks, all through the real
   tool (not calling `orders.ts` directly this time), real DB:** the tool is
   actually reachable via `baseTools`; 6 different malformed-input shapes
   (missing fields, wrong types, a made-up status, attempting `'placed'` as
@@ -1623,24 +1627,49 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   server was restarted afterward so it's running the new tool (not yet
   live-tested against a real conversation — that's still a separate,
   not-yet-made decision, same as 2.1 left it).
+- **Production-hardening correction (2026-09-29) — durable actor/source
+  history, built and locally verified:** new `order_status_events` rows record
+  `from_status`, `to_status`, actor type, optional actor customer, source,
+  source-event key, evidence, and timestamp. New orders record their initial
+  `placed` state in the same transaction as the order and debit. Every later
+  transition records its event in the existing `IMMEDIATE` transaction with
+  status, stock, and cancellation-ledger effects. Existing orders were not
+  backfilled because their historical actors/evidence cannot be reconstructed
+  truthfully. `transitionOrderStatus()` now fails closed without valid audit
+  context and enforces actor scope: customers can confirm/cancel only their
+  own order; payment providers can mark only paid; couriers can mark only
+  shipped/delivered; system actors cannot advance status. No new owner,
+  courier, provider, or CRM-facing mutation tool was exposed by this slice.
+- **Current deterministic proof:** permanent suite 64/64, dedicated order
+  suite 8/8, typecheck/build, pacing/alert suites, and the complete Version 2
+  flow all passed. Tests prove missing context, cross-customer access, and
+  wrong-actor transitions fail without a state/event write; the full permitted
+  customer → provider → courier chain records complete evidence; an audit
+  failure rolls back status/stock; and an initial-audit failure rolls back both
+  order and debit. This is server-side authorization/atomicity, so controlled
+  direct verification is the reliable proof; a live model cannot force the
+  provider/courier branches on demand.
 - **Built from DeskcommCRM:** the *mechanism* in `agent/lead-state.ts`
   (forward-only, model-driven, server-validated state machine) — did not
   qualify for direct extraction (DB-coupled), but the pattern is simple
   enough to re-implement with retail vocabulary instead of B2B funnel
   vocabulary. This vocabulary swap is permanent — never revert to the
   funnel shape (see permanent exclusions).
-- **Definition of done:** the bot marks an order confirmed/paid/shipped
-  during a natural conversation (✅ the tool exists and is verified to work
-  correctly when called — not yet exercised through an actual live
-  conversation, see above); a query for "orders in status X" returns
+- **Definition of done:** the customer bot can confirm or cancel its own order,
+  while trusted future owner/provider/courier callers must supply explicit
+  actor/source/evidence and are limited to their permitted transitions (✅
+  built and verified); every successful creation/transition is durably audited
+  in the same transaction as its business effects (✅ built and verified); a
+  query for "orders in status X" returns
   correctly (⚪ trivially true given the schema — a plain `select * from
   orders where status = ?`, not separately built as its own tool since
   nothing yet asks for it); an invalid backward transition is rejected (✅
   verified, both directly in 2.1 and now through the real tool above).
-- **Status:** ✅ Done and live-verified — real WhatsApp turns confirmed an
-  order, marked it paid, rejected a backward transition without side
-  effects, and cancelled it before shipping with the correct stock/ledger
-  effects (2026-09-14 final pass above).
+- **Status:** ✅ Original 2.2 flow remains live-verified from the 2026-09-14
+  pass. The safer customer permission boundary is live-verified through the
+  2026-09-29 payment-claim pass; the new actor/source audit persistence and
+  atomic rollback guarantees are locally/deterministically verified, not
+  mislabeled as separately live-verified.
 
 ### 2.3 — Automatic order & payment-claim extraction
 - **Goal:** "20 shirts, medium, black, ₹5000" becomes a real order row

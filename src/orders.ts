@@ -15,6 +15,17 @@
 export const ORDER_STATUSES = ['placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled'] as const;
 export type OrderStatus = (typeof ORDER_STATUSES)[number];
 
+export const ORDER_STATUS_ACTOR_TYPES = ['customer', 'owner', 'payment_provider', 'courier', 'system'] as const;
+export type OrderStatusActorType = (typeof ORDER_STATUS_ACTOR_TYPES)[number];
+
+export interface OrderStatusAuditContext {
+  actorType: OrderStatusActorType;
+  actorCustomerId?: number;
+  source: string;
+  sourceEventKey?: string;
+  evidence: string;
+}
+
 // Forward chain: placed -> confirmed -> paid -> shipped -> delivered.
 // Cancellation is only meaningful before the order has actually shipped —
 // once it's shipped or delivered, "cancelled" would misrepresent what
@@ -110,7 +121,7 @@ export class OrderStateMachine {
 }
 
 export type TransitionResult =
-  | { ok: true; order_id: number; from: OrderStatus; to: OrderStatus }
+  | { ok: true; order_id: number; from: OrderStatus; to: OrderStatus; event_id: number }
   | { ok: false; error: string };
 
 interface OrderItem {
@@ -120,6 +131,89 @@ interface OrderItem {
 }
 
 class TransitionRejected extends Error {}
+
+function validateAuditContext(audit: OrderStatusAuditContext): string | null {
+  if (!audit || !ORDER_STATUS_ACTOR_TYPES.includes(audit.actorType)) {
+    return 'A valid order-status actor is required.';
+  }
+  if ((audit.actorType === 'customer' || audit.actorType === 'owner') &&
+      (!Number.isInteger(audit.actorCustomerId) || audit.actorCustomerId! <= 0)) {
+    return `A valid actor customer id is required for ${audit.actorType} transitions.`;
+  }
+  if (typeof audit.source !== 'string' || audit.source.trim().length === 0 || audit.source.trim().length > 80) {
+    return 'Order-status source must be 1-80 characters.';
+  }
+  if (audit.sourceEventKey !== undefined &&
+      (typeof audit.sourceEventKey !== 'string' || audit.sourceEventKey.trim().length === 0 || audit.sourceEventKey.length > 200)) {
+    return 'Order-status source event key must be 1-200 characters when supplied.';
+  }
+  if ((audit.actorType === 'payment_provider' || audit.actorType === 'courier') && !audit.sourceEventKey) {
+    return `A stable source event key is required for ${audit.actorType} transitions.`;
+  }
+  if (typeof audit.evidence !== 'string' || audit.evidence.trim().length === 0 || audit.evidence.trim().length > 500) {
+    return 'Order-status evidence must be 1-500 characters.';
+  }
+  return null;
+}
+
+function insertStatusEvent(
+  orderId: number,
+  from: OrderStatus | null,
+  to: OrderStatus,
+  audit: OrderStatusAuditContext,
+): number {
+  const { db } = require('./db') as typeof import('./db');
+  const result = db.prepare(`
+    insert into order_status_events
+      (order_id, from_status, to_status, actor_type, actor_customer_id, source, source_event_key, evidence)
+    values (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    orderId,
+    from,
+    to,
+    audit.actorType,
+    audit.actorCustomerId ?? null,
+    audit.source.trim(),
+    audit.sourceEventKey?.trim() ?? null,
+    audit.evidence.trim(),
+  );
+  return result.lastInsertRowid as number;
+}
+
+/** Record the initial placed state inside the caller's order-creation transaction. */
+export function recordInitialOrderStatus(orderId: number, customerId: number, audit: OrderStatusAuditContext): number {
+  const validationError = validateAuditContext(audit);
+  if (validationError) throw new Error(validationError);
+  if (audit.actorType !== 'customer' || audit.actorCustomerId !== customerId) {
+    throw new Error('Order creation must be attributed to the same customer who owns the order.');
+  }
+  return insertStatusEvent(orderId, null, 'placed', audit);
+}
+
+function checkTransitionAuthority(
+  orderCustomerId: number,
+  next: OrderStatus,
+  audit: OrderStatusAuditContext,
+): string | null {
+  switch (audit.actorType) {
+    case 'customer':
+      if (audit.actorCustomerId !== orderCustomerId) return 'A customer cannot change another customer\'s order.';
+      if (next !== 'confirmed' && next !== 'cancelled') {
+        return 'Customers may only confirm or cancel their own order.';
+      }
+      return null;
+    case 'owner':
+      return null;
+    case 'payment_provider':
+      return next === 'paid' ? null : 'A payment provider may only verify the paid transition.';
+    case 'courier':
+      return next === 'shipped' || next === 'delivered'
+        ? null
+        : 'A courier may only verify shipped or delivered transitions.';
+    case 'system':
+      return 'System actors may record initial order creation but cannot advance order status.';
+  }
+}
 
 function parseAndAggregateItems(itemsJson: string): Map<number, number> {
   let parsed: unknown;
@@ -181,10 +275,16 @@ function parseAndAggregateItems(itemsJson: string): Map<number, number> {
  * debit — unlike the stock reservation — always exists by the time an
  * order can be cancelled at all.
  */
-export function transitionOrderStatus(orderId: number, next: OrderStatus): TransitionResult {
+export function transitionOrderStatus(
+  orderId: number,
+  next: OrderStatus,
+  audit: OrderStatusAuditContext,
+): TransitionResult {
   if (!Number.isInteger(orderId) || orderId <= 0) {
     return { ok: false, error: 'orderId must be a positive whole number.' };
   }
+  const auditError = validateAuditContext(audit);
+  if (auditError) return { ok: false, error: auditError };
   const { db } = require('./db') as typeof import('./db');
   const { recordCredit } = require('./ledger') as typeof import('./ledger');
 
@@ -200,6 +300,8 @@ export function transitionOrderStatus(orderId: number, next: OrderStatus): Trans
     if (!check.ok) {
       throw new TransitionRejected(check.error!);
     }
+    const authorityError = checkTransitionAuthority(row.customer_id, next, audit);
+    if (authorityError) throw new TransitionRejected(authorityError);
 
     if (next === 'confirmed' || (next === 'cancelled' && row.status !== 'placed')) {
       const quantities = parseAndAggregateItems(row.items_json);
@@ -245,7 +347,8 @@ export function transitionOrderStatus(orderId: number, next: OrderStatus): Trans
     }
 
     db.prepare('update orders set status = ? where id = ?').run(next, orderId);
-    return { ok: true, order_id: orderId, from: row.status, to: next };
+    const eventId = insertStatusEvent(orderId, row.status, next, audit);
+    return { ok: true, order_id: orderId, from: row.status, to: next, event_id: eventId };
   });
 
   try {

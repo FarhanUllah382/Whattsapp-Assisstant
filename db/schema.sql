@@ -56,6 +56,30 @@ create table if not exists orders (
   created_at text not null default (datetime('now'))
 );
 
+-- Append-only audit history for every order creation/status transition made
+-- after this table is introduced. Existing orders are deliberately not
+-- backfilled: their historical actor/evidence cannot be reconstructed safely.
+-- Application code writes an event in the same transaction as the status,
+-- stock, and ledger effects; there is no update/delete API for these rows.
+create table if not exists order_status_events (
+  id integer primary key autoincrement,
+  order_id integer not null references orders(id),
+  from_status text
+    check (from_status is null or from_status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
+  to_status text not null
+    check (to_status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
+  actor_type text not null
+    check (actor_type in ('customer', 'owner', 'payment_provider', 'courier', 'system')),
+  actor_customer_id integer references customers(id),
+  source text not null check (length(trim(source)) between 1 and 80),
+  source_event_key text,
+  evidence text not null check (length(trim(evidence)) between 1 and 500),
+  created_at text not null default (datetime('now'))
+);
+
+create index if not exists order_status_events_order_idx
+  on order_status_events(order_id, id);
+
 -- One row per debit (an order placed — customer now owes more) or credit
 -- (a payment — customer owes less) event. `customers`' balance is always
 -- this table's running sum, never a mutated standalone field (Version 2.1)

@@ -661,7 +661,13 @@ export async function runTurn(
         const check = validateOrderItems(unloggedOrder.items);
         if (check.ok) {
           const result = runBookkeepingOnce(toolContext, 'record_order', () => {
-            const orderId = insertValidatedOrder(customer.id, check.items, check.total);
+            const orderId = insertValidatedOrder(customer.id, check.items, check.total, {
+              actorType: 'customer',
+              actorCustomerId: customer.id,
+              source: 'whatsapp_turn_close_safety_net',
+              sourceEventKey: inboundEventKey,
+              evidence: 'Turn-close safety net found a confident customer order agreement.',
+            });
             return { ok: true, order_id: orderId, total: check.total };
           });
           log.info('safety-net order logged at turn close', {

@@ -47,6 +47,11 @@ async function runV2Verification(): Promise<void> {
     const orderRow: any = db.prepare('select * from orders where id = ?').get(orderId);
     assert(orderRow.status === 'placed', 'Initial status is "placed"');
     assert(orderRow.total === 5000, 'Order total is 5000');
+    const placedAudit: any = db.prepare(
+      'select from_status, to_status, actor_type, source, evidence from order_status_events where order_id = ? order by id limit 1',
+    ).get(orderId);
+    assert(placedAudit?.from_status === null && placedAudit?.to_status === 'placed', 'Initial placed status is audited');
+    assert(placedAudit?.actor_type === 'customer' && placedAudit?.source === 'direct_customer_tool', 'Order creation records customer actor and source');
 
     const balanceAfterOrder = getBalance(customerId);
     assert(balanceAfterOrder === 5000, 'Ledger balance owed is 5000 (debit recorded)');
@@ -58,6 +63,10 @@ async function runV2Verification(): Promise<void> {
     console.log('\nTest 3: Confirming order decrements live stock');
     const confirmResult: any = updateOrderStatus.execute({ order_id: orderId, status: 'confirmed' }, ctx);
     assert(confirmResult.ok === true, 'updateOrderStatus to confirmed succeeded');
+    const confirmAudit: any = db.prepare(
+      "select actor_type, source, evidence from order_status_events where order_id = ? and to_status = 'confirmed'",
+    ).get(orderId);
+    assert(confirmAudit?.actor_type === 'customer' && confirmAudit?.source === 'direct_customer_tool', 'Confirmation records customer actor and source');
 
     const stockAfterConfirm: any = db.prepare('select stock from products where id = ?').get(productId);
     assert(stockAfterConfirm.stock === 8, 'Stock decremented from 10 to 8');
@@ -115,6 +124,7 @@ async function runV2Verification(): Promise<void> {
   } finally {
     // Clean up test rows
     db.prepare('delete from ledger where customer_id = ?').run(customerId);
+    db.prepare('delete from order_status_events where order_id in (select id from orders where customer_id = ?)').run(customerId);
     db.prepare('delete from orders where customer_id = ?').run(customerId);
     db.prepare('delete from messages where customer_id = ?').run(customerId);
     db.prepare('delete from checkpoints where customer_id = ?').run(customerId);

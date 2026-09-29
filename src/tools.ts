@@ -14,7 +14,7 @@ import { db } from './db';
 import { getPendingFollowups } from './followups';
 import { getBalance, recordCredit, recordDebit } from './ledger';
 import { createLogger } from './obs/logger';
-import { transitionOrderStatus, type OrderStatus } from './orders';
+import { recordInitialOrderStatus, transitionOrderStatus, type OrderStatus, type OrderStatusAuditContext } from './orders';
 import { claimPayment, pendingPaymentClaims, resolvePaymentClaim } from './payments';
 import type { ToolContext, ToolDef } from './types';
 
@@ -142,13 +142,21 @@ export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
 }
 
 /** Assumes `items`/`total` already passed validateOrderItems — no re-validation here. */
-export function insertValidatedOrder(customerId: number, items: unknown[], total: number): number {
-  const result = db
-    .prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)')
-    .run(customerId, JSON.stringify(items), total, 'placed');
-  const orderId = result.lastInsertRowid as number;
-  recordDebit(customerId, orderId, total);
-  return orderId;
+export function insertValidatedOrder(
+  customerId: number,
+  items: unknown[],
+  total: number,
+  audit: OrderStatusAuditContext,
+): number {
+  return db.transaction(() => {
+    const result = db
+      .prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)')
+      .run(customerId, JSON.stringify(items), total, 'placed');
+    const orderId = result.lastInsertRowid as number;
+    recordDebit(customerId, orderId, total);
+    recordInitialOrderStatus(orderId, customerId, audit);
+    return orderId;
+  })();
 }
 
 /**
@@ -209,7 +217,13 @@ export const recordOrder: ToolDef = {
         return { ok: false, error: check.error };
       }
       return runBookkeepingOnce(ctx, 'record_order', () => {
-        const orderId = insertValidatedOrder(ctx.customerId, check.items, check.total);
+        const orderId = insertValidatedOrder(ctx.customerId, check.items, check.total, {
+          actorType: 'customer',
+          actorCustomerId: ctx.customerId,
+          source: ctx.idempotencyKey ? 'whatsapp_customer_tool' : 'direct_customer_tool',
+          sourceEventKey: ctx.idempotencyKey,
+          evidence: 'Customer confirmed the order contents before placement.',
+        });
         return { ok: true, order_id: orderId, total: check.total };
       });
     } catch {
@@ -263,7 +277,13 @@ export const updateOrderStatus: ToolDef = {
       return { ok: false, error: `Order ${order_id} does not belong to this customer.` };
     }
 
-    const result = transitionOrderStatus(order_id, status as OrderStatus);
+    const result = transitionOrderStatus(order_id, status as OrderStatus, {
+      actorType: 'customer',
+      actorCustomerId: ctx.customerId,
+      source: ctx.idempotencyKey ? 'whatsapp_customer_tool' : 'direct_customer_tool',
+      sourceEventKey: ctx.idempotencyKey,
+      evidence: `Customer requested order status ${status}.`,
+    });
     if (!result.ok) {
       return { ok: false, error: result.error };
     }
