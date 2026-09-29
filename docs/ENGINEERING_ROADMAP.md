@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified. **Current payment-security correction (built and locally verified 2026-09-29; live verification pending):** customer payment statements now create pending owner-review claims rather than verified credits, while the historical order/payment/status/stock and owner follow-up live pass remains recorded below. |
+| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified. **Current payment-security correction (built, locally verified, and live-verified 2026-09-29):** customer payment statements now create pending owner-review claims rather than verified credits; a real claim, owner alert/list, and explicit owner approval passed with exactly one credit and no order-status change. |
 | 3.x | Promise 4 — Ahmed can just ask it questions | ✅ **Done (2026-09-15)** — 3.1/3.2 owner Q&A and 3.3 WhatsApp-delivered alerts are built, locally verified, and live-verified. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1728,9 +1728,13 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
 - **Status:** Order extraction remains complete and live-verified. The payment
   path was safely tightened on 2026-09-29: implementation and deterministic
   verification are complete (permanent suite, alert suite, typecheck/build,
-  and Version 2 regression); **the new claim → owner alert → explicit owner
-  approval path is not yet live-verified and must not be called live-verified
-  until one real claim reaches owner 2409 and creates exactly one credit.**
+  and Version 2 regression). **Live verification also passed:** customer 9958
+  reported Rs.800 paid for confirmed order #41; pending claim #1 and owner
+  alert #15 were created exactly once with no credit or status change; owner
+  2409 listed and explicitly approved the claim; exactly one Rs.800 credit
+  (ledger row #77) was committed, claim #1 became `approved`, and order #41
+  remained `confirmed`. Database integrity was `ok` with zero foreign-key
+  violations.**
 
 ### 2.4 — Live stock-aware replies
 - **Goal:** "do you have 20 in stock" gets a real, current answer, and a

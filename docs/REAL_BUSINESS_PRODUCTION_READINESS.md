@@ -192,8 +192,8 @@ to manufacture a timing race through two real WhatsApp customers.
 
 ### 6.4 Customers must not verify their own payment or fulfilment state
 
-**Current status (2026-09-29): built and locally verified; live WhatsApp
-verification pending.** The customer-facing tool list no longer exposes
+**Current status (2026-09-29): built, locally verified, and live-verified
+through real WhatsApp customer and owner turns.** The customer-facing tool list no longer exposes
 `record_payment`, and customer `update_order_status` is limited to confirming
 or cancelling the customer's own order. A statement such as “I paid” now
 creates a durable, idempotent `payment_claims` row with status `pending` and a
@@ -210,8 +210,16 @@ pending. The older internal `recordPayment` primitive remains exported only for
 legacy deterministic regression coverage; it is not reachable from the
 customer or owner tool menus.
 
-**Still required before production:** the owner approval flow must pass a
-controlled real-WhatsApp test. Trusted shipped/delivered operations,
+**Live proof:** customer 9958 reported Rs.800 paid by Easypaisa for confirmed
+order #41 with reference `TEST-800`. The turn created pending claim #1 and
+delivered owner alert #15 exactly once, while the ledger stayed at five rows
+with zero customer credit and order #41 stayed `confirmed`. Owner 2409 then
+listed the real pending claim and explicitly approved it. Claim #1 became
+`approved`, exactly one Rs.800 credit was added (ledger row #77; total rows
+5→6), and order #41 remained `confirmed`. Database integrity returned `ok`
+with zero foreign-key violations.
+
+**Still required before production:** trusted shipped/delivered operations,
 actor/source/evidence transition history, external payment-provider
 verification, and exact-money migration remain proposed work; this change does
 not claim those are complete.
@@ -248,9 +256,9 @@ not claim those are complete.
   not duplicate it, and a failed credit leaves the claim pending.
 - ✅ Locally verified: customers cannot mark orders paid, shipped, or
   delivered, and claim resolution is absent from their tool menu.
-- ⏳ Live verification pending: one real customer claim must alert owner 2409,
-  then owner approval must create one credit while leaving the order status
-  unchanged.
+- ✅ Live-verified: one real customer claim alerted owner 2409 exactly once;
+  explicit owner approval created exactly one credit while leaving the order
+  status unchanged.
 
 ### 6.5 Orders need complete fulfilment information
 
@@ -697,8 +705,8 @@ The first approved production-hardening package should contain only the highest-
    and locally verified 2026-09-29; the ordinary insufficient-stock refusal is
    also live-verified, while the race/rollback invariant remains deterministic.**
 4. ~~Separate customer payment claims from verified payments.~~ **Built and
-   locally verified 2026-09-29; controlled live customer-claim and owner-
-   approval verification remains pending.**
+   locally verified 2026-09-29; also live-verified through a real customer
+   claim, exactly-once owner alert, owner lookup, and explicit owner approval.**
 5. Add transition actor/source and order-status audit history.
 6. Add deterministic adversarial and concurrency tests.
 7. Re-run the existing complete test suite and a controlled live order flow.
