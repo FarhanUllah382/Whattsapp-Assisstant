@@ -2297,23 +2297,35 @@ Versions 1–3 and explicitly **not Version 4**.
   explicit/negative confirmation parsing, exactly-once confirmation, stored
   fulfilment equality, one debit, one stock reservation, and stale-price
   rollback. Typecheck, build, pacing/alert suites, and the complete Version 2
-  end-to-end regression pass. The real database still has 1 temporary product,
-  3 orders, and 6 ledger rows; integrity is `ok` with no foreign-key violations.
-- **Status:** ✅ **Built and locally verified; real WhatsApp verification is
-  pending.** This does not make the project ready for a paying-client launch:
+  end-to-end regression pass.
+- **Status:** ✅ **Built, locally verified, and live-verified through real
+  WhatsApp (2026-09-29).** This does not make the project ready for a
+  paying-client launch:
   real owner-approved inventory is still not imported, and the remaining
   production-readiness blockers stay open.
 
 - **First live attempt found a real reply-integrity bug (2026-09-29), now
-  corrected locally and awaiting retest:** the server conservatively rejected
+  corrected and live-retested:** the server conservatively rejected
   the clear phrase “Confirm bhai,” but the model still sent “order confirm ho
   gaya.” Database inspection caught the mismatch: draft #1 remained awaiting,
   no order/debit existed, and stock stayed 18. The parser now accepts that
   clear imperative, and the outbound choke point independently blocks any
   “order confirmed/booked” success claim unless this exact inbound provider
   event has a matching persisted `confirmed` status event. The false reply is
-  therefore not counted as live verification; a new customer message must
-  prove the corrected path.
+  not counted as success. Its abandoned test draft was retained in history as
+  `superseded`, with no order attached.
+- **Successful live proof:** customer ending 9958 first requested the live
+  price/stock, then supplied the complete test recipient/contact/address/city
+  and COD details. The assistant displayed draft #2 with one black medium
+  hoodie at the database price Rs.800, free delivery, and total Rs.800. A
+  separate new message, “Confirm,” converted that exact draft into confirmed
+  order #55. Database reconciliation proved exactly one order, exactly one
+  Rs.800 debit, exactly one confirmed draft linked to it, and exactly two audit
+  events (`null → placed` and `placed → confirmed`) carrying the same real
+  provider event key. Stock moved once from 18 to 17; the stored fulfilment
+  snapshot matched the shown summary; `integrity_check` remained `ok` with no
+  foreign-key violations. The real database now has 4 orders and 7 ledger
+  rows. The application and WAHA gateway remained running afterward.
 
 ---
 
