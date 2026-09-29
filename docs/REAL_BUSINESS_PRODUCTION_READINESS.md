@@ -136,8 +136,8 @@ The following are release blockers for a real paying client. A pilot must not be
 
 ### 6.3 Stock reservation must be atomic and cannot become negative
 
-**Current status (2026-09-29): fixed in code and locally verified; new live
-insufficient-stock wording is not yet verified.** Order confirmation now runs
+**Current status (2026-09-29): fixed in code, locally verified, and the normal
+customer-facing insufficient-stock refusal is live-verified.** Order confirmation now runs
 inside an SQLite `IMMEDIATE` transaction, aggregates duplicate product lines,
 and reserves each product with a conditional `stock >= required quantity`
 update before changing status. If any line is unavailable or missing, the
@@ -150,6 +150,8 @@ debit is written at `placed`, before stock is reserved at `confirmed`. Changing
 when money becomes owed requires the explicit owner decision listed in section
 20 and is not silently bundled into stock safety. Transition actor/source and
 status audit history also remain the separate proposed work described below.
+The concurrency/rollback invariant is proven deterministically, not by trying
+to manufacture a timing race through two real WhatsApp customers.
 
 **Required outcome:**
 
@@ -183,6 +185,10 @@ status audit history also remain the separate proposed work described below.
 - **Passed locally:** a forced ledger-reversal failure rolls back cancellation
   status and stock restoration, leaving no partial credit.
 - **Passed locally:** direct negative-stock writes are rejected by SQLite.
+- **Passed live:** with database stock at 18, a real customer requested 20
+  medium black hoodies. The assistant stated only 18 were available; no order
+  or ledger row was added, stock remained 18, and the inbound event completed
+  once with `attempt_count = 1`.
 
 ### 6.4 Customers must not verify their own payment or fulfilment state
 
@@ -653,8 +659,8 @@ The first approved production-hardening package should contain only the highest-
 1. Define exact monetary representation and migration strategy.
 2. ~~Make base product price authoritative in server code.~~ **Completed and locally verified 2026-09-27; live WhatsApp verification remains separate.**
 3. ~~Make stock confirmation atomic and impossible below zero.~~ **Completed
-   and locally verified 2026-09-29; live insufficient-stock conversation proof
-   remains separate.**
+   and locally verified 2026-09-29; the ordinary insufficient-stock refusal is
+   also live-verified, while the race/rollback invariant remains deterministic.**
 4. Separate customer payment claims from verified payments.
 5. Add transition actor/source and order-status audit history.
 6. Add deterministic adversarial and concurrency tests.

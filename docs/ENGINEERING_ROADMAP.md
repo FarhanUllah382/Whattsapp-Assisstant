@@ -1779,8 +1779,14 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   pacing and owner-alert suites, type-check/build, the complete Version 2 flow,
   and the separate 8-test order suite passing. This correction is **locally
   verified**; the earlier ordinary stock decrement/restore remains
-  live-verified, while a new real insufficient-stock conversation is not yet
-  live-verified.
+  live-verified. **Live insufficient-stock confirmation, 2026-09-29:** with
+  product `#3` at stock 18, a real customer requested 20 medium black hoodies.
+  The assistant honestly replied that only 18 were available; orders remained
+  3, ledger rows remained 5, stock remained 18, and the inbound event completed
+  once with `attempt_count = 1`. This live result proves the normal
+  customer-facing refusal; the simultaneous-final-unit and forced rollback
+  invariants remain appropriately deterministic tests rather than a claimed
+  WhatsApp concurrency reproduction.
 - **Verified locally, deterministically — 23 checks, real (unmocked)
   `tools.ts`/`orders.ts` code, real DB:** placing an order alone (status
   `placed`) never touches stock; confirming decrements by the exact ordered
