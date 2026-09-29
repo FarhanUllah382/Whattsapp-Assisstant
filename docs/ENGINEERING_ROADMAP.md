@@ -1760,10 +1760,27 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   before the stock-adjustment code ever runs), and `"cancelled"` is
   terminal (nothing transitions out of it), so each order can decrement at
   most once and restore at most once, for free, from 2.1's own design.
-  **Not built, deliberately, not asked for:** no "insufficient stock"
-  block on confirming — stock is allowed to go negative if oversold, an
-  honest signal for Ahmed to see and act on, not a new guardrail invented
-  beyond what this task asked for.
+  **Current correction, 2026-09-29 — atomic stock reservation is built and
+  locally verified as a separate production-hardening slice:** the historical
+  implementation described above updated order status and then adjusted stock
+  blindly, so concurrent confirmations could oversell and a later failing line
+  could leave partial changes. `transitionOrderStatus()` now acquires an
+  SQLite `IMMEDIATE` transaction before reading status, aggregates duplicate
+  product lines, and reserves with
+  `update products set stock = stock - ? where id = ? and stock >= ?`. If any
+  product is missing or short, the whole transition rolls back and returns the
+  requested/available quantities; status, every product, and ledger remain
+  unchanged. Confirmation, cancellation restoration, cancellation credit, and
+  status now commit atomically. Database triggers reject direct negative-stock
+  inserts/updates. Deterministic proof covers over-stock rejection, two orders
+  competing for the final unit (one confirmed, one still placed), multi-item
+  rollback, a forced cancellation-ledger failure that rolls back status and
+  stock restoration, and the database backstop. The full result is 54/54 core tests,
+  pacing and owner-alert suites, type-check/build, the complete Version 2 flow,
+  and the separate 8-test order suite passing. This correction is **locally
+  verified**; the earlier ordinary stock decrement/restore remains
+  live-verified, while a new real insufficient-stock conversation is not yet
+  live-verified.
 - **Verified locally, deterministically — 23 checks, real (unmocked)
   `tools.ts`/`orders.ts` code, real DB:** placing an order alone (status
   `placed`) never touches stock; confirming decrements by the exact ordered

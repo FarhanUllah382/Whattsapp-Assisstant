@@ -119,6 +119,36 @@ interface OrderItem {
   price: number;
 }
 
+class TransitionRejected extends Error {}
+
+function parseAndAggregateItems(itemsJson: string): Map<number, number> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(itemsJson);
+  } catch {
+    throw new TransitionRejected('This order has invalid item data and cannot change status safely.');
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new TransitionRejected('This order has no valid items and cannot change status safely.');
+  }
+
+  const quantities = new Map<number, number>();
+  for (const item of parsed as OrderItem[]) {
+    if (
+      typeof item !== 'object' ||
+      item === null ||
+      !Number.isInteger(item.product_id) ||
+      item.product_id <= 0 ||
+      !Number.isInteger(item.qty) ||
+      item.qty <= 0
+    ) {
+      throw new TransitionRejected('This order contains an invalid product or quantity.');
+    }
+    quantities.set(item.product_id, (quantities.get(item.product_id) ?? 0) + item.qty);
+  }
+  return quantities;
+}
+
 /**
  * DB-backed version: reads the order's real current status, validates the
  * move via checkOrderStatusTransition, and only writes on success. Never
@@ -158,36 +188,75 @@ export function transitionOrderStatus(orderId: number, next: OrderStatus): Trans
   const { db } = require('./db') as typeof import('./db');
   const { recordCredit } = require('./ledger') as typeof import('./ledger');
 
-  const row = db.prepare('select status, items_json, customer_id, total from orders where id = ?').get(orderId) as
-    | { status: OrderStatus; items_json: string; customer_id: number; total: number }
-    | undefined;
-  if (!row) {
-    return { ok: false, error: `Order ${orderId} does not exist.` };
-  }
-
-  const check = checkOrderStatusTransition(row.status, next);
-  if (!check.ok) {
-    return { ok: false, error: check.error! };
-  }
-
-  db.prepare('update orders set status = ? where id = ?').run(next, orderId);
-
-  if (next === 'confirmed' || (next === 'cancelled' && row.status !== 'placed')) {
-    const items = JSON.parse(row.items_json) as OrderItem[];
-    const sign = next === 'confirmed' ? -1 : 1; // decrement on confirm, restore on cancel-after-reserving
-    const adjustStock = db.prepare('update products set stock = stock + ? where id = ?');
-    for (const item of items) {
-      adjustStock.run(sign * item.qty, item.product_id);
+  const transition = db.transaction((): TransitionResult => {
+    const row = db.prepare('select status, items_json, customer_id, total from orders where id = ?').get(orderId) as
+      | { status: OrderStatus; items_json: string; customer_id: number; total: number }
+      | undefined;
+    if (!row) {
+      throw new TransitionRejected(`Order ${orderId} does not exist.`);
     }
-  }
 
-  if (next === 'cancelled') {
-    // Unconditional (unlike the stock branch above): the debit was recorded
-    // the instant this order was placed, so it needs reversing no matter
-    // which status it's cancelled from. Tied to this order_id (not null)
-    // so the reversal is traceable back to what it's reversing.
-    recordCredit(row.customer_id, row.total, orderId);
-  }
+    const check = checkOrderStatusTransition(row.status, next);
+    if (!check.ok) {
+      throw new TransitionRejected(check.error!);
+    }
 
-  return { ok: true, order_id: orderId, from: row.status, to: next };
+    if (next === 'confirmed' || (next === 'cancelled' && row.status !== 'placed')) {
+      const quantities = parseAndAggregateItems(row.items_json);
+      if (next === 'confirmed') {
+        const reserve = db.prepare(
+          'update products set stock = stock - ? where id = ? and stock >= ?',
+        );
+        const readProduct = db.prepare('select name, size, color, stock from products where id = ?');
+        for (const [productId, qty] of quantities) {
+          const result = reserve.run(qty, productId, qty);
+          if (result.changes !== 1) {
+            const product = readProduct.get(productId) as
+              | { name: string; size: string | null; color: string | null; stock: number }
+              | undefined;
+            if (!product) {
+              throw new TransitionRejected(`Product ${productId} no longer exists; the order was not confirmed.`);
+            }
+            const variant = [product.color, product.size, product.name].filter(Boolean).join(' ');
+            throw new TransitionRejected(
+              `Not enough stock for ${variant}: requested ${qty}, available ${product.stock}. ` +
+              'The order remains placed and no stock was reserved.',
+            );
+          }
+        }
+      } else {
+        const restore = db.prepare('update products set stock = stock + ? where id = ?');
+        for (const [productId, qty] of quantities) {
+          if (restore.run(qty, productId).changes !== 1) {
+            throw new TransitionRejected(
+              `Product ${productId} no longer exists; cancellation was not applied partially.`,
+            );
+          }
+        }
+      }
+    }
+
+    if (next === 'cancelled') {
+      // Unconditional (unlike the stock branch above): the debit was recorded
+      // the instant this order was placed, so it needs reversing no matter
+      // which status it's cancelled from. This insert is in the same
+      // transaction as status and stock, so all three commit or all roll back.
+      recordCredit(row.customer_id, row.total, orderId);
+    }
+
+    db.prepare('update orders set status = ? where id = ?').run(next, orderId);
+    return { ok: true, order_id: orderId, from: row.status, to: next };
+  });
+
+  try {
+    // IMMEDIATE obtains SQLite's write reservation before the status read.
+    // Separate processes therefore cannot both confirm against the same final
+    // stock snapshot; the second transaction re-reads after the first commits.
+    return transition.immediate();
+  } catch (error) {
+    if (error instanceof TransitionRejected) {
+      return { ok: false, error: error.message };
+    }
+    return { ok: false, error: 'Could not update the order safely; no partial change was committed.' };
+  }
 }

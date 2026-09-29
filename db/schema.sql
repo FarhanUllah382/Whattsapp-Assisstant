@@ -21,6 +21,24 @@ create table if not exists products (
   stock integer not null default 0
 );
 
+-- SQLite cannot add a CHECK constraint to an existing table in place. These
+-- triggers provide the same database-level backstop for both new and existing
+-- installations while the reviewed exact-money/order-items migration remains
+-- separate work. Application code must still use conditional reservation.
+create trigger if not exists products_stock_nonnegative_insert
+before insert on products
+when new.stock < 0
+begin
+  select raise(abort, 'product stock cannot be negative');
+end;
+
+create trigger if not exists products_stock_nonnegative_update
+before update of stock on products
+when new.stock < 0
+begin
+  select raise(abort, 'product stock cannot be negative');
+end;
+
 -- Status is a forward-only state machine (Version 2.1), enforced in
 -- src/orders.ts, not just this constraint — the constraint is a backstop
 -- against a bad direct UPDATE, not the primary gate. Retail vocabulary only:

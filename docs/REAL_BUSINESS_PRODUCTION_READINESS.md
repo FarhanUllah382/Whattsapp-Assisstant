@@ -136,28 +136,53 @@ The following are release blockers for a real paying client. A pilot must not be
 
 ### 6.3 Stock reservation must be atomic and cannot become negative
 
-**Current risk:** Order confirmation currently updates status and then subtracts stock without a guarded `stock >= quantity` update. Concurrent confirmations can oversell, and the database can be reduced below zero.
+**Current status (2026-09-29): fixed in code and locally verified; new live
+insufficient-stock wording is not yet verified.** Order confirmation now runs
+inside an SQLite `IMMEDIATE` transaction, aggregates duplicate product lines,
+and reserves each product with a conditional `stock >= required quantity`
+update before changing status. If any line is unavailable or missing, the
+entire transition rolls back. Cancellation restoration, its ledger reversal,
+and the status change now share that same transaction. Insert/update triggers
+reject any direct negative-stock write as a database backstop.
+
+**Remaining risk:** this slice preserves the existing decision that the order
+debit is written at `placed`, before stock is reserved at `confirmed`. Changing
+when money becomes owed requires the explicit owner decision listed in section
+20 and is not silently bundled into stock safety. Transition actor/source and
+status audit history also remain the separate proposed work described below.
 
 **Required outcome:**
 
-- Validate stock again at confirmation time, not only during product discovery.
-- Wrap status transition, stock reservation/restoration, ledger effects, and audit history in one database transaction.
-- Use a conditional update or equivalent locking rule that succeeds only when enough stock remains.
-- Return a clear recoverable result when another customer bought the final item first.
-- Preserve exactly-once reservation and restoration.
+- **Completed locally:** validate stock again at confirmation time.
+- **Completed locally:** wrap status transition, stock reservation/restoration,
+  and cancellation ledger reversal in one transaction.
+- **Completed locally:** use a conditional update that succeeds only when
+  enough stock remains.
+- **Completed locally:** return a clear recoverable result when another
+  customer bought the final item first.
+- **Completed locally:** preserve exactly-once reservation and restoration.
+- **Still proposed:** transition actor/source and persistent status audit
+  history (not part of this narrow stock-integrity slice).
 
 **Code locations:**
 
-- `src/orders.ts`: make the entire database-backed transition transactional and stock-safe.
+- `src/orders.ts`: transactional, conditional stock reservation is completed.
 - `src/tools.ts`: return actionable errors to the model without guessing alternatives.
-- `db/schema.sql`: add `check (stock >= 0)` where migration safety permits and create an order-status history table.
+- `db/schema.sql`: negative-stock triggers are completed for existing and new
+  databases; order-status history remains proposed.
 
 **Acceptance criteria:**
 
-- Quantity greater than stock cannot be confirmed.
-- Two simultaneous confirmations for the last unit result in exactly one success.
-- Failed confirmation changes neither order status, stock, nor ledger.
-- Cancelling a reserved order restores stock exactly once.
+- **Passed locally:** quantity greater than stock cannot be confirmed.
+- **Passed locally:** two competing confirmations for the last unit result in
+  exactly one success.
+- **Passed locally:** a failed multi-item confirmation rolls back earlier line
+  reservations and changes neither status nor ledger.
+- **Passed locally:** cancelling a reserved order restores stock and reverses
+  its debit exactly once in the same transaction.
+- **Passed locally:** a forced ledger-reversal failure rolls back cancellation
+  status and stock restoration, leaving no partial credit.
+- **Passed locally:** direct negative-stock writes are rejected by SQLite.
 
 ### 6.4 Customers must not verify their own payment or fulfilment state
 
@@ -627,7 +652,9 @@ The first approved production-hardening package should contain only the highest-
 
 1. Define exact monetary representation and migration strategy.
 2. ~~Make base product price authoritative in server code.~~ **Completed and locally verified 2026-09-27; live WhatsApp verification remains separate.**
-3. Make stock confirmation atomic and impossible below zero.
+3. ~~Make stock confirmation atomic and impossible below zero.~~ **Completed
+   and locally verified 2026-09-29; live insufficient-stock conversation proof
+   remains separate.**
 4. Separate customer payment claims from verified payments.
 5. Add transition actor/source and order-status audit history.
 6. Add deterministic adversarial and concurrency tests.

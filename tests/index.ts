@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { checkOrderStatusTransition, OrderStateMachine } from '../src/orders';
+import { checkOrderStatusTransition, OrderStateMachine, transitionOrderStatus } from '../src/orders';
 import { LedgerAccount } from '../src/ledger';
 import { checkDiscountRule } from '../src/guardrails/discount-rules';
 import { detectHumanPromise } from '../src/guardrails/human-promise';
@@ -679,6 +679,147 @@ it('does not retry a failed event that became historical across a restart', () =
     }), { action: 'ignore', eventKey, reason: 'historical' });
   } finally {
     db.prepare('delete from inbound_events where event_key = ?').run(eventKey);
+  }
+});
+
+// --- Suite 13: Atomic stock reservation ---
+console.log('\n▶ Atomic Stock Reservation');
+it('rejects an over-stock confirmation without changing status, stock, or ledger', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`stock-limit-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('atomic-kurta', 'medium', 'black', 3200, 1).lastInsertRowid as number;
+    const orderId = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 2, price: 3200 }]), 6400)
+      .lastInsertRowid as number;
+    db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)")
+      .run(customerId, orderId, 6400);
+
+    const beforeLedger = (db.prepare('select count(*) n from ledger where order_id = ?').get(orderId) as { n: number }).n;
+    const result = transitionOrderStatus(orderId, 'confirmed');
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.match(result.error, /requested 2, available 1/);
+    assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'placed');
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 1);
+    assert.equal(
+      (db.prepare('select count(*) n from ledger where order_id = ?').get(orderId) as { n: number }).n,
+      beforeLedger,
+    );
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('allows exactly one of two competing orders to reserve the final unit', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`stock-race-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('last-unit-shirt', 'large', 'navy', 2500, 1).lastInsertRowid as number;
+    const insertOrder = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+    );
+    const items = JSON.stringify([{ product_id: productId, qty: 1, price: 2500 }]);
+    const firstId = insertOrder.run(customerId, items, 2500).lastInsertRowid as number;
+    const secondId = insertOrder.run(customerId, items, 2500).lastInsertRowid as number;
+
+    assert.equal(transitionOrderStatus(firstId, 'confirmed').ok, true);
+    assert.equal(transitionOrderStatus(secondId, 'confirmed').ok, false);
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 0);
+    const statuses = db.prepare('select id, status from orders where id in (?, ?) order by id').all(firstId, secondId) as {
+      id: number;
+      status: string;
+    }[];
+    assert.deepEqual(statuses.map((row) => row.status), ['confirmed', 'placed']);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rolls back earlier item reservations when a later item is unavailable', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`stock-rollback-${Date.now()}`)
+      .lastInsertRowid as number;
+    const availableId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('available-item', 'medium', 'black', 1000, 2).lastInsertRowid as number;
+    const unavailableId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('unavailable-item', 'medium', 'white', 1000, 0).lastInsertRowid as number;
+    const orderId = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([
+      { product_id: availableId, qty: 1, price: 1000 },
+      { product_id: unavailableId, qty: 1, price: 1000 },
+    ]), 2000).lastInsertRowid as number;
+
+    assert.equal(transitionOrderStatus(orderId, 'confirmed').ok, false);
+    assert.equal((db.prepare('select stock from products where id = ?').get(availableId) as { stock: number }).stock, 2);
+    assert.equal((db.prepare('select stock from products where id = ?').get(unavailableId) as { stock: number }).stock, 0);
+    assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'placed');
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('database backstop rejects a direct negative-stock write', () => {
+  db.exec('begin');
+  try {
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('stock-trigger-item', 'small', 'grey', 500, 0).lastInsertRowid as number;
+    assert.throws(
+      () => db.prepare('update products set stock = -1 where id = ?').run(productId),
+      /product stock cannot be negative/,
+    );
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 0);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rolls back cancellation status and stock when its ledger reversal fails', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`cancel-rollback-${Date.now()}`)
+      .lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    ).run('cancel-rollback-item', 'medium', 'black', 1200, 3).lastInsertRowid as number;
+    const orderId = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price: 1200 }]), 1200)
+      .lastInsertRowid as number;
+    db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)")
+      .run(customerId, orderId, 1200);
+    assert.equal(transitionOrderStatus(orderId, 'confirmed').ok, true);
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
+
+    db.exec(`
+      create trigger test_reject_cancellation_credit
+      before insert on ledger
+      when new.kind = 'credit' and new.order_id = ${orderId}
+      begin
+        select raise(abort, 'simulated ledger failure');
+      end;
+    `);
+    const result = transitionOrderStatus(orderId, 'cancelled');
+    assert.equal(result.ok, false);
+    assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'confirmed');
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where order_id = ? and kind = 'credit'").get(orderId) as { n: number }).n,
+      0,
+    );
+  } finally {
+    db.exec('rollback');
   }
 });
 
