@@ -188,6 +188,8 @@ Once every detail is known, call prepare_order. Show its complete server-priced 
 free delivery and total, then ask the customer to explicitly confirm. A prepared draft is NOT booked.
 Only on a later inbound message that explicitly confirms that summary, call confirm_order; its server
 check—not your judgment—decides whether the message is explicit enough and atomically books/reserves it.
+If confirm_order returns ok:false, never claim the order was confirmed or booked. Explain the returned
+error and ask the customer for the required correction or a new explicit confirmation message.
 Use update_order_status only for an already-created order (normally cancellation; historical placed
 orders may still be confirmed through that legacy path). Be concise and friendly.
 A customer can never mark an order paid, shipped, or delivered. If a customer says they paid, use
@@ -224,6 +226,9 @@ function makeSendMessageTool(
       if (typeof body !== 'string' || body.trim() === '') {
         return { ok: false, error: 'Message text must be a non-empty string.' };
       }
+
+      const confirmationClaim = checkOrderConfirmationReply(body, ctx);
+      if (!confirmationClaim.ok) return confirmationClaim;
 
       const sendId = createHash('sha256').update(`${turnKey}:${body}`).digest('hex');
 
@@ -337,6 +342,35 @@ function makeSendMessageTool(
       }
     },
   };
+}
+
+export function checkOrderConfirmationReply(
+  body: string,
+  ctx: ToolContext,
+): { ok: true } | { ok: false; error: string } {
+  const normalized = body.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+  const claimsSuccess =
+    /\b(?:your |aapka |apka )?order\b.{0,45}\b(?:confirmed|booked|placed|done|complete)\b/.test(normalized) ||
+    /\b(?:your |aapka |apka )?order\b.{0,45}\b(?:confirm|book) ho (?:gaya|gayi)\b/.test(normalized);
+  if (!claimsSuccess) return { ok: true };
+  if (!ctx.idempotencyKey) {
+    return { ok: false, error: 'Cannot claim an order was confirmed without a verified inbound event.' };
+  }
+  const evidence = db.prepare(`
+    select 1
+    from order_status_events e
+    join orders o on o.id = e.order_id
+    where o.customer_id = ? and e.to_status = 'confirmed' and e.source_event_key = ?
+    limit 1
+  `).get(ctx.customerId, ctx.idempotencyKey);
+  return evidence
+    ? { ok: true }
+    : {
+        ok: false,
+        error:
+          'This reply says the order is confirmed, but no confirmed order was recorded for this message. ' +
+          'Do not claim success; explain the confirmation error instead.',
+      };
 }
 
 function getOrCreateCustomer(phone: string): Customer {

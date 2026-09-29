@@ -2292,7 +2292,7 @@ Versions 1–3 and explicitly **not Version 4**.
   Before applying the additive schema change, the real database was copied to
   `backups/ahmed-pre-fulfillment-schema-20260929.db`; source and backup
   SHA-256 hashes matched.
-- **Locally verified:** 77/77 permanent checks pass, including missing-field
+- **Locally verified:** 78/78 permanent checks pass, including missing-field
   fail-closed behavior, no draft-time mutation, same-message rejection,
   explicit/negative confirmation parsing, exactly-once confirmation, stored
   fulfilment equality, one debit, one stock reservation, and stale-price
@@ -2303,6 +2303,17 @@ Versions 1–3 and explicitly **not Version 4**.
   pending.** This does not make the project ready for a paying-client launch:
   real owner-approved inventory is still not imported, and the remaining
   production-readiness blockers stay open.
+
+- **First live attempt found a real reply-integrity bug (2026-09-29), now
+  corrected locally and awaiting retest:** the server conservatively rejected
+  the clear phrase “Confirm bhai,” but the model still sent “order confirm ho
+  gaya.” Database inspection caught the mismatch: draft #1 remained awaiting,
+  no order/debit existed, and stock stayed 18. The parser now accepts that
+  clear imperative, and the outbound choke point independently blocks any
+  “order confirmed/booked” success claim unless this exact inbound provider
+  event has a matching persisted `confirmed` status event. The false reply is
+  therefore not counted as live verification; a new customer message must
+  prove the corrected path.
 
 ---
 

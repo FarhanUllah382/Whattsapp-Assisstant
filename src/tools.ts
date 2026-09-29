@@ -456,6 +456,7 @@ export function isExplicitOrderConfirmation(text: unknown): boolean {
   const exact = new Set(['yes', 'y', 'haan', 'han', 'ha', 'ji', 'ok', 'okay', 'confirm', 'confirmed', 'done']);
   if (exact.has(normalized)) return true;
   return (
+    /^(?:yes |haan |han |ha |ji )?confirm(?: order)?(?: bhai| bro| please| pls| ji)*$/.test(normalized) ||
     /\b(confirm|place|book)\b.{0,30}\b(order|it|this)\b/.test(normalized) ||
     /\b(order|it|this)\b.{0,30}\b(confirm|place|book)\b/.test(normalized) ||
     /\border\b.{0,25}\bkar\b.{0,10}\b(do|dein|dain|den)\b/.test(normalized) ||

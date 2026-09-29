@@ -7,6 +7,7 @@ import { isOwnerPhone } from '../src/owner';
 import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog';
 import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
+import { checkOrderConfirmationReply } from '../src/agent';
 import { db } from '../src/db';
 import {
   baseTools,
@@ -1476,10 +1477,39 @@ it('recognizes explicit confirmation conservatively', () => {
   assert.equal(isExplicitOrderConfirmation('Yes'), true);
   assert.equal(isExplicitOrderConfirmation('Order confirm kar dein'), true);
   assert.equal(isExplicitOrderConfirmation('Please book it'), true);
+  assert.equal(isExplicitOrderConfirmation('Confirm bhai'), true);
   assert.equal(isExplicitOrderConfirmation('What is the total?'), false);
   assert.equal(isExplicitOrderConfirmation('No, do not confirm order'), false);
   assert.equal(isExplicitOrderConfirmation("Don't confirm it yet"), false);
   assert.equal(isExplicitOrderConfirmation(undefined), false);
+});
+
+it('blocks a false confirmation reply unless this inbound event actually confirmed an order', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`confirmation-claim-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Confirmation guard shirt', rupeesToMinor(900), 2).lastInsertRowid as number;
+    const eventKey = 'confirmation-claim-event';
+    assert.equal(checkOrderConfirmationReply('Bhai, order confirm ho gaya hai!', { customerId, idempotencyKey: eventKey }).ok, false);
+    assert.equal(checkOrderConfirmationReply('Please confirm your order.', { customerId, idempotencyKey: eventKey }).ok, true);
+    const order = recordOrder.execute(
+      { items: [{ product_id: productId, qty: 1 }] },
+      { customerId, idempotencyKey: 'confirmation-claim-create' },
+    ) as { ok: boolean; order_id: number };
+    assert.equal(order.ok, true);
+    assert.equal(transitionOrderStatus(order.order_id, 'confirmed', {
+      actorType: 'customer',
+      actorCustomerId: customerId,
+      source: 'test_confirmation_claim',
+      sourceEventKey: eventKey,
+      evidence: 'Test customer explicitly confirmed.',
+    }).ok, true);
+    assert.equal(checkOrderConfirmationReply('Your order is confirmed.', { customerId, idempotencyKey: eventKey }).ok, true);
+  } finally {
+    db.exec('rollback');
+  }
 });
 
 // --- Final Report & Clean Exit ---
