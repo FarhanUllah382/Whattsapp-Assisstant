@@ -2265,6 +2265,47 @@ fully met.
 
 ---
 
+## Real-business hardening — fulfilment capture and explicit confirmation (not Version 4)
+
+This is production-hardening work from
+`docs/REAL_BUSINESS_PRODUCTION_READINESS.md`, separate from Ahmed's completed
+Versions 1–3 and explicitly **not Version 4**.
+
+- **Built (2026-09-29):** the customer model can no longer call the older
+  immediate `record_order` tool. It receives `prepare_order` and
+  `confirm_order` instead. Preparation requires recipient name, a validated
+  10–15 digit contact number, complete address, city, and one of COD, bank
+  transfer, Easypaisa, or JazzCash; postal code and delivery instructions are
+  optional. Product prices and the fixed free-delivery charge are controlled
+  by the server.
+- **Confirmation boundary:** preparation writes one durable draft but no
+  order, ledger entry, or stock change. A different, stable provider message
+  from the same customer must explicitly confirm the summary. The server
+  parses that real inbound text, rejects same-message prepare/confirm, and
+  rechecks current catalog price and stock. Success atomically creates the
+  fulfilment-bearing order, debit and audit records, advances the order to
+  `confirmed`, and reserves stock. A webhook retry resolves to the same order.
+  The turn-close model summary is no longer allowed to bypass this boundary.
+- **Schema/backup:** orders gained nullable fulfilment columns so historical
+  rows are not assigned invented data; new orders from this flow fill every
+  required field. `order_drafts` stores the durable confirmation boundary.
+  Before applying the additive schema change, the real database was copied to
+  `backups/ahmed-pre-fulfillment-schema-20260929.db`; source and backup
+  SHA-256 hashes matched.
+- **Locally verified:** 77/77 permanent checks pass, including missing-field
+  fail-closed behavior, no draft-time mutation, same-message rejection,
+  explicit/negative confirmation parsing, exactly-once confirmation, stored
+  fulfilment equality, one debit, one stock reservation, and stale-price
+  rollback. Typecheck, build, pacing/alert suites, and the complete Version 2
+  end-to-end regression pass. The real database still has 1 temporary product,
+  3 orders, and 6 ledger rows; integrity is `ok` with no foreign-key violations.
+- **Status:** ✅ **Built and locally verified; real WhatsApp verification is
+  pending.** This does not make the project ready for a paying-client launch:
+  real owner-approved inventory is still not imported, and the remaining
+  production-readiness blockers stay open.
+
+---
+
 ## Portfolio Demo Frontend — not part of Ahmed's four promises
 
 This is a developer portfolio/recruiter artifact, deliberately separate from

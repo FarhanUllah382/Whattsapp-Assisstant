@@ -61,10 +61,56 @@ create table if not exists orders (
   items_json text not null,   -- [{product_id, qty, price_minor}], price snapshot
   total_minor integer not null
     check (typeof(total_minor) = 'integer' and total_minor >= 0), -- Pakistani paisas
+  shipping_minor integer not null default 0
+    check (typeof(shipping_minor) = 'integer' and shipping_minor >= 0),
+  recipient_name text,
+  contact_phone text,
+  delivery_address text,
+  city text,
+  postal_code text,
+  delivery_instructions text,
+  payment_method text
+    check (payment_method is null or payment_method in ('cod', 'bank_transfer', 'easypaisa', 'jazzcash')),
   status text not null default 'placed'
     check (status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
   created_at text not null default (datetime('now'))
 );
+
+-- A fulfillment draft is deliberately not an order. It holds the complete,
+-- server-priced delivery summary while the assistant waits for a later,
+-- explicit confirmation message from the same customer. Only confirm_order
+-- may convert an awaiting draft into an orders row.
+create table if not exists order_drafts (
+  id integer primary key autoincrement,
+  customer_id integer not null references customers(id),
+  items_json text not null,
+  total_minor integer not null
+    check (typeof(total_minor) = 'integer' and total_minor >= 0),
+  shipping_minor integer not null default 0
+    check (typeof(shipping_minor) = 'integer' and shipping_minor >= 0),
+  recipient_name text not null,
+  contact_phone text not null,
+  delivery_address text not null,
+  city text not null,
+  postal_code text,
+  delivery_instructions text,
+  payment_method text not null
+    check (payment_method in ('cod', 'bank_transfer', 'easypaisa', 'jazzcash')),
+  status text not null default 'awaiting_confirmation'
+    check (status in ('awaiting_confirmation', 'confirmed', 'superseded')),
+  prepared_event_key text unique,
+  confirmed_event_key text unique,
+  order_id integer references orders(id),
+  created_at text not null default (datetime('now')),
+  updated_at text not null default (datetime('now')),
+  confirmed_at text
+);
+
+create unique index if not exists order_drafts_one_awaiting_per_customer
+  on order_drafts(customer_id) where status = 'awaiting_confirmation';
+
+create index if not exists order_drafts_customer_status_idx
+  on order_drafts(customer_id, status, id);
 
 -- Append-only audit history for every order creation/status transition made
 -- after this table is introduced. Existing orders are deliberately not

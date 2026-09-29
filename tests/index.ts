@@ -8,7 +8,17 @@ import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog
 import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
 import { db } from '../src/db';
-import { baseTools, checkStock, ownerTools, recordOrder, recordPayment, updateOrderStatus } from '../src/tools';
+import {
+  baseTools,
+  checkStock,
+  confirmOrder,
+  isExplicitOrderConfirmation,
+  ownerTools,
+  prepareOrder,
+  recordOrder,
+  recordPayment,
+  updateOrderStatus,
+} from '../src/tools';
 import { createPaymentClaim, pendingPaymentClaims, resolvePaymentClaim } from '../src/payments';
 import { minorToRupees, multiplyMinor, positiveRupeesToMinor, rupeesToMinor } from '../src/money';
 import { importInventoryCsv, parseInventoryCsv } from '../src/inventory';
@@ -1314,6 +1324,162 @@ it('keeps a claim pending when owner approval cannot write its ledger credit', (
   } finally {
     db.exec('rollback');
   }
+});
+
+// --- Suite 16: Two-step fulfillment ---
+console.log('\n▶ Two-step Fulfillment');
+it('exposes prepare/confirm but not the immediate record_order tool to customers', () => {
+  assert.equal(baseTools.some((tool) => tool.name === 'record_order'), false);
+  assert.equal(baseTools.some((tool) => tool.name === 'prepare_order'), true);
+  assert.equal(baseTools.some((tool) => tool.name === 'confirm_order'), true);
+});
+
+it('fails closed on missing delivery details and never creates a draft or order', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`fulfillment-missing-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('fulfillment kurta', rupeesToMinor(2500), 4).lastInsertRowid as number;
+    const ordersBefore = (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n;
+    const result = prepareOrder.execute(
+      { items: [{ product_id: productId, qty: 1 }], recipient_name: 'Ali' },
+      { customerId, idempotencyKey: 'fulfillment-missing' },
+    ) as { ok: boolean };
+    assert.equal(result.ok, false);
+    assert.equal((db.prepare('select count(*) n from order_drafts where customer_id = ?').get(customerId) as { n: number }).n, 0);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, ordersBefore);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('prepares without booking, then explicit confirmation atomically books and reserves stock once', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`fulfillment-ok-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('Cotton Kurta', 'medium', 'navy', rupeesToMinor(3200), 5).lastInsertRowid as number;
+    const prepareInput = {
+      items: [{ product_id: productId, qty: 2 }],
+      recipient_name: 'Sara Khan',
+      contact_phone: '+92 312 000 0000',
+      delivery_address: 'House 12, Street 8, F-10',
+      city: 'Islamabad',
+      postal_code: '44000',
+      delivery_instructions: 'Call at the gate',
+      payment_method: 'cash on delivery',
+    };
+    const prepared = prepareOrder.execute(prepareInput, {
+      customerId,
+      idempotencyKey: 'fulfillment-prepare-event',
+    }) as { ok: boolean; draft_id: number; total: number; delivery_charge: number; needs_explicit_confirmation: boolean };
+    const retriedPrepare = prepareOrder.execute(prepareInput, {
+      customerId,
+      idempotencyKey: 'fulfillment-prepare-event',
+    }) as { draft_id: number };
+    assert.equal(prepared.ok, true);
+    assert.equal(prepared.total, 6400);
+    assert.equal(prepared.delivery_charge, 0);
+    assert.equal(prepared.needs_explicit_confirmation, true);
+    assert.equal(retriedPrepare.draft_id, prepared.draft_id);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 0);
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 5);
+
+    const sameTurn = confirmOrder.execute({}, {
+      customerId,
+      idempotencyKey: 'fulfillment-prepare-event',
+      inboundText: 'Yes, confirm my order',
+    }) as { ok: boolean; error?: string };
+    assert.equal(sameTurn.ok, false);
+    assert.match(sameTurn.error ?? '', /new customer message/i);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 0);
+
+    const rejected = confirmOrder.execute({}, {
+      customerId,
+      idempotencyKey: 'fulfillment-reject-event',
+      inboundText: 'Please change the address first',
+    }) as { ok: boolean };
+    assert.equal(rejected.ok, false);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 0);
+
+    const confirmationContext = {
+      customerId,
+      idempotencyKey: 'fulfillment-confirm-event',
+      inboundText: 'Yes, confirm my order',
+    };
+    const confirmed = confirmOrder.execute({}, confirmationContext) as { ok: boolean; order_id: number; stock_reserved: boolean };
+    const retried = confirmOrder.execute({}, confirmationContext) as { ok: boolean; order_id: number; already_confirmed?: boolean };
+    assert.equal(confirmed.ok, true);
+    assert.equal(confirmed.stock_reserved, true);
+    assert.equal(retried.ok, true);
+    assert.equal(retried.order_id, confirmed.order_id);
+    assert.equal(retried.already_confirmed, true);
+    const order = db.prepare(`
+      select status, total_minor, shipping_minor, recipient_name, contact_phone,
+             delivery_address, city, postal_code, delivery_instructions, payment_method
+      from orders where id = ?
+    `).get(confirmed.order_id) as Record<string, unknown>;
+    assert.deepEqual(order, {
+      status: 'confirmed',
+      total_minor: rupeesToMinor(6400),
+      shipping_minor: 0,
+      recipient_name: 'Sara Khan',
+      contact_phone: '+923120000000',
+      delivery_address: 'House 12, Street 8, F-10',
+      city: 'Islamabad',
+      postal_code: '44000',
+      delivery_instructions: 'Call at the gate',
+      payment_method: 'cod',
+    });
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 3);
+    assert.equal((db.prepare("select count(*) n from ledger where order_id = ? and kind = 'debit'").get(confirmed.order_id) as { n: number }).n, 1);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 1);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rejects stale draft prices without creating any partial order', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`fulfillment-stale-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Price-change shirt', rupeesToMinor(1000), 2).lastInsertRowid as number;
+    const prepared = prepareOrder.execute({
+      items: [{ product_id: productId, qty: 1 }],
+      recipient_name: 'Hamza Ali',
+      contact_phone: '03120000000',
+      delivery_address: 'Office 4, Main Boulevard',
+      city: 'Lahore',
+      payment_method: 'easypaisa',
+    }, { customerId, idempotencyKey: 'fulfillment-stale-prepare' }) as { ok: boolean };
+    assert.equal(prepared.ok, true);
+    db.prepare('update products set price_minor = ? where id = ?').run(rupeesToMinor(1100), productId);
+    const result = confirmOrder.execute({}, {
+      customerId,
+      idempotencyKey: 'fulfillment-stale-confirm',
+      inboundText: 'Confirm order',
+    }) as { ok: boolean; error?: string };
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? '', /price changed/i);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 0);
+    assert.equal((db.prepare("select status from order_drafts where customer_id = ?").get(customerId) as { status: string }).status, 'awaiting_confirmation');
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('recognizes explicit confirmation conservatively', () => {
+  assert.equal(isExplicitOrderConfirmation('Yes'), true);
+  assert.equal(isExplicitOrderConfirmation('Order confirm kar dein'), true);
+  assert.equal(isExplicitOrderConfirmation('Please book it'), true);
+  assert.equal(isExplicitOrderConfirmation('What is the total?'), false);
+  assert.equal(isExplicitOrderConfirmation('No, do not confirm order'), false);
+  assert.equal(isExplicitOrderConfirmation("Don't confirm it yet"), false);
+  assert.equal(isExplicitOrderConfirmation(undefined), false);
 });
 
 // --- Final Report & Clean Exit ---

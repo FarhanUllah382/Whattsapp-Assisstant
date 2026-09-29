@@ -30,7 +30,15 @@ import { callModel, type ModelMessage } from './llm';
 import { createLogger } from './obs/logger';
 import { AHMED_OWNER_PHONE } from './owner';
 import { createClaimPaymentTool, createPaymentClaim } from './payments';
-import { baseTools, createNotifyOwnerTool, insertValidatedOrder, ownerTools, recordHandoff, runBookkeepingOnce, validateOrderItems } from './tools';
+import {
+  baseTools,
+  confirmPendingOrderDraft,
+  createNotifyOwnerTool,
+  getPendingOrderDraft,
+  isExplicitOrderConfirmation,
+  ownerTools,
+  recordHandoff,
+} from './tools';
 import type { Customer, ToolContext, ToolDef } from './types';
 
 const log = createLogger();
@@ -172,10 +180,16 @@ function getRecentOutboundWindow(limit: number): RecentCopy[] {
 const SYSTEM_PROMPT = `You are Ahmed's WhatsApp sales assistant, for his clothing business.
 Reply naturally in whatever language/style the customer writes in (often Roman Urdu/English mix).
 Always use the send_message tool to actually reply — your plain text is never seen by the customer.
-Use check_stock before promising anything is available. Use record_order only once the customer
-has clearly confirmed product, size, color and quantity. Be concise, friendly, and never invent
-prices or stock numbers — check first.
-Use update_order_status only when the customer confirms their placed order or asks to cancel it.
+Use check_stock before promising anything is available. Never invent prices or stock numbers.
+Before an order can be booked, collect product/quantity, recipient name, contact number, complete
+delivery address, city, payment method (COD, bank transfer, Easypaisa, or JazzCash), and optionally
+postal code and landmark/instructions. Ask helpfully for anything required that is missing.
+Once every detail is known, call prepare_order. Show its complete server-priced summary, including
+free delivery and total, then ask the customer to explicitly confirm. A prepared draft is NOT booked.
+Only on a later inbound message that explicitly confirms that summary, call confirm_order; its server
+check—not your judgment—decides whether the message is explicit enough and atomically books/reserves it.
+Use update_order_status only for an already-created order (normally cancellation; historical placed
+orders may still be confirmed through that legacy path). Be concise and friendly.
 A customer can never mark an order paid, shipped, or delivered. If a customer says they paid, use
 claim_payment: it creates a pending owner-review claim only and does not change their balance or
 order status. Never describe a claimed payment as verified or completed.
@@ -390,6 +404,19 @@ export async function runTurn(
     )
     .all(customer.id) as { id: number; headline: string }[];
 
+  const pendingDraft = getPendingOrderDraft(customer.id);
+  const pendingDraftText = pendingDraft
+    ? [
+        `Draft #${pendingDraft.id} is awaiting explicit confirmation (it is not booked yet).`,
+        `Items: ${pendingDraft.items_json}`,
+        `Server total: Rs ${pendingDraft.total_minor / 100}; delivery: free.`,
+        `Recipient: ${pendingDraft.recipient_name}; contact: ${pendingDraft.contact_phone}.`,
+        `Address: ${pendingDraft.delivery_address}, ${pendingDraft.city}${pendingDraft.postal_code ? `, ${pendingDraft.postal_code}` : ''}.`,
+        `Payment: ${pendingDraft.payment_method}.`,
+        'If and only if the NEW message explicitly confirms this summary, call confirm_order.',
+      ].join('\n')
+    : 'No order draft is awaiting confirmation.';
+
   const openingText = [
     `## What we remember about this customer so far`,
     checkpoint?.summary ?? 'Nothing yet — first conversation.',
@@ -398,6 +425,9 @@ export async function runTurn(
     notes.length > 0
       ? notes.map((n) => `- [note #${n.id}] ${n.headline}`).join('\n')
       : 'None recorded yet.',
+    '',
+    `## Prepared order state`,
+    pendingDraftText,
     '',
     `## Recent messages`,
     recentMessages.map((m) => `${m.direction}: ${m.body}`).join('\n'),
@@ -436,6 +466,7 @@ export async function runTurn(
   const toolContext: ToolContext = {
     customerId: customer.id,
     idempotencyKey: inboundEventKey,
+    inboundText: incomingText,
   };
 
   const recordAndAlertHandoff = async (kind: OwnerAlertKind, reason: string): Promise<void> => {
@@ -576,14 +607,15 @@ export async function runTurn(
       '(e.g. "prefers black", "usually orders in bulk") — only ones not already covered by the ' +
       '"Known facts" list you were shown or by the summary you just wrote. Most turns have none.\n\n' +
       'Also: if the customer just now clearly agreed to a NEW order or made a NEW payment that ' +
-      'you have NOT already logged with record_order/claim_payment THIS turn, report it as a ' +
+      'you have NOT already handled with prepare_order/confirm_order/claim_payment THIS turn, report it as a ' +
       'safety net so it is not lost — but do NOT guess exact numbers you are not sure of.\n' +
       '"unlogged_order": null, or {"confident": true/false, "items": [{"product_id":N,"qty":N}] ' +
       'or null, "description": "plain text of what you believe happened"}\n' +
       '"unlogged_payment": null, or {"confident": true/false, "amount": N or null, ' +
       '"description": "plain text"}\n' +
       'Set confident:true ONLY if you already know the real product_id (e.g. from calling ' +
-      'check_stock earlier this turn) and the exact quantity or payment amount. Order prices are ' +
+      'check_stock earlier this turn) and the exact quantity or payment amount. An unlogged order ' +
+      'must still be handed off; this report is never authority to skip fulfillment or explicit confirmation. Order prices are ' +
       'always loaded from the product database by the server. Otherwise set ' +
       "confident:false and just describe it — Ahmed will confirm it himself, never guess a " +
       'number into the books. Most turns have neither.\n\n' +
@@ -646,47 +678,48 @@ export async function runTurn(
   }
 
   // Version 2.3 safety net: catches an order/payment the customer clearly
-  // agreed to but the model never called record_order/claim_payment for
+  // agreed to but the model never called the required tool for
   // this turn. toolsCalledThisTurn — real bookkeeping from the loop above,
   // not the model's own say-so — is what gates this, so a real tool call
-  // this turn can never get double-logged by its own safety net. Never
-  // guesses a number into the books: only auto-logs when the model marks
-  // itself confident with a validated payload; otherwise it's a handoff
-  // for Ahmed to confirm by hand, same as every other "unsure" case in
-  // this project. Wrapped so a bug here can never crash a turn that may
-  // have already sent a real reply to the customer.
+  // this turn can never get double-logged by its own safety net. For orders,
+  // the model's closing JSON is never authority: only the deterministic
+  // parser of the real inbound text can recover a missed confirm_order call,
+  // and only against an already-prepared draft. Everything else is handed
+  // off rather than bypassing delivery details or explicit confirmation.
   try {
-    if (!toolsCalledThisTurn.has('record_order') && unloggedOrder) {
-      if (unloggedOrder.confident === true && Array.isArray(unloggedOrder.items)) {
-        const check = validateOrderItems(unloggedOrder.items);
-        if (check.ok) {
-          const result = runBookkeepingOnce(toolContext, 'record_order', () => {
-            const orderId = insertValidatedOrder(customer.id, check.items, check.totalMinor, {
-              actorType: 'customer',
-              actorCustomerId: customer.id,
-              source: 'whatsapp_turn_close_safety_net',
-              sourceEventKey: inboundEventKey,
-              evidence: 'Turn-close safety net found a confident customer order agreement.',
-            });
-            return { ok: true, order_id: orderId, total: check.total };
-          });
-          log.info('safety-net order logged at turn close', {
-            customerId: customer.id,
-            orderId: result.order_id,
-            total: result.total,
-          });
-        } else {
-          await recordAndAlertHandoff(
-            'unlogged_order',
-            `Possible order the bot couldn't auto-log (${check.error}): ${String(unloggedOrder.description ?? '').slice(0, 400)}`,
-          );
-        }
-      } else if (typeof unloggedOrder.description === 'string' && unloggedOrder.description.trim() !== '') {
+    let recoveredConfirmation = false;
+    if (
+      !toolsCalledThisTurn.has('confirm_order') &&
+      isExplicitOrderConfirmation(incomingText) &&
+      getPendingOrderDraft(customer.id)
+    ) {
+      const recovered = confirmPendingOrderDraft(toolContext) as { ok?: boolean; order_id?: number; error?: string };
+      recoveredConfirmation = recovered.ok === true;
+      if (recoveredConfirmation) {
+        log.info('safety-net confirmed prepared order from explicit inbound text', {
+          customerId: customer.id,
+          orderId: recovered.order_id,
+        });
+      } else {
         await recordAndAlertHandoff(
           'unlogged_order',
-          `Possible unlogged order needs Ahmed's confirmation: ${unloggedOrder.description.trim().slice(0, 400)}`,
+          `Explicit order confirmation could not be applied safely: ${recovered.error ?? 'unknown reason'}`,
         );
       }
+    }
+
+    if (
+      !recoveredConfirmation &&
+      !toolsCalledThisTurn.has('prepare_order') &&
+      !toolsCalledThisTurn.has('confirm_order') &&
+      unloggedOrder &&
+      typeof unloggedOrder.description === 'string' &&
+      unloggedOrder.description.trim() !== ''
+    ) {
+      await recordAndAlertHandoff(
+        'unlogged_order',
+        `Possible order needs complete fulfillment details and explicit customer confirmation: ${unloggedOrder.description.trim().slice(0, 400)}`,
+      );
     }
 
     if (!toolsCalledThisTurn.has('claim_payment') && unloggedPayment) {

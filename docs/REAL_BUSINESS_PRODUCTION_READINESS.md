@@ -109,9 +109,9 @@ The following are release blockers for a real paying client. A pilot must not be
 
 ### 6.2 Price must be authoritative on the server
 
-**Current status (2026-09-29): base product-price authority and exact monetary storage are fixed and locally verified; the post-migration customer-facing price/stock read is live-verified.** `record_order` accepts only product ID and quantity in its model-facing schema. The shared server validator loads `products.price_minor`, creates integer-paisa price snapshots, and computes the order total for both the normal tool path and the turn-close safety net. Human/model-facing APIs still use rupees at explicit boundaries. A guarded, atomic migration converted `products.price`, `orders.total`, `ledger.amount`, `payment_claims.amount`, and every order-item price snapshot from rupees to integer Pakistani paisas. Before migration, a byte-identical database backup was verified. After migration, the real database retained 1 product, 3 orders, 6 ledger entries, and the approved payment claim; all converted values reconciled, `integrity_check` returned `ok`, and `foreign_key_check` returned no violations. Integer-type database constraints reject fractional paisas. The permanent suite passed 68/68, focused order tests 8/8, focused ledger tests 5/5, typecheck/build, pacing/alerts, and the complete Version 2 flow passed. **Live boundary proof:** after restart, a real customer ending 2201 asked for the black medium hoodie's price and stock; the assistant returned Rs.800 and 18 pieces from database truth `price_minor = 80000`, `stock = 18`. The read created no business mutation: orders remained 3, ledger entries 6, and payment claims 1. The post-migration order-write path remains deterministically verified rather than newly live-tested, because this deliberate live check did not create an unnecessary order.
+**Current status (2026-09-29): base product-price authority and exact monetary storage are fixed and locally verified; the post-migration customer-facing price/stock read is live-verified.** The customer-facing tool menu no longer exposes the older immediate `record_order` tool. `prepare_order` accepts product ID and quantity plus validated fulfilment data; the shared server validator loads `products.price_minor`, creates integer-paisa price snapshots, and computes the displayed draft total. `confirm_order` revalidates the current catalog price and stock before any order is created. Human/model-facing APIs still use rupees at explicit boundaries. A guarded, atomic migration converted `products.price`, `orders.total`, `ledger.amount`, `payment_claims.amount`, and every order-item price snapshot from rupees to integer Pakistani paisas. Before migration, a byte-identical database backup was verified. After migration, the real database retained 1 product, 3 orders, 6 ledger entries, and the approved payment claim; all converted values reconciled, `integrity_check` returned `ok`, and `foreign_key_check` returned no violations. Integer-type database constraints reject fractional paisas. The current permanent suite passes 77/77 plus build, pacing/alerts, and the complete Version 2 flow. **Live boundary proof:** after restart, a real customer ending 2201 asked for the black medium hoodie's price and stock; the assistant returned Rs.800 and 18 pieces from database truth `price_minor = 80000`, `stock = 18`. The read created no business mutation: orders remained 3, ledger entries 6, and payment claims 1. The new two-message fulfilment/order-write path is locally verified but not yet live-verified.
 
-**Remaining risk:** order item snapshots remain JSON rather than relational rows. Shipping, explicit approved discounts, tax, quote expiry/price locking, and relational `order_items` are not part of this completed slice and remain proposed below.
+**Remaining risk:** order item snapshots remain JSON rather than relational rows. Shipping is currently the owner-approved fixed free-delivery rule; regional charges, explicit approved discounts, tax, quote expiry, courier integration, and relational `order_items` remain proposed.
 
 **Required outcome:**
 
@@ -275,15 +275,21 @@ slice intentionally exposes no new owner/courier/provider mutation tool.
 
 ### 6.5 Orders need complete fulfilment information
 
-**Current risk:** Orders do not contain enough information to deliver a parcel. Customer names are not reliably promoted from conversation into structured customer records, and there are no recipient, address, city, postal code, courier, or tracking fields.
+**Current status (2026-09-29): built and locally verified; live WhatsApp verification pending.** Orders now store a fulfilment snapshot containing recipient name, normalized contact number, complete delivery address, city, optional postal code, optional landmark/instructions, payment method, and a server-controlled zero shipping charge. The approved operating rules are nationwide Pakistan delivery, free delivery, and COD, bank transfer, Easypaisa, or JazzCash. Courier and tracking fields are deliberately still unbuilt because they belong to the later trusted dispatch path, not customer order capture.
+
+The flow is now two-step and durable. `prepare_order` validates all required fields, aggregates duplicate item lines, checks active stock, loads database prices, saves one awaiting-confirmation draft, and returns the final summary without creating an order, ledger debit, or stock reservation. A later provider message from the same customer must contain deterministic explicit confirmation before `confirm_order` can run. The server rejects same-message prepare-and-confirm attempts, missing provider event identity, negative/ambiguous replies, price changes, and stock changes. Successful confirmation atomically creates the fulfilment-bearing order, records the ledger debit and audit events, advances it to `confirmed`, and reserves stock. Webhook retry returns the same order rather than duplicating it. The turn-close safety net can only recover this exact deterministic confirmation against an existing draft; model-produced JSON can no longer create an order by itself.
+
+**Verification:** the pre-schema real database was copied to `backups/ahmed-pre-fulfillment-schema-20260929.db` and its SHA-256 matched the source. The schema addition preserved the real database at 1 product, 3 orders, and 6 ledger entries with `integrity_check = ok` and zero foreign-key violations. The permanent suite passes 77/77, including missing-field rejection, no mutation at draft time, same-message rejection, negative-message rejection, exactly-once confirmation, exact stored fulfilment, one debit, one stock reservation, and stale-price rollback. Typecheck, build, pacing/alert suites, and the complete Version 2 regression flow pass. No test fulfilment row remains after rollback.
+
+**Remaining risk:** this customer-visible flow has not yet been exercised through the real WhatsApp/model path. The live acceptance pass must use a dedicated test customer, verify the displayed summary first, send a separate explicit confirmation, and reconcile the resulting single order, debit, status history, draft, and stock decrement. Real inventory is also still absent, so this is not permission to launch with the temporary hoodie catalog.
 
 **Required outcome:**
 
-- Collect recipient name, contact phone, address, city, postal code when relevant, landmark/instructions, payment method, and customer confirmation.
-- Store shipping charge, courier, tracking number, and fulfilment notes.
-- Show the customer a final summary and require explicit confirmation before placement.
-- Validate required fields server-side; do not rely on the model merely remembering to ask.
-- Decide whether delivery is nationwide, which regions are unsupported, and whether charges vary by region.
+- **Completed locally:** collect and validate recipient name, contact phone, complete address, city, optional postal code, optional landmark/instructions, and payment method.
+- **Completed locally:** store the fixed free-delivery shipping charge and fulfilment snapshot on the order; courier/tracking remain later dispatch work.
+- **Completed locally:** show a server-priced draft and require a separate explicit customer confirmation before order creation.
+- **Completed locally:** validate required fields and confirmation server-side rather than trusting model memory or a model-supplied boolean.
+- **Owner decision recorded:** Pakistan-wide delivery with a zero delivery charge for the present catalog.
 
 **Code locations:**
 
@@ -294,9 +300,12 @@ slice intentionally exposes no new owner/courier/provider mutation tool.
 
 **Acceptance criteria:**
 
-- An order cannot be confirmed for shipping without required fulfilment fields.
-- The stored order matches the customer-confirmed summary.
-- Sensitive address data is not written to ordinary logs.
+- **Passed locally:** the customer-facing tool menu has no path to create an order without the required fulfilment fields.
+- **Passed locally:** same-turn confirmation is rejected; a separate explicit message is required.
+- **Passed locally:** the stored order exactly matches the confirmed server-priced draft and retry creates no duplicate.
+- **Passed locally:** price/stock changes fail without a partial order, debit, or reservation.
+- **Passed by inspection/tests:** sensitive address data is not written to ordinary application logs.
+- **Pending live verification:** one controlled real WhatsApp draft/summary/confirmation pass with exact database reconciliation.
 
 ### 6.6 Opt-out and privacy controls are mandatory
 
@@ -698,8 +707,8 @@ Triggers for immediate pause include incorrect prices, duplicate charges/orders,
 | Business identity | `.env.example`, `src/agent.ts`, `src/tools.ts`, `src/alerts.ts`, `src/owner.ts` | Replace functional Ahmed-specific hardcoding with validated single-business configuration. |
 | Catalog | `catalog.md`, `src/catalog.ts` | Install owner-approved policies; improve aliases/search only where evidence requires it. |
 | Inventory import | `scripts/import-inventory.ts`, `src/inventory.ts` | Validated repeatable CSV onboarding is complete; obtain, preview, approve, and apply the real shop CSV. |
-| Product/order schema | `db/schema.sql`, reviewed migrations | Exact money, order-status audit history, and payment claims are complete; add SKU, active variants, relational order items, fulfilment, and any later approved jobs. |
-| Price/order validation | `src/tools.ts` | Derive price and totals from the database and validate required fulfilment data. |
+| Product/order schema | `db/schema.sql`, reviewed migrations | Exact money, order-status audit history, payment claims, SKU metadata, durable order drafts, and fulfilment snapshots are complete; relational order items and later approved jobs remain. |
+| Price/order validation | `src/tools.ts` | Server-priced draft, required fulfilment validation, separate explicit confirmation, revalidation, and atomic booking are complete locally. |
 | Atomic state changes | `src/orders.ts`, `src/ledger.ts` | Transactional stock, status, payment, cancellation, and history. |
 | Customer/owner authority | `src/agent.ts`, `src/tools.ts`, `src/owner.ts` | Keep customer claims separate from trusted owner/provider actions. |
 | Provider | `src/channel/types.ts`, `src/channel/waha.ts`, new `src/channel/meta-cloud.ts` | Official provider adapter, authentication, delivery status, timeout/retry. |

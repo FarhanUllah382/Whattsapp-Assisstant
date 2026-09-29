@@ -149,6 +149,16 @@ function migrateExactMoney(): void {
         items_json text not null,
         total_minor integer not null
           check (typeof(total_minor) = 'integer' and total_minor >= 0),
+        shipping_minor integer not null default 0
+          check (typeof(shipping_minor) = 'integer' and shipping_minor >= 0),
+        recipient_name text,
+        contact_phone text,
+        delivery_address text,
+        city text,
+        postal_code text,
+        delivery_instructions text,
+        payment_method text
+          check (payment_method is null or payment_method in ('cod', 'bank_transfer', 'easypaisa', 'jazzcash')),
         status text not null default 'placed'
           check (status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
         created_at text not null default (datetime('now'))
@@ -212,6 +222,27 @@ function migrateExactMoney(): void {
 }
 
 migrateExactMoney();
+
+// Fulfillment details are nullable on historical orders because inventing
+// recipient/address data for old rows would corrupt the audit trail. Every
+// order created through the new two-step fulfillment flow supplies all
+// required delivery fields and a server-controlled zero shipping charge.
+ensureColumn(
+  'orders',
+  'shipping_minor',
+  "shipping_minor integer not null default 0 check (typeof(shipping_minor) = 'integer' and shipping_minor >= 0)",
+);
+ensureColumn('orders', 'recipient_name', 'recipient_name text');
+ensureColumn('orders', 'contact_phone', 'contact_phone text');
+ensureColumn('orders', 'delivery_address', 'delivery_address text');
+ensureColumn('orders', 'city', 'city text');
+ensureColumn('orders', 'postal_code', 'postal_code text');
+ensureColumn('orders', 'delivery_instructions', 'delivery_instructions text');
+ensureColumn(
+  'orders',
+  'payment_method',
+  "payment_method text check (payment_method is null or payment_method in ('cod', 'bank_transfer', 'easypaisa', 'jazzcash'))",
+);
 
 // Real-inventory onboarding metadata. These additions are deliberately
 // nullable/defaulted so existing order-linked products keep their ids and

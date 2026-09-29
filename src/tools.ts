@@ -114,6 +114,39 @@ export interface ServerPricedOrderItem {
   price_minor: number;
 }
 
+export const PAYMENT_METHODS = ['cod', 'bank_transfer', 'easypaisa', 'jazzcash'] as const;
+export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
+
+export interface FulfillmentDetails {
+  recipientName: string;
+  contactPhone: string;
+  deliveryAddress: string;
+  city: string;
+  postalCode: string | null;
+  deliveryInstructions: string | null;
+  paymentMethod: PaymentMethod;
+  shippingMinor: 0;
+}
+
+interface OrderDraftRow {
+  id: number;
+  customer_id: number;
+  items_json: string;
+  total_minor: number;
+  shipping_minor: number;
+  recipient_name: string;
+  contact_phone: string;
+  delivery_address: string;
+  city: string;
+  postal_code: string | null;
+  delivery_instructions: string | null;
+  payment_method: PaymentMethod;
+  status: 'awaiting_confirmation' | 'confirmed' | 'superseded';
+  prepared_event_key: string | null;
+  confirmed_event_key: string | null;
+  order_id: number | null;
+}
+
 export type ValidateOrderItemsResult =
   | { ok: true; items: ServerPricedOrderItem[]; totalMinor: number; total: number }
   | { ok: false; error: string };
@@ -164,11 +197,33 @@ export function insertValidatedOrder(
   items: unknown[],
   totalMinor: number,
   audit: OrderStatusAuditContext,
+  fulfillment?: FulfillmentDetails,
 ): number {
   return db.transaction(() => {
-    const result = db
-      .prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)')
-      .run(customerId, JSON.stringify(items), totalMinor, 'placed');
+    const result = fulfillment
+      ? db.prepare(`
+          insert into orders
+            (customer_id, items_json, total_minor, shipping_minor, recipient_name,
+             contact_phone, delivery_address, city, postal_code,
+             delivery_instructions, payment_method, status)
+          values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          customerId,
+          JSON.stringify(items),
+          totalMinor,
+          fulfillment.shippingMinor,
+          fulfillment.recipientName,
+          fulfillment.contactPhone,
+          fulfillment.deliveryAddress,
+          fulfillment.city,
+          fulfillment.postalCode,
+          fulfillment.deliveryInstructions,
+          fulfillment.paymentMethod,
+          'placed',
+        )
+      : db
+          .prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)')
+          .run(customerId, JSON.stringify(items), totalMinor, 'placed');
     const orderId = result.lastInsertRowid as number;
     recordDebitMinor(customerId, orderId, totalMinor);
     recordInitialOrderStatus(orderId, customerId, audit);
@@ -247,6 +302,334 @@ export const recordOrder: ToolDef = {
       return { ok: false, error: 'Could not record the order — please try again.' };
     }
   },
+};
+
+function cleanRequiredText(value: unknown, label: string, min: number, max: number): string | { error: string } {
+  if (typeof value !== 'string') return { error: `${label} must be plain text.` };
+  const clean = value.trim().replace(/\s+/g, ' ');
+  if (clean.length < min || clean.length > max) {
+    return { error: `${label} must contain ${min}-${max} characters.` };
+  }
+  return clean;
+}
+
+function cleanOptionalText(value: unknown, label: string, max: number): string | null | { error: string } {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') return { error: `${label} must be plain text.` };
+  const clean = value.trim().replace(/\s+/g, ' ');
+  if (clean.length > max) return { error: `${label} must be ${max} characters or fewer.` };
+  return clean || null;
+}
+
+function normalizeContactPhone(value: unknown): string | { error: string } {
+  if (typeof value !== 'string') return { error: 'Contact number must be plain text.' };
+  const trimmed = value.trim();
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 10 || digits.length > 15) {
+    return { error: 'Contact number must contain 10-15 digits.' };
+  }
+  return trimmed.startsWith('+') ? `+${digits}` : digits;
+}
+
+function normalizePaymentMethod(value: unknown): PaymentMethod | { error: string } {
+  if (typeof value !== 'string') {
+    return { error: 'Payment method must be COD, bank transfer, Easypaisa, or JazzCash.' };
+  }
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
+  const aliases: Record<string, PaymentMethod> = {
+    cod: 'cod',
+    cash_on_delivery: 'cod',
+    cash: 'cod',
+    bank: 'bank_transfer',
+    bank_transfer: 'bank_transfer',
+    easypaisa: 'easypaisa',
+    easy_paisa: 'easypaisa',
+    jazzcash: 'jazzcash',
+    jazz_cash: 'jazzcash',
+  };
+  return aliases[normalized] ?? { error: 'Payment method must be COD, bank transfer, Easypaisa, or JazzCash.' };
+}
+
+function validateFulfillment(input: any): FulfillmentDetails | { error: string } {
+  const recipientName = cleanRequiredText(input?.recipient_name, 'Recipient name', 2, 100);
+  if (typeof recipientName !== 'string') return recipientName;
+  const contactPhone = normalizeContactPhone(input?.contact_phone);
+  if (typeof contactPhone !== 'string') return contactPhone;
+  const deliveryAddress = cleanRequiredText(input?.delivery_address, 'Complete delivery address', 10, 300);
+  if (typeof deliveryAddress !== 'string') return deliveryAddress;
+  const city = cleanRequiredText(input?.city, 'City', 2, 80);
+  if (typeof city !== 'string') return city;
+  const postalCode = cleanOptionalText(input?.postal_code, 'Postal code', 12);
+  if (postalCode && typeof postalCode !== 'string') return postalCode;
+  if (typeof postalCode === 'string' && !/^[a-zA-Z0-9 -]{3,12}$/.test(postalCode)) {
+    return { error: 'Postal code may contain only letters, numbers, spaces, and hyphens.' };
+  }
+  const deliveryInstructions = cleanOptionalText(input?.delivery_instructions, 'Delivery instructions', 300);
+  if (deliveryInstructions && typeof deliveryInstructions !== 'string') return deliveryInstructions;
+  const paymentMethod = normalizePaymentMethod(input?.payment_method);
+  if (typeof paymentMethod !== 'string') return paymentMethod;
+  return {
+    recipientName,
+    contactPhone,
+    deliveryAddress,
+    city,
+    postalCode,
+    deliveryInstructions,
+    paymentMethod,
+    shippingMinor: 0,
+  };
+}
+
+function aggregateDraftItems(items: unknown): unknown[] | { error: string } {
+  if (!Array.isArray(items) || items.length === 0) return { error: 'Please list at least one item to order.' };
+  const quantities = new Map<number, number>();
+  for (const item of items as any[]) {
+    if (!item || !Number.isInteger(item.product_id) || item.product_id <= 0) {
+      return { error: 'Each item needs a valid product.' };
+    }
+    if (!Number.isInteger(item.qty) || item.qty <= 0) {
+      return { error: 'Quantity must be a whole number greater than 0.' };
+    }
+    const next = (quantities.get(item.product_id) ?? 0) + item.qty;
+    if (!Number.isSafeInteger(next)) return { error: 'The requested quantity is too large.' };
+    quantities.set(item.product_id, next);
+  }
+  return [...quantities].map(([product_id, qty]) => ({ product_id, qty }));
+}
+
+function checkDraftStock(items: ServerPricedOrderItem[]): string | null {
+  const read = db.prepare('select name, size, color, stock from products where id = ? and active = 1');
+  for (const item of items) {
+    const product = read.get(item.product_id) as
+      | { name: string; size: string | null; color: string | null; stock: number }
+      | undefined;
+    if (!product) return `Product ${item.product_id} is no longer available.`;
+    if (product.stock < item.qty) {
+      const variant = [product.color, product.size, product.name].filter(Boolean).join(' ');
+      return `Not enough stock for ${variant}: requested ${item.qty}, available ${product.stock}.`;
+    }
+  }
+  return null;
+}
+
+function draftResult(row: OrderDraftRow) {
+  const items = JSON.parse(row.items_json) as ServerPricedOrderItem[];
+  const productRows = db.prepare('select id, name, size, color from products where id = ?');
+  return {
+    ok: true,
+    draft_id: row.id,
+    status: row.status,
+    items: items.map((item) => ({
+      ...item,
+      price: minorToRupees(item.price_minor, 'draft item price'),
+      product: productRows.get(item.product_id),
+    })),
+    subtotal: minorToRupees(row.total_minor, 'draft subtotal'),
+    delivery_charge: minorToRupees(row.shipping_minor, 'draft shipping'),
+    total: minorToRupees(row.total_minor + row.shipping_minor, 'draft total'),
+    recipient_name: row.recipient_name,
+    contact_phone: row.contact_phone,
+    delivery_address: row.delivery_address,
+    city: row.city,
+    postal_code: row.postal_code,
+    delivery_instructions: row.delivery_instructions,
+    payment_method: row.payment_method,
+    needs_explicit_confirmation: row.status === 'awaiting_confirmation',
+    instruction: row.status === 'awaiting_confirmation'
+      ? 'Show this complete summary and ask the customer to confirm. Do not say the order is booked yet.'
+      : undefined,
+  };
+}
+
+export function getPendingOrderDraft(customerId: number): OrderDraftRow | undefined {
+  return db.prepare(`
+    select * from order_drafts
+    where customer_id = ? and status = 'awaiting_confirmation'
+    order by id desc limit 1
+  `).get(customerId) as OrderDraftRow | undefined;
+}
+
+export function isExplicitOrderConfirmation(text: unknown): boolean {
+  if (typeof text !== 'string') return false;
+  const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+  if (!normalized || /\b(no|nope|not|dont|don t|nahi|nahin|mat|cancel|change|wait|ruk|stop)\b/.test(normalized)) return false;
+  const exact = new Set(['yes', 'y', 'haan', 'han', 'ha', 'ji', 'ok', 'okay', 'confirm', 'confirmed', 'done']);
+  if (exact.has(normalized)) return true;
+  return (
+    /\b(confirm|place|book)\b.{0,30}\b(order|it|this)\b/.test(normalized) ||
+    /\b(order|it|this)\b.{0,30}\b(confirm|place|book)\b/.test(normalized) ||
+    /\border\b.{0,25}\bkar\b.{0,10}\b(do|dein|dain|den)\b/.test(normalized) ||
+    /\bbook\b.{0,20}\bkar\b.{0,10}\b(do|dein|dain|den)\b/.test(normalized)
+  );
+}
+
+export const prepareOrder: ToolDef = {
+  name: 'prepare_order',
+  description:
+    'Validate the complete delivery details, live stock, and server-controlled prices, then save a draft. ' +
+    'This does NOT create or book an order. Show the returned summary and wait for a later customer message.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      items: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: { product_id: { type: 'number' }, qty: { type: 'number' } },
+          required: ['product_id', 'qty'],
+        },
+      },
+      recipient_name: { type: 'string' },
+      contact_phone: { type: 'string' },
+      delivery_address: { type: 'string' },
+      city: { type: 'string' },
+      postal_code: { type: 'string', description: 'optional' },
+      delivery_instructions: { type: 'string', description: 'optional landmark or instructions' },
+      payment_method: { type: 'string', enum: PAYMENT_METHODS },
+    },
+    required: ['items', 'recipient_name', 'contact_phone', 'delivery_address', 'city', 'payment_method'],
+  },
+  execute: (input, ctx) => {
+    try {
+      const fulfillment = validateFulfillment(input);
+      if ('error' in fulfillment) return { ok: false, error: fulfillment.error };
+      const aggregated = aggregateDraftItems(input?.items);
+      if (!Array.isArray(aggregated)) return { ok: false, error: aggregated.error };
+      const priced = validateOrderItems(aggregated);
+      if (!priced.ok) return { ok: false, error: priced.error };
+      const stockError = checkDraftStock(priced.items);
+      if (stockError) return { ok: false, error: stockError };
+
+      const eventKey = ctx.idempotencyKey ? `${ctx.idempotencyKey}:prepare_order` : null;
+      const draft = db.transaction(() => {
+        if (eventKey) {
+          const existing = db.prepare('select * from order_drafts where prepared_event_key = ?').get(eventKey) as OrderDraftRow | undefined;
+          if (existing) return existing;
+        }
+        db.prepare(`
+          update order_drafts set status = 'superseded', updated_at = datetime('now')
+          where customer_id = ? and status = 'awaiting_confirmation'
+        `).run(ctx.customerId);
+        const inserted = db.prepare(`
+          insert into order_drafts
+            (customer_id, items_json, total_minor, shipping_minor, recipient_name,
+             contact_phone, delivery_address, city, postal_code,
+             delivery_instructions, payment_method, prepared_event_key)
+          values (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          ctx.customerId,
+          JSON.stringify(priced.items),
+          priced.totalMinor,
+          fulfillment.recipientName,
+          fulfillment.contactPhone,
+          fulfillment.deliveryAddress,
+          fulfillment.city,
+          fulfillment.postalCode,
+          fulfillment.deliveryInstructions,
+          fulfillment.paymentMethod,
+          eventKey,
+        );
+        return db.prepare('select * from order_drafts where id = ?').get(inserted.lastInsertRowid) as OrderDraftRow;
+      }).immediate();
+      return draftResult(draft);
+    } catch {
+      return { ok: false, error: 'Could not prepare the order safely — please try again.' };
+    }
+  },
+};
+
+export function confirmPendingOrderDraft(ctx: ToolContext): Record<string, unknown> {
+  if (!ctx.idempotencyKey) {
+    return {
+      ok: false,
+      error: 'A stable inbound message identity is required before an order can be confirmed.',
+    };
+  }
+  if (!isExplicitOrderConfirmation(ctx.inboundText)) {
+    return {
+      ok: false,
+      error: 'The customer must explicitly confirm the prepared summary in their current message.',
+    };
+  }
+  const confirmedEventKey = `${ctx.idempotencyKey}:confirm_order`;
+  try {
+    return db.transaction(() => {
+      if (confirmedEventKey) {
+        const prior = db.prepare('select * from order_drafts where confirmed_event_key = ?').get(confirmedEventKey) as OrderDraftRow | undefined;
+        if (prior?.order_id) {
+          return { ok: true, order_id: prior.order_id, draft_id: prior.id, status: 'confirmed', already_confirmed: true };
+        }
+      }
+      const draft = getPendingOrderDraft(ctx.customerId);
+      if (!draft) return { ok: false, error: 'There is no prepared order waiting for this customer to confirm.' };
+      if (draft.prepared_event_key === `${ctx.idempotencyKey}:prepare_order`) {
+        return {
+          ok: false,
+          error: 'Show the prepared summary first, then wait for a new customer message before confirming it.',
+        };
+      }
+      const parsedItems = JSON.parse(draft.items_json) as unknown;
+      const current = validateOrderItems(parsedItems);
+      if (!current.ok) return { ok: false, error: `${current.error} Please prepare a fresh summary.` };
+      if (current.totalMinor !== draft.total_minor || JSON.stringify(current.items) !== draft.items_json) {
+        return { ok: false, error: 'A catalog price changed. Please prepare and confirm a fresh order summary.' };
+      }
+      const stockError = checkDraftStock(current.items);
+      if (stockError) return { ok: false, error: `${stockError} Please prepare a fresh order summary.` };
+      const fulfillment: FulfillmentDetails = {
+        recipientName: draft.recipient_name,
+        contactPhone: draft.contact_phone,
+        deliveryAddress: draft.delivery_address,
+        city: draft.city,
+        postalCode: draft.postal_code,
+        deliveryInstructions: draft.delivery_instructions,
+        paymentMethod: draft.payment_method,
+        shippingMinor: 0,
+      };
+      const auditSource = ctx.idempotencyKey ? 'whatsapp_fulfillment_confirmation' : 'direct_fulfillment_confirmation';
+      const orderId = insertValidatedOrder(ctx.customerId, current.items, current.totalMinor, {
+        actorType: 'customer',
+        actorCustomerId: ctx.customerId,
+        source: auditSource,
+        sourceEventKey: ctx.idempotencyKey,
+        evidence: 'Customer explicitly confirmed the complete server-priced delivery summary.',
+      }, fulfillment);
+      const reservation = transitionOrderStatus(orderId, 'confirmed', {
+        actorType: 'customer',
+        actorCustomerId: ctx.customerId,
+        source: auditSource,
+        sourceEventKey: ctx.idempotencyKey,
+        evidence: 'Explicit final confirmation booked the order and reserved stock.',
+      });
+      if (!reservation.ok) throw new Error(reservation.error);
+      const updated = db.prepare(`
+        update order_drafts
+        set status = 'confirmed', confirmed_event_key = ?, order_id = ?,
+            confirmed_at = datetime('now'), updated_at = datetime('now')
+        where id = ? and status = 'awaiting_confirmation'
+      `).run(confirmedEventKey, orderId, draft.id);
+      if (updated.changes !== 1) throw new Error('Draft confirmation lost its atomic state check.');
+      return {
+        ok: true,
+        draft_id: draft.id,
+        order_id: orderId,
+        status: 'confirmed',
+        total: minorToRupees(current.totalMinor, 'confirmed order total'),
+        stock_reserved: true,
+      };
+    }).immediate();
+  } catch {
+    return { ok: false, error: 'Could not confirm the order safely; no partial order was created.' };
+  }
+}
+
+export const confirmOrder: ToolDef = {
+  name: 'confirm_order',
+  description:
+    'Confirm the current customer\'s existing prepared order. Call only on a later message where the customer explicitly confirms. ' +
+    'The server verifies the exact inbound text, current catalog price, and stock before creating and reserving the order.',
+  input_schema: { type: 'object', properties: {} },
+  execute: (_input, ctx) => confirmPendingOrderDraft(ctx),
 };
 
 // Wide schema for the model (status is just `string` — the JSON-schema
@@ -436,7 +819,8 @@ export const baseTools: ToolDef[] = [
   checkStock,
   getCustomerBalance,
   getCustomerNote,
-  recordOrder,
+  prepareOrder,
+  confirmOrder,
   updateOrderStatus,
   claimPayment,
   notifyOwner,

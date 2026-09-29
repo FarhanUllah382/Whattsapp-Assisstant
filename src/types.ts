@@ -40,4 +40,6 @@ export interface ToolContext {
   customerId: number;
   /** Stable provider-event key. Present for real webhook turns, absent in direct/local calls. */
   idempotencyKey?: string;
+  /** Exact inbound customer text; required for deterministic order confirmation. */
+  inboundText?: string;
 }
