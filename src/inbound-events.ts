@@ -32,9 +32,10 @@ export function parseInboundAcceptAfter(value: string | undefined): Date | null 
 }
 
 /**
- * Creates the installation watermark once. Later restarts always reuse the
- * stored value, so messages received while the app is temporarily offline are
- * still eligible; only history older than the initial rollout is quarantined.
+ * Advances the durable acceptance watermark on every application start.
+ * WAHA can replay messages accumulated while this webhook consumer was
+ * offline, so an installation-only cutoff is insufficient: only messages
+ * created in or after the current startup second may enter either agent path.
  */
 export function initializeInboundReplayGuard(
   processStartedAt: Date = new Date(),
@@ -43,21 +44,35 @@ export function initializeInboundReplayGuard(
   const existing = db.prepare('select accept_after from inbound_guard_state where id = 1').get() as
     | { accept_after: string }
     | undefined;
+  const configured = parseInboundAcceptAfter(configuredValue);
+  // WAHA may provide only whole-second precision. Round the automatic cutoff
+  // down so a message created during the same second as startup is accepted.
+  const automaticCutoff = new Date(Math.floor(processStartedAt.getTime() / 1000) * 1000);
+  let cutoff = configured && configured > automaticCutoff ? configured : automaticCutoff;
   if (existing) {
     const stored = new Date(existing.accept_after);
     if (Number.isNaN(stored.getTime())) {
       throw new Error('Stored inbound replay cutoff is invalid; refusing to start');
     }
-    return stored;
+    if (stored > cutoff) cutoff = stored;
   }
-
-  const configured = parseInboundAcceptAfter(configuredValue);
-  // WAHA may provide only whole-second precision. Round the automatic cutoff
-  // down so a message created during the same second as startup is accepted.
-  const automaticCutoff = new Date(Math.floor(processStartedAt.getTime() / 1000) * 1000);
-  const cutoff = configured ?? automaticCutoff;
   if (Number.isNaN(cutoff.getTime())) throw new Error('Inbound replay cutoff is invalid');
-  db.prepare('insert into inbound_guard_state (id, accept_after) values (1, ?)').run(cutoff.toISOString());
+  db.transaction(() => {
+    db.prepare(`
+      insert into inbound_guard_state (id, accept_after) values (1, ?)
+      on conflict(id) do update set accept_after = excluded.accept_after
+    `).run(cutoff.toISOString());
+    // A previous process may have died while handling a now-historical event.
+    // Do not let its failed/stale lease bypass the new startup watermark.
+    db.prepare(`
+      update inbound_events
+         set status = 'ignored_historical',
+             processing_started_at = null,
+             last_error = null,
+             updated_at = ?
+       where status in ('processing', 'failed') and occurred_at < ?
+    `).run(processStartedAt.toISOString(), cutoff.toISOString());
+  })();
   return cutoff;
 }
 
@@ -87,6 +102,26 @@ export function claimInboundEvent(input: {
       'select status, processing_started_at from inbound_events where event_key = ?',
     ).get(eventKey) as ExistingEvent | undefined;
 
+    if (occurredMs < input.acceptAfter.getTime()) {
+      if (existing) {
+        if (existing.status === 'completed') {
+          return { action: 'duplicate', eventKey, reason: 'completed' };
+        }
+        if (existing.status === 'ignored_historical' || existing.status === 'ignored_invalid_timestamp') {
+          return { action: 'duplicate', eventKey, reason: 'ignored' };
+        }
+        db.prepare(`
+          update inbound_events
+             set status = 'ignored_historical', processing_started_at = null,
+                 last_error = null, updated_at = ?
+           where event_key = ?
+        `).run(now.toISOString(), eventKey);
+      } else {
+        insertIgnoredEvent(eventKey, input.channel, messageId, input.occurredAt!, 'ignored_historical', now);
+      }
+      return { action: 'ignore', eventKey, reason: 'historical' };
+    }
+
     if (existing) {
       if (existing.status === 'failed') {
         resetForRetry(eventKey, now);
@@ -106,11 +141,6 @@ export function claimInboundEvent(input: {
         return { action: 'duplicate', eventKey, reason: 'completed' };
       }
       return { action: 'duplicate', eventKey, reason: 'ignored' };
-    }
-
-    if (occurredMs < input.acceptAfter.getTime()) {
-      insertIgnoredEvent(eventKey, input.channel, messageId, input.occurredAt!, 'ignored_historical', now);
-      return { action: 'ignore', eventKey, reason: 'historical' };
     }
 
     db.prepare(`

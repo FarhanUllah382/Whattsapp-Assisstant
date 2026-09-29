@@ -1343,7 +1343,8 @@ shared decision function; nothing bypasses anti-ban pacing.
   auto-fires it later on its own either; that needs genuinely new
   infrastructure, not a wiring task.
 - **WAHA retained-message replay on application restart (observed live
-  2026-09-27; prevention built and locally verified, live restart pending)** —
+  2026-09-27 and again 2026-09-29; revised prevention locally verified,
+  live restart still pending)** —
   starting the webhook consumer while the existing WAHA session was active
   replayed older personal-message events into the app. In the 92-second window
   before the app was stopped, the database gained 261 message rows (239
@@ -1358,21 +1359,33 @@ shared decision function; nothing bypasses anti-ban pacing.
   `backups/ahmed-post-replay-20260927-1837.db`; external WhatsApp sends cannot
   be undone.
 
-  Root-cause prevention now exists at the webhook entrance: WAHA's stable
-  message id is claimed in a durable `inbound_events` ledger before either the
-  owner or customer agent path runs, and the original WAHA Unix timestamp is
-  compared with a one-time `inbound_guard_state` rollout cutoff that survives
-  application restarts. Pre-cutoff history, duplicate/completing deliveries,
-  missing ids, missing timestamps, and implausibly future timestamps are
-  acknowledged without entering the AI. Genuine failed turns may retry, and a
-  five-minute processing lease recovers a claim abandoned by a process crash.
-  The configured cutoff requires `Z` or an explicit offset, avoiding another
-  UTC-vs-Karachi ambiguity. Deterministic parser, cutoff persistence,
-  historical quarantine, fail-closed, duplicate, concurrent, and failed-retry
-  tests pass. This is **locally verified, not yet live-verified**: the app stays
-  stopped until Gemini quota is usable and a controlled WAHA restart confirms
-  retained events are quarantined and one genuinely new message is handled
-  exactly once.
+  The first prevention implementation put WAHA's stable message id in a
+  durable `inbound_events` ledger before both agent paths and compared WAHA's
+  original Unix timestamp with a one-time rollout cutoff. Deterministic tests
+  passed, but the 2026-09-29 live restart disproved the assumption that a
+  one-time cutoff was sufficient: WAHA replayed messages created while the app
+  was offline *after* the 2026-09-27 cutoff. The app was stopped immediately.
+  That attempt added 22 inbound message rows, 1 outbound row, 2 customers, 3
+  send-ledger rows, and 21 inbound-event rows; orders, ledger, handoffs, and
+  owner alerts did not change. Database integrity remained `ok` with zero
+  foreign-key violations. No cleanup has been performed without owner
+  approval. A gitignored post-incident backup is at
+  `backups/ahmed-post-replay-20260929-0919.db`; any external WhatsApp send
+  cannot be undone. Gemini also returned quota-limit 429s during this attempt.
+
+  The revised guard now advances the durable cutoff to every application
+  startup second (never backward), so messages accumulated while the webhook
+  consumer was offline are quarantined even when their ids were never seen.
+  Existing failed or abandoned claims older than the new startup boundary are
+  also converted to `ignored_historical` instead of retrying. Duplicate,
+  missing-id, missing-timestamp, implausibly-future, and genuinely failed
+  same-process retry handling remains fail-closed; configured timestamps still
+  require `Z` or an explicit offset. All 49 deterministic core tests plus the
+  pacing and owner-alert suites, type-check, and build pass. This revised
+  prevention is **locally verified, not yet live-verified**. The application
+  remains stopped until the 2026-09-29 test rows are explicitly handled,
+  Gemini quota is usable, and a new controlled restart proves that backlog is
+  quarantined while one genuinely new message is handled exactly once.
 - **`notify_owner` handoff delivery is no longer log-only in the current
   build** — Version 3.3 now records a durable, retry-deduplicated owner alert
   and sends it through the configured owner-number WhatsApp path. This is

@@ -555,7 +555,7 @@ it('requires an unambiguous timezone on configured rollout cutoffs', () => {
   assert.throws(() => parseInboundAcceptAfter('not-a-date'), /explicit UTC offset/);
 });
 
-it('stores the initial cutoff once and reuses it across later restarts', () => {
+it('advances the durable cutoff on restart and never moves it backward', () => {
   db.exec('begin');
   try {
     db.prepare('delete from inbound_guard_state').run();
@@ -568,7 +568,12 @@ it('stores the initial cutoff once and reuses it across later restarts', () => {
       '2026-10-01T15:00:00+05:00',
     );
     assert.equal(first.toISOString(), '2026-09-27T14:00:00.000Z');
-    assert.equal(afterRestart.toISOString(), first.toISOString());
+    assert.equal(afterRestart.toISOString(), '2026-10-01T10:00:00.000Z');
+    const clockMovedBackward = initializeInboundReplayGuard(
+      new Date('2026-09-30T10:00:00.000Z'),
+      undefined,
+    );
+    assert.equal(clockMovedBackward.toISOString(), afterRestart.toISOString());
   } finally {
     db.exec('rollback');
   }
@@ -651,6 +656,27 @@ it('allows a failed turn to retry but blocks a concurrent in-progress duplicate'
       claimInboundEvent({ ...input, now: new Date('2026-09-27T14:00:04.000Z') }),
       { action: 'process', eventKey, reason: 'retry' },
     );
+  } finally {
+    db.prepare('delete from inbound_events where event_key = ?').run(eventKey);
+  }
+});
+
+it('does not retry a failed event that became historical across a restart', () => {
+  const messageId = `inbound-test-${Date.now()}-offline`;
+  const eventKey = `waha:${messageId}`;
+  const occurredAt = new Date('2026-09-27T14:00:01.000Z');
+  try {
+    assert.equal(claimInboundEvent({
+      channel: 'waha', messageId, occurredAt,
+      acceptAfter: new Date('2026-09-27T14:00:00.000Z'),
+      now: new Date('2026-09-27T14:00:02.000Z'),
+    }).action, 'process');
+    failInboundEvent(eventKey, new Error('process stopped'));
+    assert.deepEqual(claimInboundEvent({
+      channel: 'waha', messageId, occurredAt,
+      acceptAfter: new Date('2026-09-29T04:18:51.000Z'),
+      now: new Date('2026-09-29T04:18:52.000Z'),
+    }), { action: 'ignore', eventKey, reason: 'historical' });
   } finally {
     db.prepare('delete from inbound_events where event_key = ?').run(eventKey);
   }

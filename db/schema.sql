@@ -96,8 +96,8 @@ create table if not exists bookkeeping_receipts (
 -- Webhook entrance idempotency and retained-history quarantine. This ledger
 -- sits BEFORE both the customer and owner agent paths, so a provider retry or
 -- reconnect replay cannot create another AI turn, conversation row, reply, or
--- business side effect. The singleton cutoff is initialized once on rollout
--- and survives application restarts; it is not advanced on each restart.
+-- business side effect. The singleton cutoff advances on every application
+-- start, preventing WAHA's offline backlog from entering either agent path.
 create table if not exists inbound_guard_state (
   id integer primary key check (id = 1),
   accept_after text not null,
