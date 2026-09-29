@@ -128,7 +128,7 @@ written to any books, and Ahmed still can't ask it anything.**
     database price of Rs.800, created confirmed order `#41` with normalized
     item `{"product_id":3,"qty":1,"price":800}` and total Rs.800, wrote one
     matching Rs.800 debit, and reduced stock from 19 to 18.
-    **Exact-money correction, built and locally verified 2026-09-29:** financial
+    **Exact-money correction, built and locally verified 2026-09-29; customer-facing price read live-verified:** financial
     database truth is now integer Pakistani paisas (`price_minor`,
     `total_minor`, and `amount_minor`), while human/model-facing results remain
     rupees. A guarded atomic migration converted the existing product, three
@@ -139,9 +139,15 @@ written to any books, and Ahmed still can't ask it anything.**
     typecheck/build, pacing/alert tests, and the complete Version 2 flow.
     Fractional paisas and over-precise rupee inputs fail closed, and a catalog
     price change cannot rewrite an existing order snapshot. This correction is
-    **built and locally verified**; the earlier live order proves the normal
-    server-authoritative pricing path, but no new WhatsApp order has yet
-    live-verified the post-migration exact-money boundary.
+    **built and locally verified**. After the migration and service restart, a
+    real customer ending 2201 asked for the black medium hoodie's price and
+    stock; the assistant returned Rs.800 and 18 pieces from database truth
+    `price_minor = 80000`, `stock = 18`. The read created no business mutation:
+    orders remained 3, ledger entries 6, and payment claims 1; integrity stayed
+    `ok` with zero foreign-key violations. This live-verifies the post-migration
+    customer-facing price boundary. The post-migration order-write path remains
+    deterministically verified rather than newly live-tested because this
+    deliberate check did not create an unnecessary order.
   - Idempotent send protection: a new `send_ledger` table (`db/schema.sql`)
     keyed by a sha256 hash of (customer, inbound text that triggered the
     turn, exact outbound body). `send_message`'s `execute()` in
