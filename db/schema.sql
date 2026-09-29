@@ -6,11 +6,32 @@ create table if not exists customers (
   phone text not null unique,          -- WhatsApp number, our lookup key
   name text,                            -- filled in once the AI learns it
   disclosure_sent_at text,              -- set once the "I'm a virtual assistant" notice has gone out
+  automation_opted_out integer not null default 0 check (automation_opted_out in (0, 1)),
+  opted_out_at text,
+  opted_in_at text,
   created_at text not null default (datetime('now'))
   -- No balance_owed column (Version 2.1) — a single mutable field couldn't
   -- be reconstructed or audited. What a customer owes is now derived by
   -- summing the `ledger` table below, never trusted as a standalone number.
 );
+
+-- Deterministic customer consent history. These commands are handled before
+-- the model is called. One pending acknowledgement per real state change is
+-- retried through the guarded send path until it is recorded as sent.
+create table if not exists customer_consent_events (
+  id integer primary key autoincrement,
+  customer_id integer not null references customers(id),
+  event_key text not null unique,
+  action text not null check (action in ('opt_out', 'opt_in')),
+  normalized_command text not null check (length(normalized_command) between 1 and 100),
+  confirmation_status text not null
+    check (confirmation_status in ('pending', 'sent', 'not_required')),
+  created_at text not null default (datetime('now')),
+  confirmation_sent_at text
+);
+
+create index if not exists customer_consent_pending_idx
+  on customer_consent_events(confirmation_status, id);
 
 create table if not exists products (
   id integer primary key autoincrement,

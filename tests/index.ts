@@ -7,7 +7,14 @@ import { isOwnerPhone } from '../src/owner';
 import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog';
 import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
-import { checkOrderConfirmationReply } from '../src/agent';
+import { checkAutomatedCustomerSendAllowed, checkOrderConfirmationReply } from '../src/agent';
+import {
+  detectConsentCommand,
+  getPendingConsentConfirmations,
+  isCustomerOptedOut,
+  markConsentConfirmationSent,
+  recordConsentCommand,
+} from '../src/consent';
 import { db } from '../src/db';
 import {
   baseTools,
@@ -1507,6 +1514,102 @@ it('blocks a false confirmation reply unless this inbound event actually confirm
       evidence: 'Test customer explicitly confirmed.',
     }).ok, true);
     assert.equal(checkOrderConfirmationReply('Your order is confirmed.', { customerId, idempotencyKey: eventKey }).ok, true);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+// --- Suite 17: Deterministic STOP / START consent ---
+console.log('\n▶ Deterministic STOP / START Consent');
+it('recognizes only explicit standalone opt-out and opt-in commands', () => {
+  assert.equal(detectConsentCommand('STOP'), 'opt_out');
+  assert.equal(detectConsentCommand('Unsubscribe!'), 'opt_out');
+  assert.equal(detectConsentCommand("Don't message me"), 'opt_out');
+  assert.equal(detectConsentCommand('Messages band karo'), 'opt_out');
+  assert.equal(detectConsentCommand('Messages band karo bhai'), 'opt_out');
+  assert.equal(detectConsentCommand('Please unsubscribe'), 'opt_out');
+  assert.equal(detectConsentCommand('Mujhe messages mat bhejo'), 'opt_out');
+  assert.equal(detectConsentCommand('START'), 'opt_in');
+  assert.equal(detectConsentCommand('Messages dobara shuru karo'), 'opt_in');
+  assert.equal(detectConsentCommand('Start bhai'), 'opt_in');
+  assert.equal(detectConsentCommand('Please stop by the shop'), null);
+  assert.equal(detectConsentCommand("Don't stop messages"), null);
+  assert.equal(detectConsentCommand('I want to start an order'), null);
+});
+
+it('persists consent idempotently and blocks automated sends until START', () => {
+  db.exec('begin');
+  try {
+    const phone = `92300${String(Date.now()).slice(-7)}`;
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(phone).lastInsertRowid as number;
+    assert.deepEqual(checkAutomatedCustomerSendAllowed(customerId), { ok: true });
+
+    const stopped = recordConsentCommand({
+      phone,
+      eventKey: 'consent-stop-event',
+      text: 'Messages band karo',
+      action: 'opt_out',
+    });
+    assert.equal(stopped.confirmation_status, 'pending');
+    assert.equal(isCustomerOptedOut(customerId), true);
+    assert.equal(checkAutomatedCustomerSendAllowed(customerId).ok, false);
+    assert.equal(checkAutomatedCustomerSendAllowed(customerId, true).ok, true);
+    assert.equal(getPendingConsentConfirmations().filter((event) => event.event_key === stopped.event_key).length, 1);
+    assert.equal(markConsentConfirmationSent(stopped.event_key), true);
+
+    const duplicate = recordConsentCommand({
+      phone,
+      eventKey: 'consent-stop-event',
+      text: 'Messages band karo',
+      action: 'opt_out',
+    });
+    assert.equal(duplicate.id, stopped.id);
+    assert.equal(duplicate.confirmation_status, 'sent');
+    assert.equal((db.prepare('select count(*) n from customer_consent_events where event_key = ?').get(stopped.event_key) as { n: number }).n, 1);
+
+    const repeatedStop = recordConsentCommand({
+      phone,
+      eventKey: 'consent-stop-repeat',
+      text: 'STOP',
+      action: 'opt_out',
+    });
+    assert.equal(repeatedStop.confirmation_status, 'not_required');
+
+    const started = recordConsentCommand({
+      phone,
+      eventKey: 'consent-start-event',
+      text: 'START',
+      action: 'opt_in',
+    });
+    assert.equal(started.confirmation_status, 'pending');
+    assert.equal(isCustomerOptedOut(customerId), false);
+    assert.deepEqual(checkAutomatedCustomerSendAllowed(customerId), { ok: true });
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('supersedes an undelivered old-state acknowledgement when consent changes again', () => {
+  db.exec('begin');
+  try {
+    const phone = `92301${String(Date.now()).slice(-7)}`;
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(phone).lastInsertRowid as number;
+    const stopped = recordConsentCommand({ phone, eventKey: 'consent-race-stop-1', text: 'STOP', action: 'opt_out' });
+    const started = recordConsentCommand({ phone, eventKey: 'consent-race-start', text: 'START', action: 'opt_in' });
+    const stoppedAgain = recordConsentCommand({ phone, eventKey: 'consent-race-stop-2', text: 'STOP', action: 'opt_out' });
+    const statuses = db.prepare(
+      'select event_key, confirmation_status from customer_consent_events where customer_id = ? order by id',
+    ).all(customerId) as Array<{ event_key: string; confirmation_status: string }>;
+    assert.deepEqual(statuses, [
+      { event_key: stopped.event_key, confirmation_status: 'not_required' },
+      { event_key: started.event_key, confirmation_status: 'not_required' },
+      { event_key: stoppedAgain.event_key, confirmation_status: 'pending' },
+    ]);
+    assert.equal(isCustomerOptedOut(customerId), true);
+    assert.deepEqual(
+      getPendingConsentConfirmations().filter((event) => event.customer_id === customerId).map((event) => event.event_key),
+      [stoppedAgain.event_key],
+    );
   } finally {
     db.exec('rollback');
   }

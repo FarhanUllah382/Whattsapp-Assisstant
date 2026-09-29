@@ -23,6 +23,13 @@ function ensureColumn(table: string, column: string, columnDdl: string): void {
 }
 
 ensureColumn('customers', 'disclosure_sent_at', 'disclosure_sent_at text');
+ensureColumn(
+  'customers',
+  'automation_opted_out',
+  'automation_opted_out integer not null default 0 check (automation_opted_out in (0, 1))',
+);
+ensureColumn('customers', 'opted_out_at', 'opted_out_at text');
+ensureColumn('customers', 'opted_in_at', 'opted_in_at text');
 
 // Version 2.1: `customers.balance_owed` is replaced by the `ledger` table
 // (schema.sql). `create table if not exists` never touches an already-

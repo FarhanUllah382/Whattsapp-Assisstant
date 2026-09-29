@@ -311,12 +311,18 @@ A clean retest from customer ending 9958 then passed end to end. The assistant r
 
 ### 6.6 Opt-out and privacy controls are mandatory
 
-**Current risk:** Raw phone numbers and full conversation bodies are stored indefinitely, and STOP/opt-out handling is not built.
+**Current status (2026-09-29): deterministic STOP/START consent is built and locally verified; live WhatsApp verification is pending.** Exact standalone English and approved Roman-Urdu commands are classified before any model call. A state-changing STOP/START command updates the customer record and appends an idempotent consent event keyed to the real provider message. Ordinary opted-out messages are completed without invoking Gemini or sending a reply. The shared customer-send boundary independently blocks automated replies while opted out; owner turns and owner alerts remain unaffected.
+
+One deterministic acknowledgement is stored as pending and sent through the same aggregate pacing/send ledger as other customer messages. A narrow retry checks pending acknowledgements immediately at startup and once per minute, so a pacing or gateway failure does not undo the consent decision. Repeated commands that do not change state create audit history but no repeated acknowledgement. A newer opposite command supersedes an undelivered older acknowledgement, and consent command handling is serialized so STOP/START confirmations cannot overtake one another. START is required to re-enable customer automation. The one-off consent acknowledgement deliberately skips copy-spinning and AI disclosure but does not bypass shared-number pacing.
+
+**Verification:** before the additive schema change, `backups/ahmed-pre-optout-schema-20260929.db` was created and its SHA-256 matched the live source. The permanent suite passes 81/81, including exact-command recognition, false-positive rejection, durable state, provider-event idempotency, outbound blocking, explicit acknowledgement override, repeat-command suppression, START re-enable, and stale-acknowledgement supersession. Typecheck, build, pacing/alert suites, and the complete Version 2 regression pass. The real database retained 42 customers, 4 orders, 7 ledger entries, product stock 17, `integrity_check = ok`, and zero foreign-key violations; no test consent row remained after rollback.
+
+**Remaining privacy risk:** this completed slice controls automated consent only. Raw conversations still have no approved retention schedule; customer export/deletion procedures, comprehensive log redaction, encrypted/off-host backups, access policy, and an approved privacy notice remain unbuilt. Those items must not be relabeled complete because STOP works.
 
 **Required outcome:**
 
-- Recognize STOP, unsubscribe, and approved Roman Urdu equivalents deterministically before calling the model.
-- Store `opted_out_at` and prevent further automated sends except a legally/operationally appropriate confirmation.
+- **Completed locally:** recognize STOP, unsubscribe, START, and approved Roman Urdu equivalents deterministically before calling the model.
+- **Completed locally:** store current opt-out state plus opt-out/opt-in timestamps and append-only consent events; prevent automated sends except the one durable acknowledgement.
 - Define retention periods for raw messages, checkpoints, notes, orders, and financial records.
 - Provide documented customer-data export and deletion procedures subject to required financial-record retention.
 - Redact phone numbers, message content, addresses, tokens, and payment references from logs.
@@ -325,16 +331,19 @@ A clean retest from customer ending 9958 then passed end to end. The assistant r
 
 **Code locations:**
 
-- `src/server.ts`: deterministic inbound opt-out interception.
-- `src/agent.ts`: outbound eligibility check before every customer send.
-- `db/schema.sql`: consent/opt-out fields and retention metadata.
+- `src/server.ts`: deterministic inbound opt-out interception and pending acknowledgement retry.
+- `src/agent.ts`: outbound eligibility check before every customer send and narrow consent-acknowledgement sender.
+- `src/consent.ts`: exact command classification, idempotent state transitions, audit events, and pending acknowledgements.
+- `db/schema.sql`: consent/opt-out fields and consent-event history; general retention metadata remains future work.
 - `src/obs/logger.ts`: structured redaction.
 - Operations documentation: retention, export, deletion, and incident procedures.
 
 **Acceptance criteria:**
 
-- An opted-out customer receives no marketing/follow-up automation.
-- Opt-out remains effective after restart.
+- **Passed locally:** an opted-out customer cannot receive a normal automated customer reply; only the one consent acknowledgement is eligible.
+- **Passed locally:** opt-out is stored in SQLite and therefore remains effective after restart; pending acknowledgement state is also durable.
+- **Passed locally:** explicit START re-enables automation, repeated commands do not repeat acknowledgements, and a newer consent state supersedes an older pending acknowledgement.
+- **Pending live verification:** STOP acknowledgement arrives once, a normal follow-up receives no automated reply, restart preserves suppression, and START arrives once and restores replies.
 - Logs and backups do not expose secrets.
 - Deletion/export procedures are tested on non-production data.
 

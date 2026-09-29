@@ -2327,6 +2327,45 @@ Versions 1–3 and explicitly **not Version 4**.
   foreign-key violations. The real database now has 4 orders and 7 ledger
   rows. The application and WAHA gateway remained running afterward.
 
+## Real-business hardening — deterministic STOP/START consent (not Version 4)
+
+This is another production-hardening slice from
+`docs/REAL_BUSINESS_PRODUCTION_READINESS.md`, separate from Versions 1–3 and
+explicitly **not Version 4**.
+
+- **Built (2026-09-29):** exact standalone STOP, unsubscribe, and approved
+  Roman-Urdu commands are intercepted before Gemini. START and approved resume
+  phrases are handled by the same deterministic boundary. State-changing
+  commands update durable customer consent fields and append an idempotent
+  provider-event-keyed consent record.
+- **Outbound enforcement:** the shared customer `send_message` choke point
+  refuses every normal automated reply while opted out. Ordinary opted-out
+  inbound messages complete without a model call or customer reply. Owner
+  turns and owner alerts are unchanged. Only one deterministic consent
+  acknowledgement can pass the opt-out block; it still uses aggregate pacing
+  and the send ledger.
+- **Durable acknowledgement:** a failed/paced acknowledgement remains pending
+  and a narrow startup/minute retry attempts it again. Repeated STOP/START that
+  does not change state sends nothing again. A newer opposite command
+  supersedes an undelivered older acknowledgement, and serialized consent
+  handling prevents contradictory acknowledgements from overtaking each other.
+- **Backup/schema:** the additive customer consent fields and
+  `customer_consent_events` history were applied only after creating
+  `backups/ahmed-pre-optout-schema-20260929.db` and verifying its SHA-256
+  matched the live database.
+- **Locally verified:** 81/81 permanent checks pass, including exact-command
+  recognition, false-positive rejection, persistence, idempotency, outbound
+  blocking, the narrow acknowledgement override, repeat suppression, START
+  re-enable, and stale-acknowledgement supersession. Typecheck, build,
+  pacing/alerts, and the complete Version 2 regression pass. The real database
+  retained 42 customers, 4 orders, 7 ledger entries, and stock 17; integrity is
+  `ok` with no foreign-key violations and no test consent rows.
+- **Status:** ✅ **Built and locally verified; real WhatsApp verification is
+  pending.** General privacy/retention work remains open: data retention,
+  export/deletion procedures, comprehensive log redaction, encrypted/off-host
+  backups, access policy, and an approved privacy notice are not completed by
+  this STOP/START slice.
+
 ---
 
 ## Portfolio Demo Frontend — not part of Ahmed's four promises

@@ -14,6 +14,7 @@
 import { createHash } from 'node:crypto';
 
 import { deliverOwnerAlert, retryPendingOwnerAlerts, type OwnerAlertKind } from './alerts';
+import { isCustomerOptedOut } from './consent';
 import { db } from './db';
 import { checkDiscountRule } from './guardrails/discount-rules';
 import { detectHumanPromise } from './guardrails/human-promise';
@@ -213,6 +214,12 @@ customer you'll confirm and get back to them.`;
 function makeSendMessageTool(
   sendToCustomer: (text: string) => Promise<void>,
   turnKey: string,
+  options: {
+    allowOptedOut?: boolean;
+    skipSpinning?: boolean;
+    skipDisclosure?: boolean;
+    permanentIdempotency?: boolean;
+  } = {},
 ): ToolDef {
   return {
     name: 'send_message',
@@ -227,6 +234,9 @@ function makeSendMessageTool(
         return { ok: false, error: 'Message text must be a non-empty string.' };
       }
 
+      const consentCheck = checkAutomatedCustomerSendAllowed(ctx.customerId, options.allowOptedOut === true);
+      if (!consentCheck.ok) return consentCheck;
+
       const confirmationClaim = checkOrderConfirmationReply(body, ctx);
       if (!confirmationClaim.ok) return confirmationClaim;
 
@@ -239,7 +249,7 @@ function makeSendMessageTool(
 
         if (existing?.status === 'sent') {
           const sentAt = new Date(existing.created_at.replace(' ', 'T') + 'Z').getTime();
-          if (Date.now() - sentAt < SEND_RETRY_WINDOW_MS) {
+          if (options.permanentIdempotency || Date.now() - sentAt < SEND_RETRY_WINDOW_MS) {
             return { ok: true, status: 'already_sent' };
           }
         }
@@ -270,13 +280,15 @@ function makeSendMessageTool(
           // else? Unlike pacing, waiting doesn't fix this — the model needs to
           // vary the wording, so this is a hard refusal with a teaching-text
           // reason rather than a delay.
-          const spinningDecision = decideSpinning({
-            candidate: body,
-            window: getRecentOutboundWindow(SPINNING_DEFAULTS.windowSize),
-            knobs: SPINNING_DEFAULTS,
-          });
-          if (!spinningDecision.allow) {
-            return { ok: false, error: spinningDecision.reason };
+          if (!options.skipSpinning) {
+            const spinningDecision = decideSpinning({
+              candidate: body,
+              window: getRecentOutboundWindow(SPINNING_DEFAULTS.windowSize),
+              knobs: SPINNING_DEFAULTS,
+            });
+            if (!spinningDecision.allow) {
+              return { ok: false, error: spinningDecision.reason };
+            }
           }
 
           // Unauthorized-discount guardrail: block before it ever reaches the
@@ -306,7 +318,7 @@ function makeSendMessageTool(
           const customerRow = db
             .prepare('select disclosure_sent_at from customers where id = ?')
             .get(ctx.customerId) as { disclosure_sent_at: string | null } | undefined;
-          const needsDisclosure = !customerRow?.disclosure_sent_at;
+          const needsDisclosure = !options.skipDisclosure && !customerRow?.disclosure_sent_at;
           const outgoingBody = needsDisclosure ? `${DISCLOSURE_TEXT}\n\n${body}` : body;
 
           db.prepare(
@@ -342,6 +354,34 @@ function makeSendMessageTool(
       }
     },
   };
+}
+
+export function checkAutomatedCustomerSendAllowed(
+  customerId: number,
+  allowOptedOut = false,
+): { ok: true } | { ok: false; error: string } {
+  if (!allowOptedOut && isCustomerOptedOut(customerId)) {
+    return {
+      ok: false,
+      error: 'Customer opted out — automated WhatsApp replies are disabled until an explicit START command.',
+    };
+  }
+  return { ok: true };
+}
+
+export async function sendConsentConfirmation(
+  customerId: number,
+  eventKey: string,
+  body: string,
+  sendToCustomer: (text: string) => Promise<void>,
+): Promise<{ ok: boolean; status?: string; error?: string }> {
+  const result = await makeSendMessageTool(sendToCustomer, eventKey, {
+    allowOptedOut: true,
+    skipSpinning: true,
+    skipDisclosure: true,
+    permanentIdempotency: true,
+  }).execute({ body }, { customerId, idempotencyKey: eventKey });
+  return result as { ok: boolean; status?: string; error?: string };
 }
 
 export function checkOrderConfirmationReply(
@@ -589,6 +629,14 @@ export async function runTurn(
     // a generic, unrelated fallback body has a real chance of getting past
     // them, so it's still worth attempting.
     const isPacingVeto = lastSendMessageError?.startsWith('Not sending right now —') ?? false;
+    const isOptOutVeto = lastSendMessageError?.startsWith('Customer opted out —') ?? false;
+    if (wasCalled && isOptOutVeto) {
+      log.info('customer reply suppressed because consent is opted out', {
+        customerId: customer.id,
+        toolsCalled: [...toolsCalledThisTurn],
+      });
+      return;
+    }
     const skipFallbackSend = wasCalled && isPacingVeto;
 
     log.warn('turn ended without a successful send_message', {
