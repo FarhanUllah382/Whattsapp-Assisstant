@@ -111,6 +111,27 @@ create table if not exists bookkeeping_receipts (
   created_at text not null default (datetime('now'))
 );
 
+-- Production hardening: a customer's statement that they paid is evidence to
+-- review, never authority to change the ledger. Only the authenticated owner
+-- path may resolve a pending claim; approval and its ledger credit commit in
+-- one transaction. Order status deliberately remains unchanged on approval.
+create table if not exists payment_claims (
+  id integer primary key autoincrement,
+  customer_id integer not null references customers(id),
+  order_id integer references orders(id),
+  amount real not null check (amount > 0),
+  method text,
+  reference text,
+  status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),
+  event_key text unique,
+  resolved_by_customer_id integer references customers(id),
+  created_at text not null default (datetime('now')),
+  resolved_at text
+);
+
+create index if not exists payment_claims_pending_idx
+  on payment_claims(status, created_at);
+
 -- Webhook entrance idempotency and retained-history quarantine. This ledger
 -- sits BEFORE both the customer and owner agent paths, so a provider retry or
 -- reconnect replay cannot create another AI turn, conversation row, reply, or

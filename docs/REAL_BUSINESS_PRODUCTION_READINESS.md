@@ -192,7 +192,29 @@ to manufacture a timing race through two real WhatsApp customers.
 
 ### 6.4 Customers must not verify their own payment or fulfilment state
 
-**Current risk:** Customer-facing tools include payment recording and order-status mutation. A customer statement such as “I paid” can be interpreted as proof and change financial state, although no bank, wallet, COD, or owner verification occurred.
+**Current status (2026-09-29): built and locally verified; live WhatsApp
+verification pending.** The customer-facing tool list no longer exposes
+`record_payment`, and customer `update_order_status` is limited to confirming
+or cancelling the customer's own order. A statement such as “I paid” now
+creates a durable, idempotent `payment_claims` row with status `pending` and a
+durable owner alert; it cannot create a ledger credit or mark an order paid,
+shipped, or delivered. The turn-close safety net follows the same claim path
+instead of silently crediting the ledger.
+
+The narrowly scoped owner-only path can list pending claims and approve or
+reject a specific claim after Ahmed checks it. Approval and its ledger credit
+commit in one immediate transaction, repeated approval cannot duplicate the
+credit, rejection creates no credit, and neither decision changes order status.
+A forced ledger-write failure rolls the transaction back and leaves the claim
+pending. The older internal `recordPayment` primitive remains exported only for
+legacy deterministic regression coverage; it is not reachable from the
+customer or owner tool menus.
+
+**Still required before production:** the owner approval flow must pass a
+controlled real-WhatsApp test. Trusted shipped/delivered operations,
+actor/source/evidence transition history, external payment-provider
+verification, and exact-money migration remain proposed work; this change does
+not claim those are complete.
 
 **Required outcome:**
 
@@ -203,19 +225,32 @@ to manufacture a timing race through two real WhatsApp customers.
 - Every sensitive transition records actor, source, timestamp, and evidence/reference.
 - Owner analytics remain read-only; a separate minimal trusted operational command path may be designed only after explicit approval. It must not become a general CRM.
 
-**Code locations:**
+**Implemented code locations:**
 
-- `src/agent.ts`: remove trusted financial/fulfilment mutations from the customer tool list.
-- `src/tools.ts`: split customer claims from trusted commands.
-- `src/orders.ts`: require transition authority/source.
-- `db/schema.sql`: add payment claims, payment references, and transition audit history.
+- `src/agent.ts`: customer and safety-net payment statements create claims;
+  owner turns receive only the narrow claim-review tools.
+- `src/payments.ts`: idempotent claim creation, pending-claim query, and atomic
+  owner approve/reject resolution.
+- `src/tools.ts`: customer claim/status permissions and owner-only claim tools.
+- `db/schema.sql`: durable payment claims and payment references.
+
+**Remaining code locations:**
+
+- `src/orders.ts`: add explicit transition authority/source.
+- `db/schema.sql`: add transition audit history and complete the exact-money
+  migration.
 
 **Acceptance criteria:**
 
-- “I paid” cannot create a ledger credit or move an order to paid.
-- A verified owner/provider event can record payment exactly once.
-- A customer cannot mark an order shipped.
-- Duplicate payment notifications do not create duplicate credit.
+- ✅ Locally verified: “I paid” creates one pending claim and no credit or
+  order-status change.
+- ✅ Locally verified: owner approval creates exactly one credit; a retry does
+  not duplicate it, and a failed credit leaves the claim pending.
+- ✅ Locally verified: customers cannot mark orders paid, shipped, or
+  delivered, and claim resolution is absent from their tool menu.
+- ⏳ Live verification pending: one real customer claim must alert owner 2409,
+  then owner approval must create one credit while leaving the order status
+  unchanged.
 
 ### 6.5 Orders need complete fulfilment information
 
@@ -661,7 +696,9 @@ The first approved production-hardening package should contain only the highest-
 3. ~~Make stock confirmation atomic and impossible below zero.~~ **Completed
    and locally verified 2026-09-29; the ordinary insufficient-stock refusal is
    also live-verified, while the race/rollback invariant remains deterministic.**
-4. Separate customer payment claims from verified payments.
+4. ~~Separate customer payment claims from verified payments.~~ **Built and
+   locally verified 2026-09-29; controlled live customer-claim and owner-
+   approval verification remains pending.**
 5. Add transition actor/source and order-status audit history.
 6. Add deterministic adversarial and concurrency tests.
 7. Re-run the existing complete test suite and a controlled live order flow.

@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified; customer-facing order/payment/status/stock behavior and the owner follow-up query passed against real WhatsApp messages. The deliberately non-repeatable safety-net branches and crash-retry bookkeeping receipt were verified directly and deterministically. |
+| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified. **Current payment-security correction (built and locally verified 2026-09-29; live verification pending):** customer payment statements now create pending owner-review claims rather than verified credits, while the historical order/payment/status/stock and owner follow-up live pass remains recorded below. |
 | 3.x | Promise 4 — Ahmed can just ask it questions | ✅ **Done (2026-09-15)** — 3.1/3.2 owner Q&A and 3.3 WhatsApp-delivered alerts are built, locally verified, and live-verified. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1642,23 +1642,26 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   effects, and cancelled it before shipping with the correct stock/ledger
   effects (2026-09-14 final pass above).
 
-### 2.3 — Automatic order & payment extraction
+### 2.3 — Automatic order & payment-claim extraction
 - **Goal:** "20 shirts, medium, black, ₹5000" becomes a real order row
-  without Ahmed typing anything — including a safety net for orders/payments
-  mentioned but never explicitly logged via a tool call.
+  without Ahmed typing anything. A customer's payment statement becomes a
+  pending claim for Ahmed to verify—never proof of payment—and the turn-close
+  safety net catches either kind of missed tool call.
 - **Depends on:** 2.1, 2.2.
 - **Verified before starting, not assumed (2026-09-05):** the *primary*
-  path ("20 shirts... becomes a real order row") was already fully covered
-  by 2.1/2.2's `record_order`/`record_payment` tools, called mid-turn by
-  the model — confirmed by re-reading them before writing anything new.
-  2.3's own genuinely new work is only the *safety net* half — "mentioned
-  but never explicitly logged" — which did not exist anywhere yet.
+  path ("20 shirts... becomes a real order row") was already covered by
+  2.1/2.2's mid-turn model tools. At that time they were `record_order` and
+  `record_payment`, so 2.3's genuinely new work was the safety net for an
+  event mentioned but not explicitly logged. **Current behavior replaces the
+  customer-facing `record_payment` tool with `claim_payment`; the internal
+  legacy primitive remains only for deterministic regression tests and is not
+  model-reachable.**
 - **Done (2026-09-05) — the safety net, at turn CLOSE (the same forced
   second model call that already produces the checkpoint summary and
   notes, per this file's own established pattern):** the CLOSE prompt
   (`agent.ts`) now also asks the model to report, in the same JSON, an
   `unlogged_order`/`unlogged_payment` — but **only** if it has NOT already
-  called `record_order`/`record_payment` this same turn. Two shapes: (1)
+  called `record_order`/`claim_payment` this same turn. Two shapes: (1)
   `confident: true` with structured `items`/`amount` — used only when the
   model already knows the real `product_id` from calling `check_stock`
   earlier in this same turn; (2) `confident: false` with a plain-text
@@ -1667,23 +1670,25 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   net acts at all is decided by `toolsCalledThisTurn` — real bookkeeping
   from the turn's own tool-call loop, already tracked for the silent-no-
   reply guard (1.3) — not by trusting the model's claim that it "forgot."
-  A real `record_order`/`record_payment` call this turn always wins; the
+  A real `record_order`/`claim_payment` call this turn always wins; the
   safety net is skipped entirely regardless of what the CLOSE step says,
   so a real call can never get double-logged.
   - **"Never guess a number into the books," the explicit instruction from
     this file's own "New work" line below, actually enforced:** `confident:
-    true` items/amounts are re-validated through the exact same
-    `validateOrderItems()`/positive-number checks `record_order`/
-    `record_payment` themselves use (factored into shared, exported
-    functions in `tools.ts` — `validateOrderItems`, `insertValidatedOrder`
-    — so the safety net can never be looser than the real tool, one
-    validation source of truth, not two that could drift). Only a
-    genuinely valid, confident report gets written to `orders`/`ledger`.
+    true` items are re-validated through the exact same
+    `validateOrderItems()` checks used by `record_order` (factored into
+    shared exported functions in `tools.ts`, so the safety net cannot drift).
+    A confident payment amount must be finite and positive, then
+    `createPaymentClaim()` applies the same claim validation and idempotency as
+    `claim_payment`. Only a genuinely valid, confident order report is written
+    to `orders`/`ledger`; payment reports are written to `payment_claims` only.
     Anything else — `confident: false`, or `confident: true` but the
     validation actually fails (e.g. a nonexistent `product_id`) — becomes a
     `handoff_ledger` row instead (via a new shared `recordHandoff()`,
     factored out of `notify_owner`'s own code, same "NEEDS AHMED" log
-    marker), for Ahmed to confirm by hand. Nothing is ever silently lost,
+    marker), for Ahmed to confirm by hand. Payment statements with a valid
+    positive amount create a `payment_claims` row and durable owner alert;
+    they never write a ledger credit. Nothing is ever silently lost,
     and nothing is ever silently invented.
   - **Scope, stated plainly:** this safety net only catches a miss *within
     the same turn* — e.g. the model looked up a product via `check_stock`
@@ -1695,45 +1700,37 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
     know a specific `product_id` from an earlier one. That's a real,
     separate gap (a proper order-lookup tool would close it), not
     something this session solved.
-- **Verified locally, deterministically — 16 checks, real (unmocked)
-  `agent.ts`/`tools.ts` code, real DB, only the model call stubbed (with
-  full control over both the tool-calling loop and the CLOSE step's JSON,
-  so every shape is exercised precisely):** a real `record_order` call this
-  turn is never double-logged even when the CLOSE step also (wrongly)
-  claims an unlogged order with different numbers — the real order's
-  actual total is what's in the DB, not the decoy; a confident, valid
-  unlogged order is correctly auto-logged (order row + ledger debit both
-  correct); an unconfident report creates zero orders and a handoff
-  mentioning the description instead; a `confident: true` report with an
-  actually-invalid product is still rejected (no order created) and
-  flagged via handoff citing the real validation error — proving
-  `confident: true` alone is never enough to bypass validation; the same
-  three shapes repeated for payments (double-log prevention, confident
-  auto-credit, unconfident handoff); a turn with neither field present has
-  zero side effects (regression check) while the checkpoint/notes path
-  still saves correctly; a malformed shape (`unlogged_order` as a plain
-  string instead of an object) does not crash the turn and is correctly
-  ignored. Scratch script and its test rows/product deleted after use; the
-  live server was restarted afterward to run the new code (this session's
-  work was schema-free — no migration, so the running server wasn't
-  stopped first, unlike 2.1's).
+- **Verified locally and deterministically:** the original safety-net checks
+  proved a real `record_order` call cannot be duplicated by the CLOSE step;
+  a valid missed order creates one order and debit; uncertain or invalid
+  order reports hand off without booking; an empty/malformed CLOSE shape has
+  no financial side effect and does not crash the turn. Those checks use the
+  real `agent.ts`/`tools.ts`/database code with only the model response
+  controlled, because a live model cannot reliably be forced to omit a tool
+  call. **The 2026-09-29 security regression verifies the replacement payment
+  behavior:** the customer tool menu exposes `claim_payment`, not
+  `record_payment`; claim resolution is owner-only; customer and safety-net
+  payment statements create one idempotent pending claim with no credit;
+  customers cannot mark paid/shipped/delivered; owner approval creates one
+  credit inside the claim-resolution transaction; repeated approval does not
+  duplicate it; rejection creates none; a forced credit failure leaves the
+  claim pending; and neither claim creation nor approval changes order status.
 - **Built from DeskcommCRM:** the *pattern* of `inbound-turn.ts`'s
   checkpoint-close call (forced second model call, strict-validated JSON,
   persisted) — steered from extracting commitments/objections to extracting
   order/payment fields.
-- **Definition of done:** a normal order conversation end to end produces
-  order/line-item/payment rows matching what was actually agreed, with no
-  manual entry (✅ already true via 2.1/2.2's tools, reconfirmed above); a
-  mentioned-but-unlogged order/payment is still caught (✅ verified above,
-  both the auto-log and the flag-for-Ahmed paths, deterministically — not
-  yet exercised through an actual live conversation, a separate decision
-  same as 2.1/2.2 left it).
-- **Status:** ✅ Done — the primary order/payment extraction path is
-  live-verified through real WhatsApp messages. The safety net is verified
-  deterministically (the correct method because a live model cannot be
-  reliably forced to omit a tool call): confident missed order auto-logs,
-  uncertain order hands off without booking, and a primary tool call cannot
-  be duplicated at close. All three were re-run successfully on 2026-09-14.
+- **Definition of done:** a normal order conversation end to end produces an
+  order and debit matching what was agreed; a payment statement is preserved
+  exactly once as a pending claim, cannot alter trusted financial/fulfilment
+  state, and can be credited exactly once only after explicit owner approval;
+  the safety net catches a missed order or claim without duplicating a primary
+  tool call.
+- **Status:** Order extraction remains complete and live-verified. The payment
+  path was safely tightened on 2026-09-29: implementation and deterministic
+  verification are complete (permanent suite, alert suite, typecheck/build,
+  and Version 2 regression); **the new claim → owner alert → explicit owner
+  approval path is not yet live-verified and must not be called live-verified
+  until one real claim reaches owner 2409 and creates exactly one credit.**
 
 ### 2.4 — Live stock-aware replies
 - **Goal:** "do you have 20 in stock" gets a real, current answer, and a

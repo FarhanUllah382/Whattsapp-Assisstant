@@ -26,10 +26,10 @@ import {
 } from './guardrails/pacing/engine';
 import { SPINNING_DEFAULTS } from './guardrails/spinning/defaults';
 import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from './guardrails/spinning/engine';
-import { recordCredit } from './ledger';
 import { callModel, type ModelMessage } from './llm';
 import { createLogger } from './obs/logger';
 import { AHMED_OWNER_PHONE } from './owner';
+import { createClaimPaymentTool, createPaymentClaim } from './payments';
 import { baseTools, createNotifyOwnerTool, insertValidatedOrder, ownerTools, recordHandoff, runBookkeepingOnce, validateOrderItems } from './tools';
 import type { Customer, ToolContext, ToolDef } from './types';
 
@@ -175,10 +175,10 @@ Always use the send_message tool to actually reply — your plain text is never 
 Use check_stock before promising anything is available. Use record_order only once the customer
 has clearly confirmed product, size, color and quantity. Be concise, friendly, and never invent
 prices or stock numbers — check first.
-Use update_order_status once the conversation makes clear a real order's status actually changed
-(confirmed, paid, shipped, delivered, or cancelled before shipping) — never guess or advance it
-speculatively. Orders only move forward; an out-of-order attempt will be rejected, so ask instead
-of guessing if you're unsure what actually happened.
+Use update_order_status only when the customer confirms their placed order or asks to cancel it.
+A customer can never mark an order paid, shipped, or delivered. If a customer says they paid, use
+claim_payment: it creates a pending owner-review claim only and does not change their balance or
+order status. Never describe a claimed payment as verified or completed.
 Never offer a discount of 5% or more on your own — that needs Ahmed's confirmation first. If a
 customer asks for a bigger discount, or asks anything else you genuinely can't resolve yourself,
 call notify_owner before replying, and only then tell the customer you'll confirm with Ahmed.
@@ -421,9 +421,16 @@ export async function runTurn(
           deliverConfiguredAlert('customer_handoff', eventKey, customerId, reason)
       : undefined,
   );
+  const claimPaymentTool = createClaimPaymentTool(
+    deliverConfiguredAlert
+      ? ({ customerId, reason, eventKey }) =>
+          deliverConfiguredAlert('payment_claim', eventKey, customerId, reason)
+      : undefined,
+  );
   const tools = [
-    ...baseTools.filter((tool) => tool.name !== 'notify_owner'),
+    ...baseTools.filter((tool) => tool.name !== 'notify_owner' && tool.name !== 'claim_payment'),
     notifyOwnerTool,
+    claimPaymentTool,
     makeSendMessageTool(sendToCustomer, turnKey),
   ];
   const toolContext: ToolContext = {
@@ -569,7 +576,7 @@ export async function runTurn(
       '(e.g. "prefers black", "usually orders in bulk") — only ones not already covered by the ' +
       '"Known facts" list you were shown or by the summary you just wrote. Most turns have none.\n\n' +
       'Also: if the customer just now clearly agreed to a NEW order or made a NEW payment that ' +
-      'you have NOT already logged with record_order/record_payment THIS turn, report it as a ' +
+      'you have NOT already logged with record_order/claim_payment THIS turn, report it as a ' +
       'safety net so it is not lost — but do NOT guess exact numbers you are not sure of.\n' +
       '"unlogged_order": null, or {"confident": true/false, "items": [{"product_id":N,"qty":N}] ' +
       'or null, "description": "plain text of what you believe happened"}\n' +
@@ -639,7 +646,7 @@ export async function runTurn(
   }
 
   // Version 2.3 safety net: catches an order/payment the customer clearly
-  // agreed to but the model never called record_order/record_payment for
+  // agreed to but the model never called record_order/claim_payment for
   // this turn. toolsCalledThisTurn — real bookkeeping from the loop above,
   // not the model's own say-so — is what gates this, so a real tool call
   // this turn can never get double-logged by its own safety net. Never
@@ -676,14 +683,34 @@ export async function runTurn(
       }
     }
 
-    if (!toolsCalledThisTurn.has('record_payment') && unloggedPayment) {
+    if (!toolsCalledThisTurn.has('claim_payment') && unloggedPayment) {
       const amount = unloggedPayment.amount;
       if (unloggedPayment.confident === true && typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
-        runBookkeepingOnce(toolContext, 'record_payment', () => {
-          recordCredit(customer.id, amount);
-          return { ok: true, amount };
+        const claim = createPaymentClaim({
+          customerId: customer.id,
+          amount,
+          eventKey: inboundEventKey ? `${inboundEventKey}:payment_claim` : undefined,
         });
-        log.info('safety-net payment logged at turn close', { customerId: customer.id, amount });
+        if (deliverConfiguredAlert) {
+          const delivery = await deliverConfiguredAlert(
+            'payment_claim',
+            `payment_claim:${claim.event_key ?? `claim:${claim.id}`}`,
+            customer.id,
+            `Payment claim #${claim.id}: amount ${claim.amount}. Approval is required before any ledger credit.`,
+          );
+          if (!delivery.ok) {
+            log.error('payment-claim alert remains pending', {
+              customerId: customer.id,
+              claimId: claim.id,
+              alertId: delivery.alertId,
+            });
+          }
+        }
+        log.info('safety-net payment claim recorded at turn close', {
+          customerId: customer.id,
+          claimId: claim.id,
+          amount,
+        });
       } else if (typeof unloggedPayment.description === 'string' && unloggedPayment.description.trim() !== '') {
         await recordAndAlertHandoff(
           'unlogged_payment',
@@ -731,11 +758,13 @@ export async function runTurn(
 
 const OWNER_SYSTEM_PROMPT = `You are Ahmed's own private assistant. You are talking directly to Ahmed,
 the shop's owner — never to a customer. This conversation is completely separate from any customer
-conversation: you never send anything to a customer, never record an order or payment, and never
-change an order's status from here. Answer Ahmed's questions about his own business using the
-report tools available to you — sales_today, unpaid_customers, top_selling_product, and
-pending_followups — rather than guessing or estimating. If a question doesn't match any tool you
-have, say so plainly instead of inventing an answer.`;
+conversation: you never send anything to a customer, never record an order, and never change an
+order's status from here. Customer payment statements are pending claims, not verified money. Use
+pending_payment_claims to list them. Use resolve_payment_claim only when Ahmed explicitly approves
+or rejects a specific claim after checking it himself; approval creates one ledger credit but does
+not change order status. Answer other business questions using sales_today, unpaid_customers,
+top_selling_product, and pending_followups rather than guessing. If a question doesn't match any
+tool you have, say so plainly instead of inventing an answer.`;
 
 function makeOwnerSendTool(sendToOwner: (text: string) => Promise<void>): ToolDef {
   return {

@@ -7,7 +7,8 @@ export type OwnerAlertKind =
   | 'customer_handoff'
   | 'reply_failure'
   | 'unlogged_order'
-  | 'unlogged_payment';
+  | 'unlogged_payment'
+  | 'payment_claim';
 
 interface OwnerAlertRow {
   id: number;

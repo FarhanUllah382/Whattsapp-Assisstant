@@ -8,7 +8,8 @@ import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog
 import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
 import { db } from '../src/db';
-import { recordOrder, recordPayment } from '../src/tools';
+import { baseTools, ownerTools, recordOrder, recordPayment, updateOrderStatus } from '../src/tools';
+import { createPaymentClaim, pendingPaymentClaims, resolvePaymentClaim } from '../src/payments';
 import {
   claimInboundEvent,
   completeInboundEvent,
@@ -816,6 +817,158 @@ it('rolls back cancellation status and stock when its ledger reversal fails', ()
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
     assert.equal(
       (db.prepare("select count(*) n from ledger where order_id = ? and kind = 'credit'").get(orderId) as { n: number }).n,
+      0,
+    );
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+// --- Suite 14: Trusted payment claims ---
+console.log('\n▶ Trusted Payment Claims');
+it('exposes claims—not verified-payment mutation—to customers and keeps resolution owner-only', () => {
+  assert.equal(baseTools.some((tool) => tool.name === 'record_payment'), false);
+  assert.equal(baseTools.some((tool) => tool.name === 'claim_payment'), true);
+  assert.equal(baseTools.some((tool) => tool.name === 'resolve_payment_claim'), false);
+  assert.equal(ownerTools.some((tool) => tool.name === 'pending_payment_claims'), true);
+  assert.equal(ownerTools.some((tool) => tool.name === 'resolve_payment_claim'), true);
+});
+
+it('records a customer payment statement as one pending claim without crediting the ledger', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-claim-${Date.now()}`)
+      .lastInsertRowid as number;
+    const eventKey = `waha:payment-claim-${Date.now()}:payment_claim`;
+    const first = createPaymentClaim({ customerId, amount: 800, method: 'Easypaisa', eventKey });
+    const retry = createPaymentClaim({ customerId, amount: 800, method: 'Easypaisa', eventKey });
+    assert.equal(first.id, retry.id);
+    assert.equal(first.status, 'pending');
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as { n: number }).n,
+      0,
+    );
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('prevents the customer status tool from marking orders paid, shipped, or delivered', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-permission-${Date.now()}`)
+      .lastInsertRowid as number;
+    const orderId = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, '[]', 800, 'confirmed')",
+    ).run(customerId).lastInsertRowid as number;
+    for (const status of ['paid', 'shipped', 'delivered']) {
+      const result = updateOrderStatus.execute({ order_id: orderId, status }, { customerId }) as {
+        ok: boolean;
+        error?: string;
+      };
+      assert.equal(result.ok, false);
+      assert.match(result.error ?? '', /trusted verification/);
+    }
+    assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'confirmed');
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('owner approval creates exactly one credit and leaves order status unchanged', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-owner-customer-${Date.now()}`)
+      .lastInsertRowid as number;
+    const ownerId = db.prepare('insert into customers (phone) values (?)').run(`payment-owner-${Date.now()}`)
+      .lastInsertRowid as number;
+    const orderId = db.prepare(
+      "insert into orders (customer_id, items_json, total, status) values (?, '[]', 800, 'confirmed')",
+    ).run(customerId).lastInsertRowid as number;
+    db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', 800)")
+      .run(customerId, orderId);
+    const claim = createPaymentClaim({ customerId, orderId, amount: 800, eventKey: `approve-${Date.now()}` });
+
+    const pending = pendingPaymentClaims.execute({}, { customerId: ownerId }) as { claims: { id: number }[] };
+    assert.ok(pending.claims.some((row) => row.id === claim.id));
+    const approved = resolvePaymentClaim.execute(
+      { claim_id: claim.id, decision: 'approve' },
+      { customerId: ownerId },
+    ) as { ok: boolean; status: string; ledger_credit_created: boolean; order_status_changed: boolean };
+    const retried = resolvePaymentClaim.execute(
+      { claim_id: claim.id, decision: 'approve' },
+      { customerId: ownerId },
+    ) as { ok: boolean; already_resolved?: boolean };
+    assert.deepEqual(approved, {
+      ok: true,
+      claim_id: claim.id,
+      status: 'approved',
+      ledger_credit_created: true,
+      order_status_changed: false,
+    });
+    assert.equal(retried.ok, true);
+    assert.equal(retried.already_resolved, true);
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where order_id = ? and kind = 'credit'").get(orderId) as { n: number }).n,
+      1,
+    );
+    assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'confirmed');
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('owner rejection resolves the claim without creating a credit', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-reject-customer-${Date.now()}`)
+      .lastInsertRowid as number;
+    const ownerId = db.prepare('insert into customers (phone) values (?)').run(`payment-reject-owner-${Date.now()}`)
+      .lastInsertRowid as number;
+    const claim = createPaymentClaim({ customerId, amount: 500, eventKey: `reject-${Date.now()}` });
+    const rejected = resolvePaymentClaim.execute(
+      { claim_id: claim.id, decision: 'reject' },
+      { customerId: ownerId },
+    ) as { ok: boolean; status: string; ledger_credit_created: boolean };
+    assert.equal(rejected.ok, true);
+    assert.equal(rejected.status, 'rejected');
+    assert.equal(rejected.ledger_credit_created, false);
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as { n: number }).n,
+      0,
+    );
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('keeps a claim pending when owner approval cannot write its ledger credit', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-fail-customer-${Date.now()}`)
+      .lastInsertRowid as number;
+    const ownerId = db.prepare('insert into customers (phone) values (?)').run(`payment-fail-owner-${Date.now()}`)
+      .lastInsertRowid as number;
+    const claim = createPaymentClaim({ customerId, amount: 600, eventKey: `approval-fail-${Date.now()}` });
+    db.exec(`
+      create trigger test_reject_payment_claim_credit
+      before insert on ledger
+      when new.kind = 'credit' and new.customer_id = ${customerId}
+      begin
+        select raise(abort, 'simulated payment credit failure');
+      end;
+    `);
+    const result = resolvePaymentClaim.execute(
+      { claim_id: claim.id, decision: 'approve' },
+      { customerId: ownerId },
+    ) as { ok: boolean };
+    assert.equal(result.ok, false);
+    assert.equal(
+      (db.prepare('select status from payment_claims where id = ?').get(claim.id) as { status: string }).status,
+      'pending',
+    );
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as { n: number }).n,
       0,
     );
   } finally {

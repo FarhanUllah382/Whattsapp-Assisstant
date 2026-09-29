@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 import { deliverOwnerAlert, retryPendingOwnerAlerts } from '../src/alerts';
 import { db } from '../src/db';
+import { createClaimPaymentTool } from '../src/payments';
 
 async function run(): Promise<void> {
   db.exec('begin');
@@ -108,7 +109,42 @@ async function run(): Promise<void> {
       2,
     );
 
-    process.stdout.write('  ✔ V3.3 owner alerts deliver once, recover, and group pending duplicates\n');
+    const paymentAlertBodies: string[] = [];
+    const claimTool = createClaimPaymentTool(({ customerId, reason, eventKey }) =>
+      deliverOwnerAlert({
+        kind: 'payment_claim',
+        customerId,
+        reason,
+        eventKey,
+        send: async (body) => {
+          paymentAlertBodies.push(body);
+        },
+      }),
+    );
+    const claimContext = { customerId, idempotencyKey: 'v33:payment-claim:one' };
+    const claimFirst = await claimTool.execute(
+      { amount: 750, method: 'Easypaisa', reference: 'TX-TEST' },
+      claimContext,
+    ) as { ok: boolean; claim_id: number; alert_status: string };
+    const claimRetry = await claimTool.execute(
+      { amount: 750, method: 'Easypaisa', reference: 'TX-TEST' },
+      claimContext,
+    ) as { ok: boolean; claim_id: number; alert_status: string };
+    assert.equal(claimFirst.ok, true);
+    assert.equal(claimRetry.ok, true);
+    assert.equal(claimRetry.claim_id, claimFirst.claim_id);
+    assert.equal(paymentAlertBodies.length, 1);
+    assert.match(paymentAlertBodies[0], /payment claim/i);
+    assert.equal(
+      (db.prepare('select count(*) n from payment_claims where customer_id = ?').get(customerId) as { n: number }).n,
+      1,
+    );
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as { n: number }).n,
+      0,
+    );
+
+    process.stdout.write('  ✔ V3.3 owner alerts and payment claims deliver once, recover, and group safely\n');
   } finally {
     db.exec('rollback');
   }

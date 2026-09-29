@@ -14,7 +14,8 @@ import { db } from './db';
 import { getPendingFollowups } from './followups';
 import { getBalance, recordCredit, recordDebit } from './ledger';
 import { createLogger } from './obs/logger';
-import { ORDER_STATUSES, transitionOrderStatus, type OrderStatus } from './orders';
+import { transitionOrderStatus, type OrderStatus } from './orders';
+import { claimPayment, pendingPaymentClaims, resolvePaymentClaim } from './payments';
 import type { ToolContext, ToolDef } from './types';
 
 const log = createLogger();
@@ -227,17 +228,15 @@ export const recordOrder: ToolDef = {
 export const updateOrderStatus: ToolDef = {
   name: 'update_order_status',
   description:
-    "Move a real order forward through its lifecycle (confirmed -> paid -> shipped -> delivered), " +
-    'or cancel it (only before it has shipped). Orders only move forward — you cannot skip a step ' +
-    'or go backward. Call this once the conversation makes clear a status actually changed (e.g. ' +
-    "the customer confirms the order, says they've paid, or asks to cancel) — never guess.",
+    'Allow a customer to confirm their own placed order or cancel it before shipping. ' +
+    'Customers cannot mark an order paid, shipped, or delivered.',
   input_schema: {
     type: 'object',
     properties: {
       order_id: { type: 'number', description: 'the order id' },
       status: {
         type: 'string',
-        enum: ['confirmed', 'paid', 'shipped', 'delivered', 'cancelled'],
+        enum: ['confirmed', 'cancelled'],
         description: 'the new status',
       },
     },
@@ -247,10 +246,10 @@ export const updateOrderStatus: ToolDef = {
     if (!Number.isInteger(order_id) || order_id <= 0) {
       return { ok: false, error: 'order_id must be a positive whole number.' };
     }
-    if (typeof status !== 'string' || !ORDER_STATUSES.includes(status as OrderStatus)) {
+    if (status !== 'confirmed' && status !== 'cancelled') {
       return {
         ok: false,
-        error: `"${status}" isn't a real order status. Use one of: confirmed, paid, shipped, delivered, cancelled.`,
+        error: 'Customers may only confirm or cancel their own order. Paid, shipped, and delivered require trusted verification.',
       };
     }
 
@@ -402,7 +401,7 @@ export const baseTools: ToolDef[] = [
   getCustomerNote,
   recordOrder,
   updateOrderStatus,
-  recordPayment,
+  claimPayment,
   notifyOwner,
   searchCatalog,
 ];
@@ -459,4 +458,11 @@ export const pendingFollowupsTool: ToolDef = {
   }),
 };
 
-export const ownerTools: ToolDef[] = [salesToday, unpaidCustomersTool, topSellingProductTool, pendingFollowupsTool];
+export const ownerTools: ToolDef[] = [
+  salesToday,
+  unpaidCustomersTool,
+  topSellingProductTool,
+  pendingFollowupsTool,
+  pendingPaymentClaims,
+  resolvePaymentClaim,
+];
