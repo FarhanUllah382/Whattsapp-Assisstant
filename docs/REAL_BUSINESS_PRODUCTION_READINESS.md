@@ -107,9 +107,9 @@ The following are release blockers for a real paying client. A pilot must not be
 
 ### 6.2 Price must be authoritative on the server
 
-**Current status (2026-09-27): base product-price authority is fixed and locally verified.** `record_order` now accepts only product ID and quantity in its model-facing schema. The shared server validator loads `products.price`, creates normalized price-snapshot items, and computes the order total for both the normal tool path and the turn-close safety net. A direct adversarial test supplied `price: 1` for a database product priced at Rs.3,200; quantity two returned and stored Rs.6,400, stored Rs.3,200 on each item snapshot, and wrote a Rs.6,400 debit. Typecheck, build, 41/41 permanent tests, pacing/alert tests, and the complete Version 2 flow passed. This is **locally verified**, not yet a new live WhatsApp verification.
+**Current status (2026-09-29): base product-price authority and exact monetary storage are fixed and locally verified.** `record_order` accepts only product ID and quantity in its model-facing schema. The shared server validator loads `products.price_minor`, creates integer-paisa price snapshots, and computes the order total for both the normal tool path and the turn-close safety net. Human/model-facing APIs still use rupees at explicit boundaries. A guarded, atomic migration converted `products.price`, `orders.total`, `ledger.amount`, `payment_claims.amount`, and every order-item price snapshot from rupees to integer Pakistani paisas. Before migration, a byte-identical database backup was verified. After migration, the real database retained 1 product, 3 orders, 6 ledger entries, and the approved payment claim; all converted values reconciled, `integrity_check` returned `ok`, and `foreign_key_check` returned no violations. Integer-type database constraints reject fractional paisas. The permanent suite passed 68/68, focused order tests 8/8, focused ledger tests 5/5, typecheck/build, pacing/alerts, and the complete Version 2 flow passed. The existing real WhatsApp order previously verified normal server-authoritative pricing; the exact-money migration itself is **locally verified**, not yet re-verified through a new live WhatsApp message.
 
-**Remaining risk:** the current schema still stores money as `REAL` and order items as JSON. Shipping, explicit approved discounts, tax, quote expiry/price locking, and relational `order_items` are not part of this completed slice and remain proposed below.
+**Remaining risk:** order item snapshots remain JSON rather than relational rows. Shipping, explicit approved discounts, tax, quote expiry/price locking, and relational `order_items` are not part of this completed slice and remain proposed below.
 
 **Required outcome:**
 
@@ -117,22 +117,22 @@ The following are release blockers for a real paying client. A pilot must not be
 - **Completed locally:** the server reads the current product price and calculates the current item subtotal/total.
 - **Still proposed:** the server computes shipping, approved discounts, tax if applicable, and final quote total.
 - Any discount is represented explicitly and validated against the business rule.
-- Store money using integer minor units, such as paisas, or another decimal-safe representation; do not rely on binary floating-point `REAL` for financial truth.
-- Preserve a price snapshot on each order item so historical orders do not change when the catalog price changes.
+- **Completed locally:** store money as integer Pakistani paisas; binary floating-point `REAL` is no longer financial truth.
+- **Completed locally:** preserve an integer-paisa price snapshot on each order item so historical orders do not change when the catalog price changes.
 
 **Code locations:**
 
 - `src/tools.ts`: server-authoritative base product pricing completed; extend it later for the approved quote components above.
-- `db/schema.sql`: introduce relational `order_items` and integer monetary fields through a reviewed migration.
-- `src/ledger.ts`: use the same monetary representation.
-- `src/analytics.ts` and `src/followups.ts`: read the migrated representation without changing business meaning accidentally.
+- `db/schema.sql`: integer monetary fields are complete; relational `order_items` remains proposed.
+- `src/ledger.ts`: exact integer-paisa storage is complete, with rupee conversion only at its public boundary.
+- `src/analytics.ts` and `src/followups.ts`: read integer-paisa storage and preserve their existing rupee-facing business meaning.
 
 **Acceptance criteria:**
 
 - **Passed locally:** a forged tool call with a lower price is ignored in favor of the database price.
-- Totals are deterministic and exact for multi-item orders.
-- Historical order prices remain unchanged after product price updates.
-- All order, ledger, analytics, and cancellation tests pass after migration.
+- **Passed locally:** totals are deterministic and exact, including decimal-rupee multiplication without floating-point drift.
+- **Passed locally:** historical order prices remain unchanged after product price updates.
+- **Passed locally:** all order, ledger, analytics, follow-up, payment-claim, and cancellation regressions pass after migration.
 
 ### 6.3 Stock reservation must be atomic and cannot become negative
 
@@ -697,7 +697,7 @@ Triggers for immediate pause include incorrect prices, duplicate charges/orders,
 | Business identity | `.env.example`, `src/agent.ts`, `src/tools.ts`, `src/alerts.ts`, `src/owner.ts` | Replace functional Ahmed-specific hardcoding with validated single-business configuration. |
 | Catalog | `catalog.md`, `src/catalog.ts` | Install owner-approved policies; improve aliases/search only where evidence requires it. |
 | Inventory import | `scripts/seed-catalog.ts`, new importer | Replace sample seeding with validated, repeatable real inventory onboarding. |
-| Product/order schema | `db/schema.sql`, numbered migrations | Add SKU, active variants, exact money, order items, fulfilment, audit history, claims/jobs. |
+| Product/order schema | `db/schema.sql`, reviewed migrations | Exact money, order-status audit history, and payment claims are complete; add SKU, active variants, relational order items, fulfilment, and any later approved jobs. |
 | Price/order validation | `src/tools.ts` | Derive price and totals from the database and validate required fulfilment data. |
 | Atomic state changes | `src/orders.ts`, `src/ledger.ts` | Transactional stock, status, payment, cancellation, and history. |
 | Customer/owner authority | `src/agent.ts`, `src/tools.ts`, `src/owner.ts` | Keep customer claims separate from trusted owner/provider actions. |
@@ -714,7 +714,7 @@ Triggers for immediate pause include incorrect prices, duplicate charges/orders,
 
 The first approved production-hardening package should contain only the highest-risk correctness work:
 
-1. Define exact monetary representation and migration strategy.
+1. ~~Define exact monetary representation and migration strategy.~~ **Completed and locally verified 2026-09-29: integer Pakistani paisas are now database truth; the guarded migration preserved and reconciled all existing financial rows, with a verified pre-migration backup.**
 2. ~~Make base product price authoritative in server code.~~ **Completed and locally verified 2026-09-27; live WhatsApp verification remains separate.**
 3. ~~Make stock confirmation atomic and impossible below zero.~~ **Completed
    and locally verified 2026-09-29; the ordinary insufficient-stock refusal is
@@ -725,7 +725,7 @@ The first approved production-hardening package should contain only the highest-
 5. ~~Add transition actor/source and order-status audit history.~~ **Built and
    locally verified 2026-09-29; no historical rows were fabricated and no new
    trusted mutation channel was exposed.**
-6. Add deterministic adversarial and concurrency tests.
+6. ~~Add deterministic adversarial and concurrency tests.~~ **Completed locally across authoritative pricing, exact-money boundaries/database constraints, stock races and rollback, payment-claim authority, order-transition authority, and idempotency.**
 7. Re-run the existing complete test suite and a controlled live order flow.
 
 Do not combine this package with provider migration, UI work, unrelated architecture edits, or inventory cleanup. Small, auditable commits make rollback and verification safer.

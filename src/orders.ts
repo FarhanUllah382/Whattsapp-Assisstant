@@ -127,7 +127,7 @@ export type TransitionResult =
 interface OrderItem {
   product_id: number;
   qty: number;
-  price: number;
+  price_minor: number;
 }
 
 class TransitionRejected extends Error {}
@@ -286,11 +286,11 @@ export function transitionOrderStatus(
   const auditError = validateAuditContext(audit);
   if (auditError) return { ok: false, error: auditError };
   const { db } = require('./db') as typeof import('./db');
-  const { recordCredit } = require('./ledger') as typeof import('./ledger');
+  const { recordCreditMinor } = require('./ledger') as typeof import('./ledger');
 
   const transition = db.transaction((): TransitionResult => {
-    const row = db.prepare('select status, items_json, customer_id, total from orders where id = ?').get(orderId) as
-      | { status: OrderStatus; items_json: string; customer_id: number; total: number }
+    const row = db.prepare('select status, items_json, customer_id, total_minor from orders where id = ?').get(orderId) as
+      | { status: OrderStatus; items_json: string; customer_id: number; total_minor: number }
       | undefined;
     if (!row) {
       throw new TransitionRejected(`Order ${orderId} does not exist.`);
@@ -343,7 +343,7 @@ export function transitionOrderStatus(
       // the instant this order was placed, so it needs reversing no matter
       // which status it's cancelled from. This insert is in the same
       // transaction as status and stock, so all three commit or all roll back.
-      recordCredit(row.customer_id, row.total, orderId);
+      recordCreditMinor(row.customer_id, row.total_minor, orderId);
     }
 
     db.prepare('update orders set status = ? where id = ?').run(next, orderId);

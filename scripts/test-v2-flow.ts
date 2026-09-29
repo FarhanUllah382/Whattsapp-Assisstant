@@ -3,6 +3,7 @@ import { checkStock, recordOrder, updateOrderStatus, recordPayment } from '../sr
 import { getBalance } from '../src/ledger';
 import { getPendingFollowups } from '../src/followups';
 import { insertValidatedOrder, validateOrderItems } from '../src/tools';
+import { rupeesToMinor } from '../src/money';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -22,8 +23,8 @@ async function runV2Verification(): Promise<void> {
   const customerId = customerResult.lastInsertRowid as number;
 
   const productResult = db.prepare(
-    'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)'
-  ).run(testProductName, 'medium', 'black', 2500, 10);
+    'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)'
+  ).run(testProductName, 'medium', 'black', rupeesToMinor(2500), 10);
   const productId = productResult.lastInsertRowid as number;
 
   const ctx = { customerId };
@@ -46,7 +47,7 @@ async function runV2Verification(): Promise<void> {
 
     const orderRow: any = db.prepare('select * from orders where id = ?').get(orderId);
     assert(orderRow.status === 'placed', 'Initial status is "placed"');
-    assert(orderRow.total === 5000, 'Order total is 5000');
+    assert(orderRow.total_minor === rupeesToMinor(5000), 'Order total is exactly 500000 paisas (Rs 5000)');
     const placedAudit: any = db.prepare(
       'select from_status, to_status, actor_type, source, evidence from order_status_events where order_id = ? order by id limit 1',
     ).get(orderId);
@@ -91,7 +92,7 @@ async function runV2Verification(): Promise<void> {
     console.log('\nTest 6: Safety net validation logic');
     const validCheck = validateOrderItems([{ product_id: productId, qty: 1, price: 1 }]);
     assert(validCheck.ok === true && validCheck.total === 2500, 'Server uses catalog price, not a supplied price');
-    assert(validCheck.ok === true && validCheck.items[0].price === 2500, 'Normalized item stores catalog price');
+    assert(validCheck.ok === true && validCheck.items[0].price_minor === rupeesToMinor(2500), 'Normalized item stores exact catalog price');
 
     const invalidCheck = validateOrderItems([{ product_id: 999999, qty: 1 }]);
     assert(invalidCheck.ok === false, 'Invalid product_id rejected by safety net');
@@ -111,8 +112,8 @@ async function runV2Verification(): Promise<void> {
     console.log('\nTest 8: Follow-up tracking for unpaid orders');
     // Create an unpaid order backdated 3 days
     const oldOrderResult = db.prepare(
-      "insert into orders (customer_id, items_json, total, status, created_at) values (?, ?, ?, 'placed', datetime('now', '-3 days'))"
-    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price: 2500 }]), 2500);
+      "insert into orders (customer_id, items_json, total_minor, status, created_at) values (?, ?, ?, 'placed', datetime('now', '-3 days'))"
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price_minor: rupeesToMinor(2500) }]), rupeesToMinor(2500));
     const oldOrderId = oldOrderResult.lastInsertRowid as number;
 
     const followups = getPendingFollowups(new Date());

@@ -661,7 +661,7 @@ export async function runTurn(
         const check = validateOrderItems(unloggedOrder.items);
         if (check.ok) {
           const result = runBookkeepingOnce(toolContext, 'record_order', () => {
-            const orderId = insertValidatedOrder(customer.id, check.items, check.total, {
+            const orderId = insertValidatedOrder(customer.id, check.items, check.totalMinor, {
               actorType: 'customer',
               actorCustomerId: customer.id,
               source: 'whatsapp_turn_close_safety_net',

@@ -1,5 +1,6 @@
 import { db } from './db';
-import { recordCredit } from './ledger';
+import { recordCreditMinor } from './ledger';
+import { minorToRupees, positiveRupeesToMinor } from './money';
 import type { ToolContext, ToolDef } from './types';
 
 export interface PaymentClaimRow {
@@ -16,6 +17,15 @@ export interface PaymentClaimRow {
   resolved_at: string | null;
 }
 
+interface StoredPaymentClaimRow extends Omit<PaymentClaimRow, 'amount'> {
+  amount_minor: number;
+}
+
+function toPaymentClaimRow(row: StoredPaymentClaimRow): PaymentClaimRow {
+  const { amount_minor, ...rest } = row;
+  return { ...rest, amount: minorToRupees(amount_minor, 'payment claim amount') };
+}
+
 export function createPaymentClaim(input: {
   customerId: number;
   amount: number;
@@ -27,14 +37,12 @@ export function createPaymentClaim(input: {
   return db.transaction(() => {
     if (input.eventKey) {
       const existing = db.prepare('select * from payment_claims where event_key = ?').get(input.eventKey) as
-        | PaymentClaimRow
+        | StoredPaymentClaimRow
         | undefined;
-      if (existing) return existing;
+      if (existing) return toPaymentClaimRow(existing);
     }
 
-    if (!Number.isFinite(input.amount) || input.amount <= 0) {
-      throw new Error('Payment amount must be greater than 0.');
-    }
+    const amountMinor = positiveRupeesToMinor(input.amount, 'Payment amount');
     if (input.orderId !== undefined) {
       if (!Number.isInteger(input.orderId) || input.orderId <= 0) {
         throw new Error('order_id must be a positive whole number.');
@@ -52,17 +60,19 @@ export function createPaymentClaim(input: {
     const reference = input.reference?.trim().slice(0, 160) || null;
     const result = db.prepare(`
       insert into payment_claims
-        (customer_id, order_id, amount, method, reference, event_key)
+        (customer_id, order_id, amount_minor, method, reference, event_key)
       values (?, ?, ?, ?, ?, ?)
     `).run(
       input.customerId,
       input.orderId ?? null,
-      input.amount,
+      amountMinor,
       method,
       reference,
       input.eventKey ?? null,
     );
-    return db.prepare('select * from payment_claims where id = ?').get(result.lastInsertRowid) as PaymentClaimRow;
+    return toPaymentClaimRow(
+      db.prepare('select * from payment_claims where id = ?').get(result.lastInsertRowid) as StoredPaymentClaimRow,
+    );
   })();
 }
 
@@ -143,14 +153,17 @@ export const pendingPaymentClaims: ToolDef = {
   description: 'List customer payment claims that still require Ahmed to approve or reject them.',
   input_schema: { type: 'object', properties: {} },
   execute: () => ({
-    claims: db.prepare(`
-      select pc.id, pc.order_id, pc.amount, pc.method, pc.reference, pc.created_at,
+    claims: (db.prepare(`
+      select pc.id, pc.order_id, pc.amount_minor, pc.method, pc.reference, pc.created_at,
              c.name as customer_name, c.phone as customer_phone
       from payment_claims pc
       join customers c on c.id = pc.customer_id
       where pc.status = 'pending'
       order by pc.created_at, pc.id
-    `).all(),
+    `).all() as Array<Record<string, unknown> & { amount_minor: number }>).map(({ amount_minor, ...claim }) => ({
+      ...claim,
+      amount: minorToRupees(amount_minor, 'pending payment claim amount'),
+    })),
   }),
 };
 
@@ -178,7 +191,7 @@ export const resolvePaymentClaim: ToolDef = {
     try {
       return db.transaction(() => {
         const claim = db.prepare('select * from payment_claims where id = ?').get(claim_id) as
-          | PaymentClaimRow
+          | StoredPaymentClaimRow
           | undefined;
         if (!claim) return { ok: false, error: `Payment claim ${claim_id} does not exist.` };
         if (claim.status !== 'pending') {
@@ -193,7 +206,7 @@ export const resolvePaymentClaim: ToolDef = {
 
         const nextStatus = decision === 'approve' ? 'approved' : 'rejected';
         if (nextStatus === 'approved') {
-          recordCredit(claim.customer_id, claim.amount, claim.order_id);
+          recordCreditMinor(claim.customer_id, claim.amount_minor, claim.order_id);
         }
         db.prepare(`
           update payment_claims

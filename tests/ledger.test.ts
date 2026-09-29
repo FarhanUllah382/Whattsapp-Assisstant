@@ -2,6 +2,7 @@ import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { db } from '../src/db';
 import { getBalance, recordCredit, recordDebit } from '../src/ledger';
+import { rupeesToMinor } from '../src/money';
 
 describe('Double-Entry Ledger Accounting', () => {
   let customerA: number;
@@ -13,13 +14,13 @@ describe('Double-Entry Ledger Accounting', () => {
     const custA = db.prepare('insert into customers (phone, name) values (?, ?)').run(`test-ledger-a-${Date.now()}`, 'Alice');
     customerA = custA.lastInsertRowid as number;
 
-    const ordA = db.prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)').run(customerA, '[]', 5000, 'placed');
+    const ordA = db.prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)').run(customerA, '[]', rupeesToMinor(5000), 'placed');
     orderA = ordA.lastInsertRowid as number;
 
     const custB = db.prepare('insert into customers (phone, name) values (?, ?)').run(`test-ledger-b-${Date.now()}`, 'Bob');
     customerB = custB.lastInsertRowid as number;
 
-    const ordB = db.prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)').run(customerB, '[]', 10000, 'placed');
+    const ordB = db.prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)').run(customerB, '[]', rupeesToMinor(10000), 'placed');
     orderB = ordB.lastInsertRowid as number;
   });
 

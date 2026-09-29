@@ -19,6 +19,7 @@
 
 import { db } from './db';
 import { getBalance } from './ledger';
+import { minorToRupees } from './money';
 import type { OrderStatus } from './orders';
 
 // How long an order can sit short of 'paid' before it's worth a nudge —
@@ -49,7 +50,7 @@ interface UnpaidOrderRow {
   phone: string;
   name: string | null;
   status: OrderStatus;
-  total: number;
+  total_minor: number;
   created_at: string;
 }
 
@@ -66,7 +67,7 @@ function parseSqlDatetime(value: string): number {
 export function getPendingFollowups(now: Date = new Date()): PendingFollowup[] {
   const rows = db
     .prepare(
-      `select o.id as order_id, o.customer_id, c.phone, c.name, o.status, o.total, o.created_at
+      `select o.id as order_id, o.customer_id, c.phone, c.name, o.status, o.total_minor, o.created_at
        from orders o
        join customers c on c.id = o.customer_id
        where o.status in ('placed', 'confirmed')
@@ -86,7 +87,7 @@ export function getPendingFollowups(now: Date = new Date()): PendingFollowup[] {
         phone: row.phone,
         name: row.name,
         status: row.status,
-        total: row.total,
+        total: minorToRupees(row.total_minor, 'follow-up order total'),
         balance_owed: getBalance(row.customer_id),
         placed_at: row.created_at,
         days_since_placed: daysSincePlaced,

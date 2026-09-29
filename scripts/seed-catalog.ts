@@ -1,4 +1,5 @@
 import { db } from '../src/db';
+import { rupeesToMinor } from '../src/money';
 
 interface InitialProduct {
   name: string;
@@ -28,7 +29,7 @@ const INITIAL_PRODUCTS: InitialProduct[] = [
 
 export function seedProducts(): void {
   const insert = db.prepare(
-    'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
   );
 
   const existingCount = (
@@ -42,7 +43,7 @@ export function seedProducts(): void {
 
   const insertMany = db.transaction((products: InitialProduct[]) => {
     for (const p of products) {
-      insert.run(p.name, p.size, p.color, p.price, p.stock);
+      insert.run(p.name, p.size, p.color, rupeesToMinor(p.price, 'catalog price'), p.stock);
     }
   });
 

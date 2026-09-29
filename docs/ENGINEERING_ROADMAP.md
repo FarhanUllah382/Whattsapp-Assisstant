@@ -111,8 +111,8 @@ written to any books, and Ahmed still can't ask it anything.**
     `product_id` must reference a real product) are checked before anything
     touches the database. **Current correction, 2026-09-27:** order price is
     no longer a model input at all. `record_order`'s schema accepts only
-    `product_id` + `qty`; the shared server validator loads `products.price`,
-    returns normalized price-snapshot items, and computes the total used by
+    `product_id` + `qty`; the shared server validator loads `products.price_minor`,
+    returns normalized integer-paisa price-snapshot items, and computes the total used by
     both the normal tool path and the turn-close safety net. Even a direct
     adversarial call that bypasses the schema and supplies `price: 1` for a
     Rs.3,200 product is ignored: quantity 2 stored Rs.3,200 per item, returned
@@ -128,6 +128,20 @@ written to any books, and Ahmed still can't ask it anything.**
     database price of Rs.800, created confirmed order `#41` with normalized
     item `{"product_id":3,"qty":1,"price":800}` and total Rs.800, wrote one
     matching Rs.800 debit, and reduced stock from 19 to 18.
+    **Exact-money correction, built and locally verified 2026-09-29:** financial
+    database truth is now integer Pakistani paisas (`price_minor`,
+    `total_minor`, and `amount_minor`), while human/model-facing results remain
+    rupees. A guarded atomic migration converted the existing product, three
+    orders, six ledger entries, approved payment claim, and all item snapshots;
+    the verified pre-migration backup remains recoverable. Post-migration
+    integrity and foreign-key checks passed with every value reconciled, as did
+    68/68 permanent checks, 8/8 focused order tests, 5/5 focused ledger tests,
+    typecheck/build, pacing/alert tests, and the complete Version 2 flow.
+    Fractional paisas and over-precise rupee inputs fail closed, and a catalog
+    price change cannot rewrite an existing order snapshot. This correction is
+    **built and locally verified**; the earlier live order proves the normal
+    server-authoritative pricing path, but no new WhatsApp order has yet
+    live-verified the post-migration exact-money boundary.
   - Idempotent send protection: a new `send_ledger` table (`db/schema.sql`)
     keyed by a sha256 hash of (customer, inbound text that triggered the
     turn, exact outbound body). `send_message`'s `execute()` in

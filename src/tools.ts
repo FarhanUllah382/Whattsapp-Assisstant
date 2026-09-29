@@ -12,7 +12,8 @@ import { getSalesToday, getTopSellingProduct, getUnpaidCustomers } from './analy
 import { findBestMatch, loadCatalogSections } from './catalog';
 import { db } from './db';
 import { getPendingFollowups } from './followups';
-import { getBalance, recordCredit, recordDebit } from './ledger';
+import { getBalance, recordCredit, recordDebitMinor } from './ledger';
+import { minorToRupees, multiplyMinor } from './money';
 import { createLogger } from './obs/logger';
 import { recordInitialOrderStatus, transitionOrderStatus, type OrderStatus, type OrderStatusAuditContext } from './orders';
 import { claimPayment, pendingPaymentClaims, resolvePaymentClaim } from './payments';
@@ -53,8 +54,10 @@ export const checkStock: ToolDef = {
       sql += ' and color = ?';
       params.push(color);
     }
-    const rows = db.prepare(sql).all(...params);
-    return rows.length > 0 ? rows : { found: false, message: 'no matching product' };
+    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown> & { price_minor: number }>;
+    return rows.length > 0
+      ? rows.map(({ price_minor, ...row }) => ({ ...row, price: minorToRupees(price_minor, 'product price') }))
+      : { found: false, message: 'no matching product' };
   },
 };
 
@@ -96,12 +99,12 @@ export const getCustomerNote: ToolDef = {
 export interface ServerPricedOrderItem {
   product_id: number;
   qty: number;
-  /** Price snapshot loaded from products.price by the server, never trusted from model input. */
-  price: number;
+  /** Exact price snapshot in Pakistani paisas, loaded by the server. */
+  price_minor: number;
 }
 
 export type ValidateOrderItemsResult =
-  | { ok: true; items: ServerPricedOrderItem[]; total: number }
+  | { ok: true; items: ServerPricedOrderItem[]; totalMinor: number; total: number }
   | { ok: false; error: string };
 
 // Shared between record_order's own execute() and the Version 2.3 safety
@@ -124,36 +127,39 @@ export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
       return { ok: false, error: 'Quantity must be a whole number greater than 0.' };
     }
     const product = db
-      .prepare('select id, price from products where id = ?')
-      .get(it.product_id) as { id: number; price: number } | undefined;
+      .prepare('select id, price_minor from products where id = ?')
+      .get(it.product_id) as { id: number; price_minor: number } | undefined;
     if (!product) {
       return { ok: false, error: `Product ${it.product_id} does not exist — check the product first.` };
     }
-    if (typeof product.price !== 'number' || !Number.isFinite(product.price) || product.price < 0) {
+    if (!Number.isSafeInteger(product.price_minor) || product.price_minor < 0) {
       return { ok: false, error: `Product ${it.product_id} has an invalid catalog price — ask the owner to correct it.` };
     }
-    serverPricedItems.push({ product_id: product.id, qty: it.qty, price: product.price });
+    serverPricedItems.push({ product_id: product.id, qty: it.qty, price_minor: product.price_minor });
   }
-  const total = serverPricedItems.reduce((sum, it) => sum + it.qty * it.price, 0);
-  if (!Number.isFinite(total)) {
+  let totalMinor: number;
+  try {
+    totalMinor = serverPricedItems.reduce((sum, it) => sum + multiplyMinor(it.price_minor, it.qty), 0);
+  } catch {
     return { ok: false, error: 'The server could not calculate a valid order total.' };
   }
-  return { ok: true, items: serverPricedItems, total };
+  if (!Number.isSafeInteger(totalMinor)) return { ok: false, error: 'The server could not calculate a valid order total.' };
+  return { ok: true, items: serverPricedItems, totalMinor, total: minorToRupees(totalMinor, 'order total') };
 }
 
 /** Assumes `items`/`total` already passed validateOrderItems — no re-validation here. */
 export function insertValidatedOrder(
   customerId: number,
   items: unknown[],
-  total: number,
+  totalMinor: number,
   audit: OrderStatusAuditContext,
 ): number {
   return db.transaction(() => {
     const result = db
-      .prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)')
-      .run(customerId, JSON.stringify(items), total, 'placed');
+      .prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)')
+      .run(customerId, JSON.stringify(items), totalMinor, 'placed');
     const orderId = result.lastInsertRowid as number;
-    recordDebit(customerId, orderId, total);
+    recordDebitMinor(customerId, orderId, totalMinor);
     recordInitialOrderStatus(orderId, customerId, audit);
     return orderId;
   })();
@@ -217,7 +223,7 @@ export const recordOrder: ToolDef = {
         return { ok: false, error: check.error };
       }
       return runBookkeepingOnce(ctx, 'record_order', () => {
-        const orderId = insertValidatedOrder(ctx.customerId, check.items, check.total, {
+        const orderId = insertValidatedOrder(ctx.customerId, check.items, check.totalMinor, {
           actorType: 'customer',
           actorCustomerId: ctx.customerId,
           source: ctx.idempotencyKey ? 'whatsapp_customer_tool' : 'direct_customer_tool',

@@ -4,6 +4,8 @@
 // customer owes less) event. Balance is always this table's running sum,
 // never trusted as a standalone number.
 
+import { minorToRupees, positiveRupeesToMinor } from './money';
+
 export interface LedgerEntry {
   readonly kind: 'debit' | 'credit';
   readonly amount: number;
@@ -78,9 +80,14 @@ function getDb() {
 }
 
 export function recordDebit(customerId: number, orderId: number, amount: number): void {
+  recordDebitMinor(customerId, orderId, positiveRupeesToMinor(amount, 'Debit amount'));
+}
+
+export function recordDebitMinor(customerId: number, orderId: number, amountMinor: number): void {
+  if (!Number.isSafeInteger(amountMinor) || amountMinor < 0) throw new Error('Debit paisas must be a non-negative safe integer.');
   getDb().prepare(
-    "insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)",
-  ).run(customerId, orderId, amount);
+    "insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'debit', ?)",
+  ).run(customerId, orderId, amountMinor);
 }
 
 // orderId is optional — a genuine payment usually isn't tied to one specific
@@ -89,18 +96,28 @@ export function recordDebit(customerId: number, orderId: number, amount: number)
 // recording that link keeps the ledger's audit trail honest instead of
 // flattening every credit down to "a payment, from somewhere."
 export function recordCredit(customerId: number, amount: number, orderId: number | null = null): void {
+  recordCreditMinor(customerId, positiveRupeesToMinor(amount, 'Credit amount'), orderId);
+}
+
+export function recordCreditMinor(customerId: number, amountMinor: number, orderId: number | null = null): void {
+  if (!Number.isSafeInteger(amountMinor) || amountMinor < 0) throw new Error('Credit paisas must be a non-negative safe integer.');
   getDb().prepare(
-    "insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'credit', ?)",
-  ).run(customerId, orderId, amount);
+    "insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'credit', ?)",
+  ).run(customerId, orderId, amountMinor);
 }
 
 /** What this customer currently owes: sum of debits minus sum of credits, reconstructed from history every time. */
-export function getBalance(customerId: number): number {
+export function getBalanceMinor(customerId: number): number {
   const row = getDb()
     .prepare(
-      `select coalesce(sum(case when kind = 'debit' then amount else -amount end), 0) as balance
+      `select coalesce(sum(case when kind = 'debit' then amount_minor else -amount_minor end), 0) as balance
        from ledger where customer_id = ?`,
     )
     .get(customerId) as { balance: number };
+  if (!Number.isSafeInteger(row.balance)) throw new Error('Ledger balance exceeds the safe integer range.');
   return row.balance;
+}
+
+export function getBalance(customerId: number): number {
+  return minorToRupees(getBalanceMinor(customerId), 'ledger balance');
 }

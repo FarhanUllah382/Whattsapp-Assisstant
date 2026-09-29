@@ -10,6 +10,7 @@ import { normalizeGeminiFunctionResponse } from '../src/llm';
 import { db } from '../src/db';
 import { baseTools, ownerTools, recordOrder, recordPayment, updateOrderStatus } from '../src/tools';
 import { createPaymentClaim, pendingPaymentClaims, resolvePaymentClaim } from '../src/payments';
+import { minorToRupees, multiplyMinor, positiveRupeesToMinor, rupeesToMinor } from '../src/money';
 import {
   claimInboundEvent,
   completeInboundEvent,
@@ -38,6 +39,57 @@ function it(name: string, fn: () => void): void {
 console.log('\n============================================================');
 console.log("       Ahmed's Assistant — Comprehensive Test Suite         ");
 console.log('============================================================\n');
+
+// --- Suite 0: Exact Money Boundaries ---
+console.log('▶ Exact Money Boundaries');
+it('converts rupees to exact integer paisas and back', () => {
+  assert.equal(rupeesToMinor(0), 0);
+  assert.equal(rupeesToMinor(10.29), 1029);
+  assert.equal(rupeesToMinor(800), 80000);
+  assert.equal(minorToRupees(1029), 10.29);
+  assert.equal(positiveRupeesToMinor(0.01), 1);
+});
+
+it('rejects invalid, negative, over-precise, zero-positive, and unsafe money values', () => {
+  assert.throws(() => rupeesToMinor(Number.NaN), /finite non-negative/);
+  assert.throws(() => rupeesToMinor(Number.POSITIVE_INFINITY), /finite non-negative/);
+  assert.throws(() => rupeesToMinor(-1), /finite non-negative/);
+  assert.throws(() => rupeesToMinor(10.001), /at most two decimal places/);
+  assert.throws(() => positiveRupeesToMinor(0), /greater than 0/);
+  assert.throws(() => minorToRupees(1.5), /safe integer/);
+  assert.throws(() => rupeesToMinor(Number.MAX_SAFE_INTEGER), /at most two decimal places/);
+});
+
+it('multiplies prices in minor units without floating-point drift', () => {
+  const totalMinor = multiplyMinor(rupeesToMinor(10.29), 3);
+  assert.equal(totalMinor, 3087);
+  assert.equal(minorToRupees(totalMinor), 30.87);
+});
+
+it('database constraints reject fractional paisas in every financial table', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`minor-check-${Date.now()}`).lastInsertRowid;
+    assert.throws(
+      () => db.prepare('insert into products (name, price_minor, stock) values (?, ?, ?)').run('fractional product', 10.5, 1),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () => db.prepare("insert into orders (customer_id, items_json, total_minor, status) values (?, '[]', ?, 'placed')").run(customerId, 10.5),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () => db.prepare("insert into ledger (customer_id, kind, amount_minor) values (?, 'debit', ?)").run(customerId, 10.5),
+      /CHECK constraint failed/,
+    );
+    assert.throws(
+      () => db.prepare('insert into payment_claims (customer_id, amount_minor) values (?, ?)').run(customerId, 10.5),
+      /CHECK constraint failed/,
+    );
+  } finally {
+    db.exec('rollback');
+  }
+});
 
 // --- Suite 1: Order State Machine (Forward-Only Retail FSM) ---
 console.log('▶ Order State Machine (Forward-Only Retail FSM)');
@@ -452,8 +504,8 @@ it('ignores a model-supplied price and records the product database price', () =
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`price-test-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db
-      .prepare('insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)')
-      .run(`server-priced-kurta-${Date.now()}`, 'medium', 'black', 3200, 5).lastInsertRowid as number;
+      .prepare('insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)')
+      .run(`server-priced-kurta-${Date.now()}`, 'medium', 'black', rupeesToMinor(3200), 5).lastInsertRowid as number;
 
     // `price` is deliberately malicious extra input. The tool schema no longer
     // advertises it, and server validation must ignore it even if a caller
@@ -465,16 +517,24 @@ it('ignores a model-supplied price and records the product database price', () =
 
     assert.equal(result.ok, true);
     assert.equal(result.total, 6400);
-    const order = db.prepare('select items_json, total from orders where id = ?').get(result.order_id) as {
+    const order = db.prepare('select items_json, total_minor from orders where id = ?').get(result.order_id) as {
       items_json: string;
-      total: number;
+      total_minor: number;
     };
-    assert.equal(order.total, 6400);
-    assert.deepEqual(JSON.parse(order.items_json), [{ product_id: productId, qty: 2, price: 3200 }]);
+    assert.equal(order.total_minor, rupeesToMinor(6400));
+    assert.deepEqual(JSON.parse(order.items_json), [{ product_id: productId, qty: 2, price_minor: rupeesToMinor(3200) }]);
     const debit = db
-      .prepare("select amount from ledger where order_id = ? and kind = 'debit'")
-      .get(result.order_id) as { amount: number };
-    assert.equal(debit.amount, 6400);
+      .prepare("select amount_minor from ledger where order_id = ? and kind = 'debit'")
+      .get(result.order_id) as { amount_minor: number };
+    assert.equal(debit.amount_minor, rupeesToMinor(6400));
+
+    db.prepare('update products set price_minor = ? where id = ?').run(rupeesToMinor(4100), productId);
+    const preserved = db.prepare('select items_json, total_minor from orders where id = ?').get(result.order_id) as {
+      items_json: string;
+      total_minor: number;
+    };
+    assert.equal(preserved.total_minor, rupeesToMinor(6400));
+    assert.deepEqual(JSON.parse(preserved.items_json), [{ product_id: productId, qty: 2, price_minor: rupeesToMinor(3200) }]);
   } finally {
     db.exec('rollback');
   }
@@ -486,8 +546,8 @@ it('records an order when the model supplies only product_id and quantity', () =
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`price-shape-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db
-      .prepare('insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)')
-      .run(`server-priced-shirt-${Date.now()}`, 'large', 'navy', 2750, 3).lastInsertRowid as number;
+      .prepare('insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)')
+      .run(`server-priced-shirt-${Date.now()}`, 'large', 'navy', rupeesToMinor(2750), 3).lastInsertRowid as number;
     const result = recordOrder.execute(
       { items: [{ product_id: productId, qty: 1 }] },
       { customerId },
@@ -505,8 +565,8 @@ console.log('\n▶ Bookkeeping Crash-Retry Idempotency');
 it('deduplicates order/payment effects for one provider event but permits a new event', () => {
   db.exec('begin');
   try {
-    const product = db.prepare('select id, price from products order by id limit 1').get() as
-      | { id: number; price: number }
+    const product = db.prepare('select id, price_minor from products order by id limit 1').get() as
+      | { id: number; price_minor: number }
       | undefined;
     assert.ok(product, 'At least one seeded product is required');
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`retry-test-${Date.now()}`)
@@ -529,8 +589,9 @@ it('deduplicates order/payment effects for one provider event but permits a new 
     );
 
     const paymentKey = `waha:test-payment-${Date.now()}`;
-    const firstPayment = recordPayment.execute({ amount: product.price }, { customerId, idempotencyKey: paymentKey });
-    const retriedPayment = recordPayment.execute({ amount: product.price }, { customerId, idempotencyKey: paymentKey });
+    const paymentRupees = minorToRupees(product.price_minor);
+    const firstPayment = recordPayment.execute({ amount: paymentRupees }, { customerId, idempotencyKey: paymentKey });
+    const retriedPayment = recordPayment.execute({ amount: paymentRupees }, { customerId, idempotencyKey: paymentKey });
     assert.deepEqual(retriedPayment, firstPayment);
     assert.equal(
       (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as {
@@ -698,14 +759,14 @@ it('rejects an over-stock confirmation without changing status, stock, or ledger
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`stock-limit-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('atomic-kurta', 'medium', 'black', 3200, 1).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('atomic-kurta', 'medium', 'black', rupeesToMinor(3200), 1).lastInsertRowid as number;
     const orderId = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
-    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 2, price: 3200 }]), 6400)
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 2, price_minor: rupeesToMinor(3200) }]), rupeesToMinor(6400))
       .lastInsertRowid as number;
-    db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)")
-      .run(customerId, orderId, 6400);
+    db.prepare("insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'debit', ?)")
+      .run(customerId, orderId, rupeesToMinor(6400));
 
     const beforeLedger = (db.prepare('select count(*) n from ledger where order_id = ?').get(orderId) as { n: number }).n;
     const result = transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId));
@@ -728,14 +789,14 @@ it('allows exactly one of two competing orders to reserve the final unit', () =>
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`stock-race-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('last-unit-shirt', 'large', 'navy', 2500, 1).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('last-unit-shirt', 'large', 'navy', rupeesToMinor(2500), 1).lastInsertRowid as number;
     const insertOrder = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, 'placed')",
     );
-    const items = JSON.stringify([{ product_id: productId, qty: 1, price: 2500 }]);
-    const firstId = insertOrder.run(customerId, items, 2500).lastInsertRowid as number;
-    const secondId = insertOrder.run(customerId, items, 2500).lastInsertRowid as number;
+    const items = JSON.stringify([{ product_id: productId, qty: 1, price_minor: rupeesToMinor(2500) }]);
+    const firstId = insertOrder.run(customerId, items, rupeesToMinor(2500)).lastInsertRowid as number;
+    const secondId = insertOrder.run(customerId, items, rupeesToMinor(2500)).lastInsertRowid as number;
 
     assert.equal(transitionOrderStatus(firstId, 'confirmed', customerAudit(customerId)).ok, true);
     assert.equal(transitionOrderStatus(secondId, 'confirmed', customerAudit(customerId)).ok, false);
@@ -756,17 +817,17 @@ it('rolls back earlier item reservations when a later item is unavailable', () =
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`stock-rollback-${Date.now()}`)
       .lastInsertRowid as number;
     const availableId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('available-item', 'medium', 'black', 1000, 2).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('available-item', 'medium', 'black', rupeesToMinor(1000), 2).lastInsertRowid as number;
     const unavailableId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('unavailable-item', 'medium', 'white', 1000, 0).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('unavailable-item', 'medium', 'white', rupeesToMinor(1000), 0).lastInsertRowid as number;
     const orderId = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, 'placed')",
     ).run(customerId, JSON.stringify([
-      { product_id: availableId, qty: 1, price: 1000 },
-      { product_id: unavailableId, qty: 1, price: 1000 },
-    ]), 2000).lastInsertRowid as number;
+      { product_id: availableId, qty: 1, price_minor: rupeesToMinor(1000) },
+      { product_id: unavailableId, qty: 1, price_minor: rupeesToMinor(1000) },
+    ]), rupeesToMinor(2000)).lastInsertRowid as number;
 
     assert.equal(transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId)).ok, false);
     assert.equal((db.prepare('select stock from products where id = ?').get(availableId) as { stock: number }).stock, 2);
@@ -781,8 +842,8 @@ it('database backstop rejects a direct negative-stock write', () => {
   db.exec('begin');
   try {
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('stock-trigger-item', 'small', 'grey', 500, 0).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('stock-trigger-item', 'small', 'grey', rupeesToMinor(500), 0).lastInsertRowid as number;
     assert.throws(
       () => db.prepare('update products set stock = -1 where id = ?').run(productId),
       /product stock cannot be negative/,
@@ -799,14 +860,14 @@ it('rolls back cancellation status and stock when its ledger reversal fails', ()
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`cancel-rollback-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('cancel-rollback-item', 'medium', 'black', 1200, 3).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('cancel-rollback-item', 'medium', 'black', rupeesToMinor(1200), 3).lastInsertRowid as number;
     const orderId = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
-    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price: 1200 }]), 1200)
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price_minor: rupeesToMinor(1200) }]), rupeesToMinor(1200))
       .lastInsertRowid as number;
-    db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)")
-      .run(customerId, orderId, 1200);
+    db.prepare("insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'debit', ?)")
+      .run(customerId, orderId, rupeesToMinor(1200));
     assert.equal(transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId)).ok, true);
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
 
@@ -841,8 +902,8 @@ it('fails closed without audit context and enforces actor-specific transition au
     const otherCustomerId = db.prepare('insert into customers (phone) values (?)').run(`audit-other-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('audit-shirt', 'medium', 'navy', 1000, 5).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-shirt', 'medium', 'navy', rupeesToMinor(1000), 5).lastInsertRowid as number;
     const order = recordOrder.execute(
       { items: [{ product_id: productId, qty: 1 }] },
       { customerId, idempotencyKey: `waha:audit-create-${Date.now()}` },
@@ -896,8 +957,8 @@ it('records every permitted actor transition with source and evidence', () => {
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-chain-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('audit-kurta', 'large', 'black', 2000, 2).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-kurta', 'large', 'black', rupeesToMinor(2000), 2).lastInsertRowid as number;
     const order = recordOrder.execute(
       { items: [{ product_id: productId, qty: 1 }] },
       { customerId, idempotencyKey: `waha:audit-chain-${Date.now()}` },
@@ -947,11 +1008,11 @@ it('rolls back status and stock when the audit event cannot be written', () => {
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-rollback-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('audit-rollback-shirt', 'small', 'white', 900, 1).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-rollback-shirt', 'small', 'white', rupeesToMinor(900), 1).lastInsertRowid as number;
     const orderId = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, ?, ?, 'placed')",
-    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price: 900 }]), 900).lastInsertRowid as number;
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, 'placed')",
+    ).run(customerId, JSON.stringify([{ product_id: productId, qty: 1, price_minor: rupeesToMinor(900) }]), rupeesToMinor(900)).lastInsertRowid as number;
     db.exec(`
       create trigger test_reject_order_status_audit
       before insert on order_status_events
@@ -977,8 +1038,8 @@ it('rolls back order and debit when the initial audit event cannot be written', 
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`audit-create-rollback-${Date.now()}`)
       .lastInsertRowid as number;
     const productId = db.prepare(
-      'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
-    ).run('audit-create-rollback', 'medium', 'grey', 1100, 2).lastInsertRowid as number;
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('audit-create-rollback', 'medium', 'grey', rupeesToMinor(1100), 2).lastInsertRowid as number;
     db.exec(`
       create trigger test_reject_initial_order_audit
       before insert on order_status_events
@@ -1032,8 +1093,8 @@ it('prevents the customer status tool from marking orders paid, shipped, or deli
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-permission-${Date.now()}`)
       .lastInsertRowid as number;
     const orderId = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, '[]', 800, 'confirmed')",
-    ).run(customerId).lastInsertRowid as number;
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, '[]', ?, 'confirmed')",
+    ).run(customerId, rupeesToMinor(800)).lastInsertRowid as number;
     for (const status of ['paid', 'shipped', 'delivered']) {
       const result = updateOrderStatus.execute({ order_id: orderId, status }, { customerId }) as {
         ok: boolean;
@@ -1056,10 +1117,10 @@ it('owner approval creates exactly one credit and leaves order status unchanged'
     const ownerId = db.prepare('insert into customers (phone) values (?)').run(`payment-owner-${Date.now()}`)
       .lastInsertRowid as number;
     const orderId = db.prepare(
-      "insert into orders (customer_id, items_json, total, status) values (?, '[]', 800, 'confirmed')",
-    ).run(customerId).lastInsertRowid as number;
-    db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', 800)")
-      .run(customerId, orderId);
+      "insert into orders (customer_id, items_json, total_minor, status) values (?, '[]', ?, 'confirmed')",
+    ).run(customerId, rupeesToMinor(800)).lastInsertRowid as number;
+    db.prepare("insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'debit', ?)")
+      .run(customerId, orderId, rupeesToMinor(800));
     const claim = createPaymentClaim({ customerId, orderId, amount: 800, eventKey: `approve-${Date.now()}` });
 
     const pending = pendingPaymentClaims.execute({}, { customerId: ownerId }) as { claims: { id: number }[] };

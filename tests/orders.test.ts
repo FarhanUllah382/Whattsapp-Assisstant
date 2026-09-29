@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { db } from '../src/db';
 import { checkOrderStatusTransition, transitionOrderStatus } from '../src/orders';
 import { getBalance } from '../src/ledger';
+import { rupeesToMinor } from '../src/money';
 
 const customerAudit = (customerId: number, evidence = 'Deterministic customer transition test.') => ({
   actorType: 'customer' as const,
@@ -61,11 +62,11 @@ describe('Order State Machine (FSM)', () => {
       const cust = db.prepare('insert into customers (phone, name) values (?, ?)').run(`test-fsm-${Date.now()}`, 'FSM Test');
       customerId = cust.lastInsertRowid as number;
 
-      const prod = db.prepare('insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)').run(
+      const prod = db.prepare('insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)').run(
         'fsm-shirt',
         'medium',
         'black',
-        2000,
+        rupeesToMinor(2000),
         20,
       );
       productId = prod.lastInsertRowid as number;
@@ -81,10 +82,10 @@ describe('Order State Machine (FSM)', () => {
 
     it('decrements stock when moving from placed to confirmed', () => {
       // Create order with 3 items
-      const items = [{ product_id: productId, qty: 3, price: 2000 }];
+      const items = [{ product_id: productId, qty: 3, price_minor: rupeesToMinor(2000) }];
       const orderRes = db
-        .prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)')
-        .run(customerId, JSON.stringify(items), 6000, 'placed');
+        .prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)')
+        .run(customerId, JSON.stringify(items), rupeesToMinor(6000), 'placed');
       const orderId = orderRes.lastInsertRowid as number;
 
       // Verify initial stock
@@ -101,17 +102,17 @@ describe('Order State Machine (FSM)', () => {
     });
 
     it('restores stock and reverses ledger debit when cancelling a confirmed order', () => {
-      const items = [{ product_id: productId, qty: 2, price: 2000 }];
+      const items = [{ product_id: productId, qty: 2, price_minor: rupeesToMinor(2000) }];
       const orderRes = db
-        .prepare('insert into orders (customer_id, items_json, total, status) values (?, ?, ?, ?)')
-        .run(customerId, JSON.stringify(items), 4000, 'placed');
+        .prepare('insert into orders (customer_id, items_json, total_minor, status) values (?, ?, ?, ?)')
+        .run(customerId, JSON.stringify(items), rupeesToMinor(4000), 'placed');
       const orderId = orderRes.lastInsertRowid as number;
 
       // Record initial debit as recordOrder would
-      db.prepare("insert into ledger (customer_id, order_id, kind, amount) values (?, ?, 'debit', ?)").run(
+      db.prepare("insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'debit', ?)").run(
         customerId,
         orderId,
-        4000,
+        rupeesToMinor(4000),
       );
 
       // Confirm (stock 17 -> 15)

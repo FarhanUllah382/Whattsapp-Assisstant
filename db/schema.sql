@@ -17,7 +17,8 @@ create table if not exists products (
   name text not null,        -- e.g. "shirt"
   size text,                 -- e.g. "medium"
   color text,                -- e.g. "black"
-  price real not null,
+  price_minor integer not null
+    check (typeof(price_minor) = 'integer' and price_minor >= 0), -- Pakistani paisas
   stock integer not null default 0
 );
 
@@ -49,8 +50,9 @@ end;
 create table if not exists orders (
   id integer primary key autoincrement,
   customer_id integer not null references customers(id),
-  items_json text not null,   -- [{product_id, qty, price}], simple and flexible
-  total real not null,
+  items_json text not null,   -- [{product_id, qty, price_minor}], price snapshot
+  total_minor integer not null
+    check (typeof(total_minor) = 'integer' and total_minor >= 0), -- Pakistani paisas
   status text not null default 'placed'
     check (status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
   created_at text not null default (datetime('now'))
@@ -90,7 +92,8 @@ create table if not exists ledger (
   customer_id integer not null references customers(id),
   order_id integer references orders(id), -- null for a payment not tied to one specific order
   kind text not null check (kind in ('debit', 'credit')),
-  amount real not null check (amount >= 0), -- direction comes from `kind`; a free (0-total) order is a valid debit
+  amount_minor integer not null
+    check (typeof(amount_minor) = 'integer' and amount_minor >= 0), -- Pakistani paisas; direction comes from `kind`
   created_at text not null default (datetime('now'))
 );
 
@@ -143,7 +146,8 @@ create table if not exists payment_claims (
   id integer primary key autoincrement,
   customer_id integer not null references customers(id),
   order_id integer references orders(id),
-  amount real not null check (amount > 0),
+  amount_minor integer not null
+    check (typeof(amount_minor) = 'integer' and amount_minor > 0), -- Pakistani paisas
   method text,
   reference text,
   status text not null default 'pending' check (status in ('pending', 'approved', 'rejected')),

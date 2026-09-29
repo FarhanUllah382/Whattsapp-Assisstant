@@ -11,6 +11,7 @@ import { db } from './db';
 import { dayStartInTz } from './guardrails/pacing/engine';
 import { PACING_DEFAULTS } from './guardrails/pacing/defaults';
 import { getBalance } from './ledger';
+import { minorToRupees, multiplyMinor } from './money';
 
 /**
  * Total value of orders placed today (Ahmed's shop timezone), excluding
@@ -22,9 +23,9 @@ export function getSalesToday(now: Date = new Date()): number {
   const todayStart = dayStartInTz(now, PACING_DEFAULTS.timezone);
   const todayStartSql = todayStart.toISOString().slice(0, 19).replace('T', ' ');
   const row = db
-    .prepare(`select coalesce(sum(total), 0) as total from orders where status != 'cancelled' and created_at >= ?`)
-    .get(todayStartSql) as { total: number };
-  return row.total;
+    .prepare(`select coalesce(sum(total_minor), 0) as total_minor from orders where status != 'cancelled' and created_at >= ?`)
+    .get(todayStartSql) as { total_minor: number };
+  return minorToRupees(row.total_minor, 'sales today');
 }
 
 export interface UnpaidCustomer {
@@ -65,7 +66,7 @@ export interface TopSellingProduct {
 interface OrderItem {
   product_id: number;
   qty: number;
-  price: number;
+  price_minor: number;
 }
 
 /**
@@ -83,7 +84,7 @@ export function getTopSellingProduct(): TopSellingProduct | null {
     for (const item of items) {
       const entry = tally.get(item.product_id) ?? { qty: 0, revenue: 0 };
       entry.qty += item.qty;
-      entry.revenue += item.qty * item.price;
+      entry.revenue += multiplyMinor(item.price_minor, item.qty);
       tally.set(item.product_id, entry);
     }
   }
@@ -103,6 +104,6 @@ export function getTopSellingProduct(): TopSellingProduct | null {
     product_id: bestId,
     name: product?.name ?? `Product ${bestId}`, // the product itself may since have been deleted
     total_qty_sold: best.qty,
-    total_revenue: best.revenue,
+    total_revenue: minorToRupees(best.revenue, 'top-product revenue'),
   };
 }
