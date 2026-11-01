@@ -11,6 +11,7 @@
     "backup": "tsx scripts/backup-database.ts",
     "backup:verify": "tsx scripts/verify-database-backup.ts",
     "catalog:verify-media": "tsx scripts/verify-product-media.ts",
+    "live:verify": "tsx scripts/live-verify.ts",
     "dev": "node --env-file-if-exists=.env --import tsx src/server.ts",
     "test": "tsx scripts/run-isolated-tests.ts",
     "test:security": "tsx scripts/run-isolated-tests.ts --security",

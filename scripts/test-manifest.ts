@@ -154,6 +154,11 @@ export const allTestTargets: readonly TestTarget[] = [
     securityAreas: ['health monitoring and verified recovery backups'],
     includeInSecurityRegression: true,
   },
+  {
+    file: 'tests/live-verify.test.ts',
+    securityAreas: ['read-only live acceptance verification and evidence redaction'],
+    includeInSecurityRegression: true,
+  },
 ];
 
 export const securityTestTargets = allTestTargets.filter(
