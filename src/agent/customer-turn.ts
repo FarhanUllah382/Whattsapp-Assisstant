@@ -10,7 +10,12 @@ import { createClaimPaymentTool } from '../payments';
 import { createSendPaymentInstructionsTool } from '../payment-instructions';
 import { maskPhoneForDisplay, sanitizeMemoryText } from '../privacy';
 import { createRequestRefundTool } from '../refunds';
-import { captureSensitiveActionFacts, type SensitiveActionFacts } from '../sensitive-action-wording';
+import {
+  captureSensitiveActionFacts,
+  PAYMENT_CLAIM_PENDING_MESSAGE,
+  refundCustomerStatusMessage,
+  type SensitiveActionFacts,
+} from '../sensitive-action-wording';
 import { serializeUntrustedData, wrapToolResult } from '../untrusted-data';
 import { baseTools, createNotifyOwnerTool, getPendingOrderDraft, recordHandoff } from '../tools';
 import { db } from '../db';
@@ -33,8 +38,23 @@ const log = createLogger();
 // Guaranteed last-resort reply — see the "silent no-reply" note on the LOOP
 // below. Deliberately generic and short enough that it can't itself trip the
 // discount or human-promise guardrails.
+// Bilingual because most customers write Roman Urdu. Contains no promise about
+// a person (human-promise / handoff-claim guards) and no number.
 const FALLBACK_REPLY_TEXT =
-  "Sorry, I'm having trouble answering that right now — let me get back to you.";
+  "Sorry, I couldn't answer that properly just now. Please send your question again in a slightly different way.\n\n" +
+  'Maazrat, abhi is ka sahi jawab nahi de saka. Meherbani karke apna sawal thore mukhtalif alfaaz mein dobara bhej dein.';
+
+/**
+ * Picks the last-resort reply. When this turn already recorded a payment claim
+ * or a refund action, the wording backstop accepts only the exact server
+ * status text, so the fallback must be that text — otherwise the customer gets
+ * nothing at all (live test 2026-11-01, payment claim #7).
+ */
+export function chooseFallbackReply(facts: Readonly<SensitiveActionFacts>): string {
+  if (facts.paymentClaimPending) return PAYMENT_CLAIM_PENDING_MESSAGE;
+  if (facts.refundStatus) return refundCustomerStatusMessage(facts.refundStatus);
+  return FALLBACK_REPLY_TEXT;
+}
 
 /**
  * The public entry point — this is what server.ts calls when a WhatsApp
@@ -384,9 +404,16 @@ export async function runTurn(
     });
 
     if (!skipFallbackSend) {
-      const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
-      const fallbackResult = await sendMessageTool.execute(
-        { body: FALLBACK_REPLY_TEXT },
+      // Its own send tool with skipSpinning: the fallback is fixed text, so the
+      // near-duplicate check would otherwise block it from the third use on and
+      // the customer would hear nothing. Every other check still applies.
+      const fallbackSendTool = makeSendMessageTool(sendToCustomer, `${turnKey}:fallback`, {
+        sensitiveActionFacts,
+        permanentIdempotency: Boolean(inboundEventKey),
+        skipSpinning: true,
+      });
+      const fallbackResult = await fallbackSendTool.execute(
+        { body: chooseFallbackReply(sensitiveActionFacts) },
         toolContext,
       );
       if (!(fallbackResult as { ok?: boolean })?.ok) {

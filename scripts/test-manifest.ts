@@ -155,6 +155,14 @@ export const allTestTargets: readonly TestTarget[] = [
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/silent-reply.test.ts',
+    securityAreas: [
+      'no silent customer no-reply',
+      'inventory count privacy',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/operations.test.ts',
     securityAreas: ['health monitoring and verified recovery backups'],
     includeInSecurityRegression: true,

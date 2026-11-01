@@ -41,8 +41,38 @@ const EXACT_STOCK_PATTERNS = [
  * mentions a raw count, customer sends may describe only the public status or
  * whether the specifically requested quantity can be fulfilled.
  */
-export function checkInventoryDisclosureReply(body: string): { ok: true } | { ok: false; error: string } {
-  if (!EXACT_STOCK_PATTERNS.some((pattern) => pattern.test(body))) return { ok: true };
+// Numbers that are clearly NOT stock counts. Live test 2026-11-01: replies such
+// as "running shoes size 43 mein available hain" and "Rs 4,800, in stock" were
+// vetoed as count disclosures, the model could not phrase around it, and the
+// customer got no reply. The model never receives exact counts (check_stock
+// returns bands only), so this backstop only needs to catch a bare quantity.
+const SIZE_NUMBER = /\b(?:sizes?|size\s*(?:no\.?|number)|number|no\.)\s*[:#-]?\s*\d+(?:\s*(?:,|\/|and|or|aur|ya|-|to)\s*\d+)*/gi;
+const PRICE_NUMBER = /(?:\b(?:rs|pkr|rupees?)\.?\s*\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s*(?:rs|pkr|rupees?|rupay|rupaye)\b)/gi;
+const GROUPED_NUMBER = /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g;
+
+function numbersIn(text: string): Set<string> {
+  return new Set((text.match(/\d+/g) ?? []).map((n) => String(Number(n))));
+}
+
+/** Masks sizes, prices and numbers the customer already used, so only a bare quantity remains checkable. */
+export function maskNonStockNumbers(body: string, inboundText?: string): string {
+  let masked = body
+    .replace(SIZE_NUMBER, ' size-value ')
+    .replace(PRICE_NUMBER, ' price-value ')
+    .replace(GROUPED_NUMBER, ' price-value ');
+  const customerNumbers = inboundText ? numbersIn(inboundText) : new Set<string>();
+  if (customerNumbers.size > 0) {
+    masked = masked.replace(/\b\d+\b/g, (n) => (customerNumbers.has(String(Number(n))) ? ' customer-value ' : n));
+  }
+  return masked;
+}
+
+export function checkInventoryDisclosureReply(
+  body: string,
+  inboundText?: string,
+): { ok: true } | { ok: false; error: string } {
+  const checkable = maskNonStockNumbers(body, inboundText);
+  if (!EXACT_STOCK_PATTERNS.some((pattern) => pattern.test(checkable))) return { ok: true };
   return {
     ok: false,
     error:

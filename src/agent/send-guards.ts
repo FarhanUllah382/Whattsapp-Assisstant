@@ -126,7 +126,7 @@ export function makeSendMessageTool(
       );
       if (!orderSummaryCheck.ok) return orderSummaryCheck;
 
-      const inventoryDisclosure = checkInventoryDisclosureReply(body);
+      const inventoryDisclosure = checkInventoryDisclosureReply(body, ctx.inboundText);
       if (!inventoryDisclosure.ok) return inventoryDisclosure;
 
       const refundClaim = checkRefundCompletionClaim(body);
