@@ -1,232 +1,421 @@
 # Ahmed's WhatsApp Assistant
 
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.6-blue.svg?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
-[![Node.js](https://img.shields.io/badge/Node.js-24_LTS-green.svg?style=flat-square&logo=node.js)](https://nodejs.org/)
-[![SQLite](https://img.shields.io/badge/SQLite-better--sqlite3-003B57.svg?style=flat-square&logo=sqlite)](https://github.com/WiseLibs/better-sqlite3)
-[![Gemini](https://img.shields.io/badge/LLM-Google%20Gemini-orange.svg?style=flat-square&logo=google)](https://ai.google.dev/)
-[![WAHA](https://img.shields.io/badge/Channel-WAHA%20(WhatsApp%20API)-25D366.svg?style=flat-square&logo=whatsapp)](https://waha.devlike.pro/)
-[![Architecture](https://img.shields.io/badge/Architecture-FSM%20%2B%20Double--Entry%20Ledger-purple.svg?style=flat-square)](#architecture--data-flow)
+A single-shop WhatsApp AI sales assistant for one clothing/footwear shop in
+Pakistan. One business, one WhatsApp number, one owner, no staff. It replies
+to customers in English and Roman Urdu using approved shop data, remembers
+customers across days, keeps the books (orders, stock, ledger, payment claims,
+refund review cases), and lets the owner ask business questions from his own
+phone.
 
-> **A production-ready, autonomous WhatsApp AI sales agent and business operational intelligence partner designed for a single-owner retail clothing enterprise.**
+Stack: Node 24 LTS, TypeScript (strict), Express, SQLite via `better-sqlite3`
+12.10.0, Google Gemini over REST (`gemini-flash-lite-latest`), and
+[WAHA](https://waha.devlike.pro/) (an unofficial WhatsApp Web HTTP gateway run
+in Docker).
 
-Unlike generic toy chatbots, this system is an end-to-end, single-tenant commercial engine: it communicates in natural bilingual mix (English and Roman Urdu), manages conversational context across multi-day threads, executes audit-grade double-entry bookkeeping, maintains real-time inventory synchronization with an order Finite State Machine (FSM), enforces rigorous anti-ban safety guardrails, and provides real-time private business analytics to the shop owner via WhatsApp.
+## Status
 
----
+| Area | Status |
+|---|---|
+| Version 1: talks to customers and remembers them | Done, live-verified on the real number (Sep 2026) |
+| Version 2: keeps the books (orders, stock, ledger, payment claims) | Done, live-verified (Sep 2026) |
+| Version 3: owner Q&A and WhatsApp owner alerts | Done, live-verified (Sep 2026) |
+| Security and operations hardening (HARD-02 to HARD-07: confirmation wording, abuse/AI-cost limits, injection defence, outbound idempotency, job queue, backups, monitoring) | Built and locally verified by deterministic tests |
+| HARD-01: live WhatsApp acceptance pass of the hardened build | **Pending** |
+| Privacy lifecycle, commercial totals, payment/refund execution, official WhatsApp API, real-shop pilot | Partial, owner decisions required, or not started |
 
-## 🌟 Key Highlights
+**This project is not approved for an unattended real-shop launch.** The
+hardened build has not yet passed its live acceptance checklist (HARD-01), the
+inventory and policy text are demonstration data, and WAHA is an unofficial
+WhatsApp Web bridge with account-ban risk. The canonical, itemised status is
+in [docs/ENGINEERING_ROADMAP.md](docs/ENGINEERING_ROADMAP.md).
 
-* **Autonomous Bilingual Sales Agent**: Handles 24/7 customer inquiries, product discovery, and order negotiations in fluent English and colloquial Roman Urdu with zero hallucinated inventory or pricing.
-* **Persistent Conversational Memory**: Employs rolling context checkpoints + long-term structured facts (`customer_notes`) so returning customers are recognized without repeating preferences.
-* **Double-Entry Financial Ledger**: What customers owe is dynamically derived by summing debit and credit events in `ledger`—completely eliminating balance calculation drift.
-* **FSM Order Lifecycle & Live Stock Sync**: Forward-only state machine (`placed → confirmed → paid → shipped → delivered`) that automatically decrements stock on confirmation and restores stock and ledger credits upon cancellation.
-* **Turn-Close Safety Net**: Automatically catches orders or payments agreed upon in natural language that were not explicitly logged by the model during the turn loop.
-* **Owner Executive Analytics (Private WhatsApp Mode)**: Caller-ID fail-closed authentication routes messages from the owner's personal phone to a private executive assistant equipped with deterministic BI report tools (`sales_today`, `unpaid_customers`, `top_selling_product`, `pending_followups`) with zero SQL injection risk.
-* **Production Anti-Ban & Guardrail Suite**: In-process promise-chain mutex (`withSendLock`) guarantees anti-ban pacing (daily volume caps, warmup curves, jitter throttling), spinning copy-variation detection, 5% unauthorized discount limits, and human-promise verification.
+## What it does
 
----
+### Customer conversations
+- Answers product, stock and policy questions from the product table and the
+  owner-approved [catalog.md](catalog.md). Policy answers fail closed if the
+  file's SHA-256 does not match `APPROVED_CATALOG_SHA256`. Unknown attributes
+  and unsupported questions are handed off to the owner instead of guessed.
+- Remembers customers across days through conversation checkpoints and
+  durable customer notes.
+- Shows public stock only as availability bands or a yes/no for a requested
+  quantity; exact stock counts stay private.
+- Sends up to three product image cards per reply (`show_product_images`)
+  from `assets/product-images/` when a customer asks for pictures.
+- Refuses unauthorised discounts and blocks replies that promise human
+  actions which were not actually recorded.
 
-## 🏗️ Architecture & Data Flow
+### Orders and bookkeeping
+- **Two-step order confirmation.** `prepare_order` shows a server-computed
+  summary. Only a *later* inbound message with explicit wording about
+  confirming, booking or placing the order books it. Bare "yes", "ok",
+  "haan", "ji", "okay" or "done" is rejected. Price and stock are rechecked
+  and booking is atomic.
+- Prices come from the database, never from the model. Money is stored as
+  integer paisa.
+- Forward-only order state machine
+  `placed -> confirmed -> paid -> shipped -> delivered`, with cancellation only
+  before shipping, actor-specific permissions, and an append-only
+  `order_status_events` audit trail.
+- Balances are derived from the `ledger` table (sum of debits minus credits);
+  there is no stored balance column.
+- Order references are high-entropy and bound to the sender's WhatsApp
+  number; another customer's order and a nonexistent order produce the same
+  response.
+
+### Payments and refunds
+- Customers can only create **unverified** payment claims. The model has no
+  tool that resolves a claim or credits money.
+- The owner approves a claim with an exact two-step text command that
+  includes the transaction reference he checked in the business account:
+
+  ```
+  APPROVE CLAIM 12 REF TXN123456
+  CONFIRM APPROVE CLAIM 12 REF TXN123456
+  ```
+
+  Rejection and reversal use `REJECT CLAIM <id>` / `CONFIRM REJECT CLAIM <id>`
+  and `REVERSE CLAIM <id>` / `CONFIRM REVERSE CLAIM <id>`. Natural-language
+  approval changes nothing. Approval checks duplicate references, amount,
+  order and balance; SQLite triggers require an exactly linked ledger credit
+  and forbid editing or deleting verification and audit history. Reversal
+  writes a compensating debit.
+- Payment methods other than cash on delivery stay unavailable until their
+  `PAYMENT_*` destinations are configured.
+- Refund requests on delivered orders create a **review case** only. The
+  owner approves or rejects it; no money moves automatically, and the
+  assistant may not claim a refund was paid.
+
+### Owner mode
+- Messages from `AHMED_OWNER_PHONE` (fail-closed if unset) go to a separate
+  owner assistant with report tools: `inventory_overview`, `sales_today`,
+  `unpaid_customers`, `top_selling_product`, `pending_followups`,
+  `pending_payment_claims`, `pending_refund_requests`,
+  `resolve_refund_request`.
+- Owner alerts (handoffs, reply failures, unlogged orders/payments, new
+  payment claims, refund requests) are delivered over
+  WhatsApp with a flood limit; excess alerts are kept and retried.
+
+### Safety and operations
+- **Consent:** `STOP` (and Roman Urdu equivalents such as `messages band
+  karo`) stops automated messages; `START` restores them. These commands
+  bypass rate limits so a customer can always opt out.
+- **Webhook HMAC:** every `POST /webhook/whatsapp` is verified against the
+  raw body with an HMAC-SHA512 shared secret (`WAHA_WEBHOOK_HMAC_KEY`, set as
+  `WHATSAPP_HOOK_HMAC_KEY` in WAHA). Missing or invalid signatures get HTTP 401.
+- **Replay quarantine:** messages older than the stored replay cutoff (advanced
+  at every start, optional `INBOUND_ACCEPT_AFTER`) are acknowledged but never
+  processed, and provider events are deduplicated.
+- **Durable inbound queue:** accepted messages are committed to SQLite before
+  WAHA gets HTTP 200, processed by a worker pool (default 4 workers, 500
+  pending, lease and retry), resumed after restart, and answered with HTTP 503
+  when saturated.
+- **Abuse limits:** durable per-sender turn limits (default 20 customer / 60
+  owner turns per 10 minutes) and a deterministic busy reply with cooldown.
+- **AI daily budget:** a shared daily Gemini call and token cap on the
+  Karachi business day (defaults 500 calls / 500,000 tokens).
+- **Outbound controls:** the model's plain text is discarded; only the
+  `send_message` tool reaches a customer, after guardrails, a send lock,
+  anti-ban pacing (warm-up cap, sending window, jitter, repetition check) and
+  `send_ledger` idempotency.
+- **Untrusted data and truthful wording:** stored text and tool results are
+  wrapped as untrusted data; replies that falsely claim a payment was
+  verified, a refund paid, or the owner viewed something are vetoed.
+- **PII redaction:** structured logs are redacted, model-visible contact
+  details are masked, and owner alerts are sanitised.
+- **Backups:** a verified online SQLite backup at startup and every 24 hours
+  (retain 14), each checked with `integrity_check` and `foreign_key_check`.
+- **Health endpoints:** `GET /health` (process alive), `GET /ready` (SQLite and
+  WAHA session ready, else 503), and `GET /operations/metrics` (queue and
+  delivery counts, requires the `X-Operations-Key` header matching
+  `OPERATIONS_API_KEY` of at least 24 characters; otherwise 401).
+
+## Architecture
 
 ```mermaid
 flowchart TD
-    Customer([Customer WhatsApp]) -->|Inbound Message| WAHA[WAHA / WhatsApp Gateway]
-    Owner([Shop Owner Phone]) -->|Inbound Message| WAHA
-
-    WAHA -->|POST /webhook/whatsapp| Server[Express Server: src/server.ts]
-    Server --> Auth{isOwnerPhone?}
-
-    %% Owner Route
-    Auth -->|Yes: Owner Turn| OwnerTurn[runOwnerTurn: src/agent.ts]
-    OwnerTurn --> LLMOwner[LLM Seam: Gemini Flash]
-    LLMOwner --> OwnerTools[Deterministic Analytics Tools<br/>• sales_today<br/>• unpaid_customers<br/>• top_selling_product<br/>• pending_followups]
-    OwnerTools --> Analytics[(SQLite: ahmed.db)]
-    OwnerTurn --> PacingLock[Anti-Ban Pacing & Send Lock]
-    PacingLock --> SendOwner[WAHA sendText]
-
-    %% Customer Route
-    Auth -->|No: Customer Turn| Agent[runTurn: src/agent.ts]
-    Agent --> Open[1. OPEN: Load History, Checkpoint & Notes]
-    Open --> Loop[2. LOOP: Model Tool Calling Loop]
-    Loop --> Catalog[(catalog.md & SQLite)]
-    Loop --> ToolExec[Execute Tool: check_stock, record_order, etc.]
-    ToolExec --> Guardrails{Guardrail Pipeline<br/>• Concurrency Send Lock<br/>• Anti-Ban Pacing & Sending Window<br/>• Copy Variation / Spinning<br/>• Max 5% Discount Rule<br/>• Human Promise Detection}
-    Guardrails -->|Allowed| SendCust[WAHA sendText]
-    Loop --> Close[3. CLOSE: Forced Summary & Safety Net]
-    Close --> Checkpoints[(checkpoints & customer_notes)]
-    Close --> SafetyNet{Unlogged Order/Payment?}
-    SafetyNet -->|Confident| AutoRecord[(orders & ledger)]
-    SafetyNet -->|Uncertain| Handoff[(handoff_ledger)]
+    C([Customer]) --> WAHA[WAHA gateway in Docker]
+    O([Owner phone]) --> WAHA
+    WAHA -->|POST /webhook/whatsapp| HMAC[Raw-body HMAC check<br/>webhook-auth.ts]
+    HMAC -->|401 if invalid| X[Rejected]
+    HMAC --> EV[Replay cutoff + dedupe<br/>inbound-events.ts]
+    EV --> RL[Per-sender limits<br/>abuse-control.ts]
+    RL --> Q[(Durable queue<br/>inbound-jobs.ts)]
+    Q -->|503 when saturated| WAHA
+    Q --> W[Worker pool]
+    W --> ISO{Owner phone?<br/>owner.ts}
+    ISO -->|yes| OT[runOwnerTurn<br/>agent.ts]
+    OT --> PR[Exact claim commands<br/>payment-resolution.ts]
+    OT --> OTL[Owner tools<br/>analytics, claims, refunds]
+    ISO -->|no| CS[STOP / START<br/>consent.ts]
+    CS --> CT[runTurn<br/>agent.ts]
+    CT --> OPEN[OPEN: history, checkpoint, notes]
+    OPEN --> LOOP[LOOP: Gemini tool calls<br/>llm.ts + ai-budget.ts]
+    LOOP --> TOOLS[Customer tools<br/>tools.ts]
+    TOOLS --> DB[(SQLite<br/>28 tables)]
+    OTL --> DB
+    PR --> DB
+    LOOP --> CLOSE[CLOSE: checkpoint + safety-net extraction]
+    LOOP --> SEND[send_message / show_product_images]
+    SEND --> G[Guardrails, truthful-wording veto,<br/>send lock, pacing]
+    G --> SL[send_ledger idempotency<br/>outbound-delivery.ts]
+    SL --> WAHA
 ```
 
----
+More detail: [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) and
+[docs/ARCHITECTURE_GUIDELINES.md](docs/ARCHITECTURE_GUIDELINES.md).
 
-## 🚀 Implemented Capabilities & Roadmap
-
-The application delivers against all four commercial business promises:
-
-### 1. Autonomous Sales & Grounded Conversation
-- **Instant, Grounded Replies**: Product queries, return/exchange policies, delivery timelines, and accepted payment methods (COD, Bank Transfer, Easypaisa, JazzCash) are grounded in [catalog.md](catalog.md) with 3x title-weighted keyword matching.
-- **Strict Guardrails**: Disallows unauthorized discounts $\ge 5\%$ without owner confirmation, prevents empty promises (*"Ahmed will call you"* is blocked unless `notify_owner` was executed), and delivers a one-time virtual assistant disclosure on first contact.
-
-### 2. Conversational Memory & Context Preservation
-- **Checkpoints**: After every turn, a forced second LLM call summarizes the current conversation state (what was discussed, what is owed, commitments made).
-- **Durable Customer Notes**: Permanent customer preferences (e.g. *"prefers black"*, *"orders in bulk"*) are extracted into `customer_notes` and automatically injected into subsequent conversations across days or weeks.
-
-### 3. Automated Bookkeeping, FSM Orders & Live Inventory
-- **Dynamic Ledger**: Balance owed is computed via $\sum(\text{debits}) - \sum(\text{credits})$. Zero mutable `balance_owed` fields.
-- **Forward-Only Finite State Machine (FSM)**:
-  $$\text{placed} \longrightarrow \text{confirmed} \longrightarrow \text{paid} \longrightarrow \text{shipped} \longrightarrow \text{delivered}$$
-  $$\text{placed / confirmed / paid} \longrightarrow \text{cancelled}$$
-- **Synchronized Inventory**: Orders in `placed` reserve nothing; transitioning to `confirmed` decrements `products.stock`. Pre-shipping cancellations automatically restore stock and issue a ledger credit reversal.
-- **Turn-Close Extraction Safety Net**: A defensive extraction prompt at turn-close detects orders or payments mentioned in natural conversation that the AI failed to log via tools, either auto-recording them if confident or alerting the owner.
-
-### 4. Owner Operational Intelligence (WhatsApp BI)
-- **Zero-Interface Reporting**: Ahmed texts the shop number directly from his personal phone; the system recognizes his number and routes to a dedicated analytics assistant.
-- **Deterministic SQL-Backed Reports**:
-  - `sales_today`: Real-time shop revenue for the current business day.
-  - `unpaid_customers`: Ranked list of customers with outstanding balances.
-  - `top_selling_product`: All-time volume and revenue leader across completed orders.
-  - `pending_followups`: Overdue unpaid orders sitting for $>2$ days (flagged overdue if $>7$ days).
-
-### 5. Object-Oriented Domain Entities & Abstractions
-- **`OrderStateMachine` (`src/orders.ts`)**: Encapsulates forward-only state progression (`placed → confirmed → paid → shipped → delivered`), validates transitions, prevents state skipping, and maintains an in-memory audit history log.
-- **`LedgerAccount` (`src/ledger.ts`)**: Domain entity that enforces double-entry accounting invariants (positive amounts, dynamic derivation, immutability of historical ledger entries).
-- **`WahaAdapter implements ChannelAdapter` (`src/channel/waha.ts`)**: Polymorphic provider abstraction encapsulating HTTP connection parameters, session routing, and privacy LID resolution.
-
----
-
-## 🛠️ Technology Stack
-
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Runtime & Language** | Node.js 24 LTS, TypeScript (Strict Mode) | Pinned runtime line with a Node-24-compatible native SQLite binding. |
-| **Server Framework** | Express.js | High-throughput, lightweight webhook listener. |
-| **Database** | SQLite via `better-sqlite3` | In-process, ultra-low latency relational database with atomic transactions. |
-| **AI / LLM Engine** | Google Gemini (`gemini-flash-lite-latest`) | High-speed function calling with thought-signature preservation. |
-| **WhatsApp Gateway** | WAHA (WhatsApp HTTP API - Devlike) | Decoupled WhatsApp Web session management and message dispatch. |
-| **Concurrency Control** | In-Process Promise-Chain Mutex (`withSendLock`) | Guarantees FIFO message serialization across asynchronous turns. |
-
----
-
-## 📂 Project Structure
+## Project structure
 
 ```
-├── catalog.md                  # Human-maintainable product catalog & store FAQ
-├── db/
-│   └── schema.sql              # Relational SQLite schema (9 tables, audit ledger, checkpoints)
-├── scripts/
-│   ├── seed-catalog.ts         # Idempotent database seeder based on catalog.md
-│   └── test-v2-flow.ts         # Comprehensive deterministic test suite for orders & ledger
-├── src/
-│   ├── agent.ts                # Turn loop engine: OPEN -> LOOP -> CLOSE, send guardrails
-│   ├── analytics.ts            # Deterministic business intelligence report functions
-│   ├── catalog.ts              # Weighted keyword search engine for catalog.md
-│   ├── db.ts                   # SQLite singleton, startup migrations & schema integrity
-│   ├── followups.ts            # Derived follow-up tracking for unpaid orders
-│   ├── ledger.ts               # Double-entry debit/credit ledger and balance resolution
-│   ├── llm.ts                  # Single-seam LLM gateway for Google Gemini
-│   ├── orders.ts               # Order state machine (FSM), stock decrement & restore logic
-│   ├── owner.ts                # Fail-closed caller authentication for the shop owner
-│   ├── server.ts               # Express entry point for WhatsApp webhooks & turn dispatch
-│   ├── tools.ts                # Business actions & analytics tool definitions
-│   ├── types.ts                # Core domain TypeScript interfaces
-│   ├── channel/
-│   │   ├── types.ts            # Provider-agnostic ChannelAdapter interface
-│   │   └── waha.ts             # WAHA REST adapter with LID privacy-JID resolution
-│   ├── guardrails/
-│   │   ├── discount-rules.ts   # Regex-based 5% discount limit & retrospective checks
-│   │   ├── human-promise.ts    # Handoff promise detector
-│   │   ├── messaging-window.ts # Operational hours enforcement (07:00 - 22:00 PKT)
-│   │   ├── pacing/             # Anti-ban throttle engine (daily caps, warmup curves, jitter)
-│   │   └── spinning/           # Outbound text variation & anti-spam detection
-│   └── obs/
-│       └── logger.ts           # Structured JSON logger
-└── tsconfig.json               # Strict TypeScript configuration
+catalog.md                    Owner-approved policy/FAQ text (hash-checked)
+db/schema.sql                 SQLite schema: 28 tables, triggers, indexes
+assets/product-images/        Product images used by show_product_images
+Dockerfile                    Two-stage Node 24 image (runs dist/server.js)
+render.yaml                   Render config for the portfolio demo
+src/
+  server.ts                   Express entry: /health, /ready, /operations/metrics, /webhook/whatsapp
+  agent.ts                    runTurn / runOwnerTurn, prompts, send guardrails
+  tools.ts                    Customer and owner tools with server-side validation
+  llm.ts                      The single Gemini seam (callModel)
+  db.ts                       SQLite connection and startup migrations
+  types.ts                    Shared types
+  orders.ts                   Order state machine, atomic stock reservation
+  order-access.ts             Sender-bound order lookup and throttling
+  order-summary.ts            Server-computed order summaries
+  inventory.ts                Stock and product queries
+  inventory-visibility.ts     Public availability bands
+  catalog.ts                  catalog.md loading and hash check
+  business-grounding.ts       Grounded product/policy answers
+  ledger.ts  money.ts         Derived balances, integer-paisa money
+  payments.ts                 Unverified payment claims
+  payment-resolution.ts       Owner APPROVE/REJECT/REVERSE CLAIM commands
+  payment-instructions.ts     Configured payment destinations
+  refunds.ts                  Refund review cases
+  consent.ts                  STOP / START opt-out and opt-in
+  privacy.ts                  PII masking and redaction helpers
+  untrusted-data.ts           Trust envelopes for stored/tool data
+  sensitive-action-wording.ts Fixed wording for payment/refund/status outcomes
+  handoff-claims.ts           Truthful handoff reporting
+  customer-reply-safety.ts    Final customer-reply veto checks
+  alerts.ts                   Owner WhatsApp alerts with flood limit
+  followups.ts  analytics.ts  Owner report definitions
+  owner.ts                    Fail-closed owner phone check
+  inbound-events.ts           Replay cutoff and provider-event dedupe
+  inbound-jobs.ts             Durable inbound job queue and workers
+  abuse-control.ts            Per-sender turn limits
+  ai-budget.ts                Daily model call/token budget
+  busy-reply.ts               Deterministic overload reply
+  outbound-delivery.ts        send_ledger idempotency and delivery state
+  operations.ts               Health, readiness, metrics
+  database-backup.ts          Verified SQLite backups and retention
+  product-media.ts            Product image cards
+  webhook-auth.ts             WAHA webhook HMAC verification
+  channel/types.ts            ChannelAdapter interface
+  channel/waha.ts             WahaAdapter
+  guardrails/                 discount-rules, human-promise, messaging-window, pacing/, spinning/
+  obs/logger.ts               Redacting structured logger
+scripts/
+  run-isolated-tests.ts       Test runner: temp DB per file, production DB fingerprint
+  test-manifest.ts            Test files and declared security areas
+  test-v2-flow.ts             Version 2 end-to-end flow (run via npm run test:e2e)
+  seed-catalog.ts             Seed products
+  import-inventory.ts         CSV inventory import
+  backup-database.ts          Manual verified backup
+  verify-database-backup.ts   Verify a backup file
+  verify-product-media.ts     Check product images
+  repair-legacy-payment-claim.ts  One-off audited claim repair
+  seed-portfolio-demo.ts  build-portfolio-demo.ts  verify-portfolio-demo.ts
+tests/                        27 test files listed in scripts/test-manifest.ts
+docs/                         Tracker, architecture, runbook, readiness spec, CSV guide
 ```
 
----
+### Database
 
-## ⚙️ Getting Started
+`db/schema.sql` defines 28 tables: `customers`, `customer_consent_events`,
+`products`, `orders`, `order_lookup_attempts`, `order_drafts`,
+`order_status_events`, `ledger`, `messages`, `checkpoints`, `send_ledger`,
+`bookkeeping_receipts`, `payment_claims`, `payment_claim_action_intents`,
+`payment_claim_verifications`, `payment_claim_events`,
+`payment_claim_ledger_links`, `refund_requests`, `inbound_guard_state`,
+`inbound_events`, `inbound_jobs`, `inbound_abuse_events`, `ai_model_calls`,
+`customer_notes`, `privacy_migrations`, `handoff_ledger`, `owner_alerts`,
+`owner_alert_events`.
+
+The real database (`ahmed.db`) is gitignored and must never be committed.
+
+## Setup
 
 ### Prerequisites
-* **Node.js**: v24 LTS (`.nvmrc` pins the project runtime line)
-* **Docker**: Required for running WAHA locally
-* **Google Gemini API Key**: [Google AI Studio](https://aistudio.google.com/)
+- Node.js 24 LTS (see `.nvmrc`; `package.json` requires `>=24 <25`)
+- Docker (for WAHA)
+- A Google Gemini API key from [Google AI Studio](https://aistudio.google.com/)
+- A WhatsApp number you are allowed to link to WAHA (expect ban risk on new
+  or heavily used numbers)
 
-### 1. Installation
-Clone the repository and install dependencies:
-```bash
-git clone https://github.com/<your-username>/ahmed-whatsapp-assistant.git
-cd ahmed-whatsapp-assistant
-npm install
-```
-
-### 2. Environment Configuration
-Create an environment configuration (or set environment variables in your terminal):
-```bash
-export GEMINI_API_KEY="your-google-gemini-api-key"
-export WAHA_BASE_URL="http://localhost:3001"
-export WAHA_SESSION="default"
-export AHMED_OWNER_PHONE="923001234567"      # Owner's personal WhatsApp number
-export PORT=3000
-```
-
-### 3. Start WAHA (WhatsApp Gateway)
-Run the headless WhatsApp bridge using Docker:
-```bash
-docker run -it --name waha -p 3001:3001 -e "WHATSAPP_HOOK_URL=http://localhost:3000/webhook/whatsapp" -e "WHATSAPP_HOOK_EVENTS=message" devlikeapro/waha
-```
-* Open `http://localhost:3001` in your browser and link your WhatsApp account using QR code or pairing code.
-
-### 4. Seed the Product Inventory
-Populate the database with initial products from `catalog.md`:
-```bash
-npx tsx scripts/seed-catalog.ts
-```
-
-### 5. Start the Application
-Run the assistant server:
-```bash
-npm run dev
-```
-
-The service will start on port `3000`, listening for inbound WhatsApp webhooks at `/webhook/whatsapp`.
-
----
-
-## 🧪 Testing & Verification
-
-The repository includes deterministic, isolated test suites that verify the entire operational cycle without requiring live WhatsApp credits:
+### 1. Install
 
 ```bash
-# Run the complete Version 2 retail & ledger verification suite:
-npx tsx scripts/test-v2-flow.ts
+git clone https://github.com/FarhanUllah382/Whattsapp-Assisstant.git
+cd Whattsapp-Assisstant
+npm ci
 ```
 
-The test suite validates:
-* [x] **Live stock queries** via `check_stock`.
-* [x] **Order placement** with automated `ledger` debits and intact stock.
-* [x] **Order confirmation** with automated real-time stock decrements.
-* [x] **FSM enforcement**: Rejection of backward transitions or skipping steps.
-* [x] **Payment processing**: Dynamic ledger credits and balance updates.
-* [x] **Turn-close safety net**: Validation of unlogged orders and automatic handoffs.
-* [x] **Pre-shipping cancellations**: Full stock restoration and ledger debit reversal.
-* [x] **Overdue receivables**: Follow-up detection on unpaid orders over 2 days.
+### 2. Configure
 
----
+```bash
+cp .env.example .env
+```
 
-## 🛡️ Production Safety & Design Decisions
+Every variable is documented in [.env.example](.env.example). Required for a
+real run (each feature fails closed when its value is missing):
 
-1. **Anti-Ban Concurrency Protection (`withSendLock`)**:
-   Under high concurrent message bursts, typical asynchronous frameworks read stale last-sent timestamps. Our custom promise-chain mutex guarantees that every message strictly adheres to the 1,200ms throttle and daily send limits.
-2. **Double-Entry Financial Integrity**:
-   Instead of updating a fragile `balance_owed` column, balances are computed from immutable debit/credit entries in `ledger`. This provides an auditable paper trail for every transaction.
-3. **Fail-Closed Owner Recognition**:
-   Owner authentication is tied directly to the E.164 normalized phone number. If `AHMED_OWNER_PHONE` is not explicitly set, owner mode is completely locked down—preventing customer access to internal business analytics.
-4. **Teaching-Text Error Handling**:
-   When an LLM attempts an invalid action (e.g. confirming an already-shipped order or selecting a nonexistent product), the system never throws an unhandled exception. It returns structured, plain-language guidance allowing the model to recover and self-correct within the turn.
+| Variable | Purpose |
+|---|---|
+| `GEMINI_API_KEY` | Gemini API credential |
+| `WAHA_BASE_URL` | WAHA URL, e.g. `http://localhost:3001` |
+| `WAHA_SESSION` | WAHA session name, e.g. `default` |
+| `WAHA_API_KEY` | WAHA API key |
+| `WAHA_WEBHOOK_HMAC_KEY` | Long random webhook secret; same value as WAHA's `WHATSAPP_HOOK_HMAC_KEY` |
+| `AHMED_OWNER_PHONE` | Owner number in E.164 digits, e.g. `923001234567` |
+| `APPROVED_CATALOG_SHA256` | SHA-256 of the approved `catalog.md` |
+| `PACING_NUMBER_ACTIVATED_ON` | Date the sending number was activated (drives the warm-up cap) |
+| `OPERATIONS_API_KEY` | Separate key for `/operations/metrics`, at least 24 characters |
 
----
+Optional, with finite defaults: `PORT`, `PACING_TIMEZONE`,
+`PACING_WINDOW_END_HOUR`, `INBOUND_ACCEPT_AFTER`,
+`INBOUND_RATE_WINDOW_MINUTES`, `INBOUND_CUSTOMER_TURNS_PER_WINDOW`,
+`INBOUND_OWNER_TURNS_PER_WINDOW`, `AI_BUDGET_TIMEZONE`, `AI_DAILY_CALL_LIMIT`,
+`AI_DAILY_TOKEN_LIMIT`, `INBOUND_JOB_WORKERS`, `INBOUND_JOB_MAX_PENDING`,
+`INBOUND_JOB_LEASE_SECONDS`, `INBOUND_JOB_MAX_ATTEMPTS`,
+`INBOUND_JOB_RETRY_BASE_SECONDS`, `DATABASE_BACKUP_ENABLED`,
+`DATABASE_BACKUP_DIRECTORY`, `DATABASE_BACKUP_INTERVAL_HOURS`,
+`DATABASE_BACKUP_RETENTION_COUNT`, `OWNER_ALERT_WINDOW_MINUTES`,
+`OWNER_ALERT_MAX_SENDS_PER_WINDOW`, `BUSY_REPLY_COOLDOWN_MINUTES`.
 
-## 📄 License
-This project is licensed under the [MIT License](LICENSE).
+Payment destinations (`PAYMENT_EASYPAISA_*`, `PAYMENT_JAZZCASH_*`,
+`PAYMENT_BANK_*`) stay blank until the owner provides real details; blank
+methods are not offered. Never commit real numbers, keys or account details.
+
+After any edit to `catalog.md`, recompute its hash and update
+`APPROVED_CATALOG_SHA256`:
+
+```bash
+sha256sum catalog.md
+```
+
+### 3. Start WAHA
+
+```bash
+docker run -it --name waha -p 3001:3001 \
+  -e WHATSAPP_HOOK_URL=http://host.docker.internal:3000/webhook/whatsapp \
+  -e WHATSAPP_HOOK_EVENTS=message \
+  -e WHATSAPP_HOOK_HMAC_KEY=<same value as WAHA_WEBHOOK_HMAC_KEY> \
+  devlikeapro/waha
+```
+
+Open `http://localhost:3001`, link the WhatsApp number, and keep the WAHA
+session volume. Deleting it forces a relink and can replay message history.
+Configure the WAHA API key to match `WAHA_API_KEY` as described in the WAHA
+documentation.
+
+### 4. Seed and run
+
+```bash
+npm run seed       # seed products
+npm run dev        # loads .env and runs src/server.ts on port 3000
+```
+
+Or compiled:
+
+```bash
+npm run build
+npm start          # node dist/server.js
+```
+
+Import a real inventory CSV with
+`npx tsx scripts/import-inventory.ts <file.csv>`; see
+[docs/INVENTORY_CSV_GUIDE.md](docs/INVENTORY_CSV_GUIDE.md).
+
+Check the service:
+
+```bash
+curl http://localhost:3000/health
+curl http://localhost:3000/ready
+curl -H "X-Operations-Key: $OPERATIONS_API_KEY" http://localhost:3000/operations/metrics
+```
+
+## Testing
+
+```bash
+npm run typecheck      # tsc --noEmit
+npm test               # all 27 test files, each against its own temporary database
+npm run test:security  # the security manifest, printing each file's protection areas
+npm run test:e2e       # Version 2 order/ledger end-to-end flow
+```
+
+The runner fingerprints `ahmed.db` and its SQLite sidecars before and after
+every run and fails if they change. Test entry points refuse to open
+`ahmed.db` directly, so running a test file with `npx tsx` outside the runner
+fails on purpose; always use the npm scripts above.
+
+## Backups
+
+```bash
+npm run backup                                    # create a verified backup now
+npm run backup:verify -- /absolute/path/to/backup.db
+npm run catalog:verify-media                      # check product image files
+```
+
+Restore steps and incident procedures are in
+[docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md).
+
+## Docker
+
+The `Dockerfile` builds a two-stage Node 24 image that compiles TypeScript and
+runs `npm start` on port 3000. It copies `catalog.md`, `db/schema.sql` and
+`assets/product-images/` into the image.
+
+```bash
+docker build -t ahmed-assistant .
+docker run --env-file .env -p 3000:3000 \
+  -v "$(pwd)/ahmed.db:/app/ahmed.db" \
+  -v "$(pwd)/backups:/app/backups" \
+  ahmed-assistant
+```
+
+The database path is fixed at `ahmed.db` in the project root (`/app/ahmed.db`
+in the image), so mount it and the backup directory to keep data across
+container restarts. Create an empty `ahmed.db` file first if it does not exist,
+otherwise Docker creates a directory at that path. WAHA still runs as its own
+container; point `WAHA_BASE_URL` and WAHA's `WHATSAPP_HOOK_URL` at addresses
+both containers can reach. The repository does not include a managed
+production deployment or process supervisor.
+
+## Portfolio demo
+
+A separate, demo-only build uses seeded fake data and is configured for Render
+in `render.yaml`:
+
+```bash
+npm run demo:build    # seed demo data and assemble .portfolio-runtime/
+npm run demo:start    # run the demo server
+npm run demo:verify   # check the demo build
+```
+
+These scripts read from a `portfolio-demo/` source folder, which is currently
+missing from the working copy, so `demo:build` fails until it is restored.
+
+## Documentation
+
+- [CLAUDE.md](CLAUDE.md): entry point, working rules, conventions, file map
+- [docs/ENGINEERING_ROADMAP.md](docs/ENGINEERING_ROADMAP.md): the only canonical status tracker
+- [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md): component and workflow detail
+- [docs/ARCHITECTURE_GUIDELINES.md](docs/ARCHITECTURE_GUIDELINES.md): engineering principles
+- [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md): health checks, backup/restore, incidents
+- [docs/REAL_BUSINESS_PRODUCTION_READINESS.md](docs/REAL_BUSINESS_PRODUCTION_READINESS.md): readiness specification
+- [docs/INVENTORY_CSV_GUIDE.md](docs/INVENTORY_CSV_GUIDE.md): inventory CSV format
+
+## License
+
+Licensed under the [MIT License](LICENSE).

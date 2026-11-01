@@ -1,0 +1,12 @@
+# Normalise line endings: store text as LF in the repository and check it out
+# as LF on every platform, so Windows checkouts stop showing CRLF-only diffs.
+* text=auto eol=lf
+
+# Binary files: never convert line endings or attempt text diffs.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.pdf binary
+*.db binary
+*.docx binary
+*.zip binary
