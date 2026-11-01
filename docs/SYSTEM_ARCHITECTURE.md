@@ -354,11 +354,9 @@ The implementation combines functional orchestration, pure policy functions, exp
 
 ## 11. Verification and scope
 
-The engineering roadmap currently records Version 1 and Version 2 complete, Version 3.1 live-verified, and Version 3.2 partially live-verified. The pending-followup owner question passed; the sales, unpaid-customer, and top-product owner questions still require real-message checks. Version 3.3 alerts remain unbuilt and outside the active scope.
+Status as of 2026-11-01 (canonical source: `docs/ENGINEERING_ROADMAP.md`): Versions 1, 2 and 3 (3.1 owner recognition, 3.2 all four owner analytics questions, 3.3 WhatsApp-delivered owner alerts) are complete and live-verified (September 2026). The later real-business hardening work (HARD-02 to HARD-07: explicit order confirmation, durable inbound queue, abuse and AI-budget limits, indirect-injection defences, outbound idempotency, backups and health endpoints) is built and locally verified; the combined live acceptance pass (HARD-01) is still pending.
 
-The recorded latest checks are typecheck, 39 permanent tests, the V2 database flow, and focused deterministic safety-net/retry tests. This architecture task inspects code and documents behavior; it does not rerun live tests or upgrade verification status.
-
-Planned or carried-forward capabilities include owner WhatsApp alerts, durable queued retries, broader conversation-memory verification, and remaining reliability gaps documented above. None appears as an implemented service in these diagrams. Multi-tenant organization layers, B2B funnel stages, staff routing, and an operator/conversational dual-agent split are outside the project's established design.
+Latest recorded checks: typecheck, build, `npm test` (29 isolated test files across 33 declared security areas, including the 90-check main suite), and `npm run test:e2e`. This document describes code behaviour; it does not upgrade verification status. Multi-tenant organization layers, B2B funnel stages, staff routing, and an operator/conversational dual-agent split remain outside the project's established design.
 
 ## 12. Source map for reviewers
 

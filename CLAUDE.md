@@ -238,20 +238,20 @@ increment to this repo.
 
 ## 10. Known gaps to keep in mind
 
-- **Large amount of work since 2026-09-29 appears uncommitted** (last commit
-  in the git log: "feat: add deterministic customer opt-out"). Check
-  `git status` and commit in logical chunks before anything else.
-- `portfolio-demo/` folder missing → Render build (`render.yaml`) broken.
-- `llm.ts` fetch to Gemini has no timeout and puts the API key in the URL
-  query string; prefer the `x-goog-api-key` header plus `AbortSignal.timeout`.
-  WAHA sends (`channel/waha.ts` `send`) also have no timeout (only the
-  readiness probe does). Model name is hard-coded.
-- Legacy `record_order` / `record_payment` definitions in `tools.ts` are dead
-  code that would bypass two-step booking / claim verification if ever
-  re-exposed — candidates for removal.
-- `README.md` is outdated (says 9 tables / old structure / runs
-  `test-v2-flow.ts` directly). `agent.ts` and `tools.ts` are very large —
-  split only with tests green before and after.
-- Live acceptance (HARD-01) has not been run since the hardening work.
+Fixed on 2026-11-01 (Round 1): Gemini/WAHA timeouts + API key moved to the
+`x-goog-api-key` header + `GEMINI_MODEL` setting; legacy `record_order` /
+`record_payment` tools removed (`bookkeeping_receipts` now receives no new
+rows — kept for history); README rewritten; `.gitattributes` added;
+`portfolio-demo/` restored; HARD-01 kit added (`docs/HARD-01_LIVE_CHECKLIST.md`,
+`npm run live:verify`, read-only).
+
+Still open:
+- Live acceptance (HARD-01) has not been run since the hardening work. The
+  delivered-order refund scenario is blocked: nothing on the WhatsApp path can
+  move an order to shipped/delivered (no owner/courier status tool yet).
+- `agent.ts` (~1500 lines) and `tools.ts` are very large — split only with
+  tests green before and after.
+- Stale `record_order` mentions in comments: `src/orders.ts`,
+  `tests/orders.test.ts`, `scripts/verify-portfolio-demo.ts`.
 - WAHA is an unofficial WhatsApp Web bridge: ban risk; HARD-13 is the
   decision to move to the official WhatsApp Cloud API for a real client.
