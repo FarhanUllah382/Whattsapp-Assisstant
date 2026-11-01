@@ -21,13 +21,55 @@ import type { ToolDef } from './types';
 // blocks + stop_reason) is unchanged, so agent.ts didn't need any edits —
 // this function still does 100% of the translation on both sides, per the
 // single-seam rule above.
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-// Switched from gemini-2.5-flash (2026-09-04) — its 20-requests/day free-tier
-// quota is exhausted (real traffic + our own testing burned through it, and
-// the cap is per-model, not per-key, so swapping keys under the same GCP
-// project didn't help). gemini-flash-lite-latest is a separate model with
-// its own quota bucket, confirmed working incl. function/tool calling.
-const MODEL = 'gemini-flash-lite-latest';
+//
+// Configuration is read at call time (not module load) so tests and operators
+// get the same validated values. Every value fails closed to a finite default:
+// a missing or malformed timeout never means "wait forever", and a malformed
+// model name never reaches the request URL.
+//
+// Default model: switched from gemini-2.5-flash (2026-09-04) — its
+// 20-requests/day free-tier quota is exhausted (real traffic + our own
+// testing burned through it, and the cap is per-model, not per-key, so
+// swapping keys under the same GCP project didn't help).
+// gemini-flash-lite-latest is a separate model with its own quota bucket,
+// confirmed working incl. function/tool calling. Override with GEMINI_MODEL.
+export const GEMINI_DEFAULTS = Object.freeze({
+  model: 'gemini-flash-lite-latest',
+  timeoutMs: 30_000,
+});
+const GEMINI_MAX_TIMEOUT_MS = 600_000;
+const SAFE_MODEL_NAME = /^[a-z0-9.\-]+$/i;
+
+export interface GeminiConfig {
+  apiKey: string | undefined;
+  model: string;
+  timeoutMs: number;
+}
+
+export function readGeminiConfig(env: NodeJS.ProcessEnv = process.env): GeminiConfig {
+  const rawModel = env.GEMINI_MODEL?.trim() ?? '';
+  const model = rawModel !== '' && rawModel.length <= 100 && SAFE_MODEL_NAME.test(rawModel)
+    ? rawModel
+    : GEMINI_DEFAULTS.model;
+  const rawTimeout = env.GEMINI_TIMEOUT_MS?.trim() ?? '';
+  const parsedTimeout = /^\d+$/.test(rawTimeout) ? Number(rawTimeout) : Number.NaN;
+  const timeoutMs = Number.isSafeInteger(parsedTimeout) &&
+    parsedTimeout > 0 &&
+    parsedTimeout <= GEMINI_MAX_TIMEOUT_MS
+    ? parsedTimeout
+    : GEMINI_DEFAULTS.timeoutMs;
+  const apiKey = env.GEMINI_API_KEY?.trim() || undefined;
+  return { apiKey, model, timeoutMs };
+}
+
+/** Removes the API key from provider/runtime text before it can reach an error or log. */
+function redactKey(text: string, apiKey: string): string {
+  return text.split(apiKey).join('[redacted]');
+}
+
+function isAbortTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+}
 
 export interface ModelMessage {
   role: 'user' | 'assistant';
@@ -87,11 +129,13 @@ export async function callModel(
   messages: ModelMessage[],
   tools: ToolDef[],
 ): Promise<CallModelResult> {
-  if (!GEMINI_API_KEY) {
+  const config = readGeminiConfig();
+  const apiKey = config.apiKey;
+  if (!apiKey) {
     throw new Error('GEMINI_API_KEY not set — export it before running the server.');
   }
 
-  const reservation = reserveAiModelCall({ model: MODEL });
+  const reservation = reserveAiModelCall({ model: config.model });
 
   const body: Record<string, unknown> = {
     system_instruction: { parts: [{ text: system }] },
@@ -114,18 +158,22 @@ export async function callModel(
 
   let finished = false;
   try {
+    // The key travels only in the x-goog-api-key header — never in the URL,
+    // where proxies, access logs and error messages could capture it. The
+    // abort signal bounds the whole exchange, including reading the body.
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(config.model)}:generateContent`,
       {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(config.timeoutMs),
       },
     );
 
     if (!response.ok) {
       const text = await response.text();
-      throw new Error(`LLM call failed (${response.status}): ${text.slice(0, 300)}`);
+      throw new Error(`LLM call failed (${response.status}): ${redactKey(text, apiKey).slice(0, 300)}`);
     }
 
     const data = (await response.json()) as any;
@@ -158,7 +206,18 @@ export async function callModel(
       stop_reason: content.some((b) => b.type === 'tool_use') ? 'tool_use' : 'end_turn',
     };
   } catch (error) {
+    // Timeouts, network errors and non-OK responses all close the reserved
+    // call as a failure, exactly once — the allowance is still consumed.
     if (!finished) finishAiModelCall({ id: reservation.id, status: 'failed' });
+    if (isAbortTimeout(error)) {
+      throw new Error(
+        `LLM call timed out after ${config.timeoutMs}ms — the provider did not answer in time; ` +
+          'treat this turn as failed (raise GEMINI_TIMEOUT_MS only if this keeps happening).',
+      );
+    }
+    if (error instanceof Error && error.message.includes(apiKey)) {
+      throw new Error(redactKey(error.message, apiKey));
+    }
     throw error;
   }
 }

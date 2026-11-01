@@ -142,6 +142,14 @@ export const allTestTargets: readonly TestTarget[] = [
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/llm-reliability.test.ts',
+    securityAreas: [
+      'provider timeouts and API key confidentiality',
+      'outbound idempotency and uncertain delivery',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/operations.test.ts',
     securityAreas: ['health monitoring and verified recovery backups'],
     includeInSecurityRegression: true,

@@ -18,10 +18,29 @@ const WAHA_SESSION = process.env.WAHA_SESSION ?? 'default';
 // auth enabled — WAHA accepts requests without it otherwise.
 const WAHA_API_KEY = process.env.WAHA_API_KEY;
 
+export const WAHA_SEND_TIMEOUT_DEFAULT_MS = 15_000;
+const WAHA_SEND_TIMEOUT_MAX_MS = 300_000;
+
+/**
+ * Finite outbound send timeout. Missing, malformed, zero or oversized values
+ * use the default — never an unlimited wait that would hold the send lock.
+ */
+export function readWahaSendTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.WAHA_SEND_TIMEOUT_MS?.trim() ?? '';
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= WAHA_SEND_TIMEOUT_MAX_MS
+    ? parsed
+    : WAHA_SEND_TIMEOUT_DEFAULT_MS;
+}
+
 /** WAHA/whatsapp-web.js address individual chats as "<digits>@c.us". */
 function chatIdFor(phone: string): string {
   const digits = phone.replace(/\D/g, '');
   return `${digits}@c.us`;
+}
+
+function isTimeout(error: unknown): boolean {
+  return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
 }
 
 function phoneFromChatId(chatId: string): string {
@@ -32,6 +51,8 @@ export interface WahaAdapterConfig {
   baseUrl?: string;
   session?: string;
   apiKey?: string;
+  /** Outbound send timeout; invalid values fall back to WAHA_SEND_TIMEOUT_MS / the default. */
+  sendTimeoutMs?: number;
 }
 
 /**
@@ -43,11 +64,18 @@ export class WahaAdapter implements ChannelAdapter {
   private readonly baseUrl: string;
   private readonly session: string;
   private readonly apiKey?: string;
+  private readonly sendTimeoutMs: number;
 
   constructor(config?: WahaAdapterConfig) {
     this.baseUrl = config?.baseUrl ?? WAHA_BASE_URL;
     this.session = config?.session ?? WAHA_SESSION;
     this.apiKey = config?.apiKey ?? WAHA_API_KEY;
+    const configured = config?.sendTimeoutMs;
+    this.sendTimeoutMs =
+      configured !== undefined && Number.isSafeInteger(configured) && configured > 0 &&
+        configured <= WAHA_SEND_TIMEOUT_MAX_MS
+        ? configured
+        : readWahaSendTimeoutMs();
   }
 
   private async fetch(path: string, init: RequestInit = {}): Promise<Response> {
@@ -81,19 +109,43 @@ export class WahaAdapter implements ChannelAdapter {
   }
 
   private async send(path: string, body: Record<string, unknown>): Promise<ChannelSendReceipt> {
+    // A timed-out send is an UNCERTAIN delivery: WAHA may already have handed
+    // the message to WhatsApp. It therefore takes the same path as any other
+    // network error — ChannelSendError(deliveryUncertain=true) — which
+    // markOutboundFailure records as 'uncertain', so it is never auto-retried
+    // into a duplicate message.
     let response: Response;
     try {
       response = await this.fetch(path, {
         method: 'POST',
         body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.sendTimeoutMs),
       });
     } catch (error) {
       throw new ChannelSendError(
-        error instanceof Error ? error.message : 'WAHA send failed before a response.',
+        isTimeout(error)
+          ? `WAHA send timed out after ${this.sendTimeoutMs}ms; delivery outcome unknown.`
+          : error instanceof Error ? error.message : 'WAHA send failed before a response.',
         true,
       );
     }
-    const responseText = await response.text();
+    let responseText: string;
+    try {
+      responseText = await response.text();
+    } catch (error) {
+      // Headers arrived but the body did not (e.g. timeout mid-body). A non-OK
+      // status is still a definitive rejection; an OK status means the
+      // provider accepted it, so the outcome is at worst uncertain.
+      if (!response.ok) {
+        throw new ChannelSendError(`WAHA send rejected (${response.status}).`, false);
+      }
+      throw new ChannelSendError(
+        isTimeout(error)
+          ? `WAHA send timed out after ${this.sendTimeoutMs}ms while reading the response; delivery outcome unknown.`
+          : 'WAHA send response could not be read; delivery outcome unknown.',
+        true,
+      );
+    }
     if (!response.ok) {
       throw new ChannelSendError(
         `WAHA send rejected (${response.status}): ${responseText.slice(0, 300)}`,
