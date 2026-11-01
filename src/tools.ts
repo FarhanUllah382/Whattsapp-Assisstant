@@ -15,7 +15,7 @@ import { db } from './db';
 import { getPendingFollowups } from './followups';
 import { normalizeSize } from './inventory';
 import { publicInventoryFields } from './inventory-visibility';
-import { getBalance, recordCredit, recordDebitMinor } from './ledger';
+import { getBalance, recordDebitMinor } from './ledger';
 import { minorToRupees, multiplyMinor } from './money';
 import { createLogger } from './obs/logger';
 import { buildDeterministicOrderSummary } from './order-summary';
@@ -313,10 +313,8 @@ export type ValidateOrderItemsResult =
   | { ok: true; items: ServerPricedOrderItem[]; totalMinor: number; total: number }
   | { ok: false; error: string };
 
-// Shared between record_order's own execute() and the Version 2.3 safety
-// net in agent.ts's CLOSE step (a possible order the model confirmed in
-// conversation but never called record_order for) — one validation source
-// of truth, so the safety net can never be looser than the real tool.
+// Shared by prepare_order (draft pricing) and confirm_order (re-validation
+// at booking time) — one validation source of truth for server pricing.
 export function validateOrderItems(items: unknown): ValidateOrderItemsResult {
   if (!Array.isArray(items) || items.length === 0) {
     return { ok: false, error: 'Please list at least one item to order.' };
@@ -392,84 +390,6 @@ export function insertValidatedOrder(
     return orderId;
   })();
 }
-
-/**
- * Runs one bookkeeping effect atomically for a provider event. The receipt
- * and the order/payment write commit in the same SQLite transaction, so a
- * crash can leave either both or neither—never an unreceipted committed write.
- */
-export function runBookkeepingOnce<T>(
-  ctx: ToolContext,
-  effect: 'record_order' | 'record_payment',
-  operation: () => T,
-): T {
-  if (!ctx.idempotencyKey) return operation();
-
-  const receiptId = `${ctx.idempotencyKey}:${effect}`;
-  return db.transaction(() => {
-    const existing = db
-      .prepare('select result_json from bookkeeping_receipts where id = ?')
-      .get(receiptId) as { result_json: string } | undefined;
-    if (existing) return JSON.parse(existing.result_json) as T;
-
-    const result = operation();
-    db.prepare(
-      'insert into bookkeeping_receipts (id, customer_id, effect, result_json) values (?, ?, ?, ?)',
-    ).run(receiptId, ctx.customerId, effect, JSON.stringify(result));
-    return result;
-  })();
-}
-
-export const recordOrder: ToolDef = {
-  name: 'record_order',
-  description:
-    'Record a new order for this customer. Only call this once the customer has ' +
-    'clearly confirmed what they want (product, size, color, quantity). Send only the ' +
-    'product_id and quantity; the server always loads the authoritative catalog price.',
-  input_schema: {
-    type: 'object',
-    properties: {
-      items: {
-        type: 'array',
-        description: 'list of items ordered',
-        items: {
-          type: 'object',
-          properties: {
-            product_id: { type: 'number' },
-            qty: { type: 'number' },
-          },
-          required: ['product_id', 'qty'],
-        },
-      },
-    },
-    required: ['items'],
-  },
-  execute: ({ items }, ctx) => {
-    try {
-      const check = validateOrderItems(items);
-      if (!check.ok) {
-        return { ok: false, error: check.error };
-      }
-      return runBookkeepingOnce(ctx, 'record_order', () => {
-        const orderId = insertValidatedOrder(ctx.customerId, check.items, check.totalMinor, {
-          actorType: 'customer',
-          actorCustomerId: ctx.customerId,
-          source: ctx.idempotencyKey ? 'whatsapp_customer_tool' : 'direct_customer_tool',
-          sourceEventKey: ctx.idempotencyKey,
-          evidence: 'Customer confirmed the order contents before placement.',
-        });
-        return {
-          ok: true,
-          order_id: orderId,
-          order_reference: getOrderPublicReference(orderId),
-          total: check.total,
-        };
-      });
-    } catch {
-      return { ok: false, error: 'Could not record the order — please try again.' };
-    }
-  },
-};
 
 function cleanRequiredText(value: unknown, label: string, min: number, max: number): string | { error: string } {
   if (typeof value !== 'string') return { error: `${label} must be plain text.` };
@@ -935,29 +855,6 @@ export const updateOrderStatus: ToolDef = {
       from: result.from,
       to: result.to,
     };
-  },
-};
-
-export const recordPayment: ToolDef = {
-  name: 'record_payment',
-  description: 'Record that this customer paid some amount, reducing what they owe.',
-  input_schema: {
-    type: 'object',
-    properties: { amount: { type: 'number' } },
-    required: ['amount'],
-  },
-  execute: ({ amount }, ctx) => {
-    try {
-      if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
-        return { ok: false, error: 'Payment amount must be a number greater than 0.' };
-      }
-      return runBookkeepingOnce(ctx, 'record_payment', () => {
-        recordCredit(ctx.customerId, amount);
-        return { ok: true };
-      });
-    } catch {
-      return { ok: false, error: 'Could not record the payment — please try again.' };
-    }
   },
 };
 

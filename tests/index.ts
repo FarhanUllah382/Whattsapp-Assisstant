@@ -23,12 +23,15 @@ import {
   confirmOrder,
   isExplicitOrderConfirmation,
   ownerTools,
+  confirmPendingOrderDraft,
+  insertValidatedOrder,
   prepareOrder,
-  recordOrder,
-  recordPayment,
   updateOrderStatus,
+  validateOrderItems,
 } from '../src/tools';
+import * as toolExports from '../src/tools';
 import { createPaymentClaim, pendingPaymentClaims, resolvePaymentClaim } from '../src/payments';
+import { handleOwnerPaymentCommand } from '../src/payment-resolution';
 import { minorToRupees, multiplyMinor, positiveRupeesToMinor, rupeesToMinor } from '../src/money';
 import {
   buildDeterministicOrderSummary,
@@ -58,6 +61,51 @@ function it(name: string, fn: () => void): void {
     console.error(`    ✖ ${name}`);
     console.error(`      ${err?.message ?? err}`);
   }
+}
+
+// Books an order through the live two-step path: prepare_order saves a
+// server-priced draft on one inbound event, then confirmPendingOrderDraft
+// (what confirm_order wraps) books it on a later event with explicit
+// confirmation wording.
+function bookOrderViaTwoStep(
+  customerId: number,
+  items: unknown[],
+  eventKey: string,
+): { ok: boolean; order_id?: number; total?: number; already_confirmed?: boolean; error?: string } {
+  const prepared = prepareOrder.execute({
+    items,
+    recipient_name: 'Test Customer',
+    contact_phone: '03120000000',
+    delivery_address: 'House 1, Main Road, Sector F',
+    city: 'Islamabad',
+    payment_method: 'cash on delivery',
+  }, { customerId, idempotencyKey: `${eventKey}:prepare-event` }) as { ok: boolean; error?: string };
+  if (!prepared.ok) return prepared;
+  return confirmPendingOrderDraft({
+    customerId,
+    idempotencyKey: `${eventKey}:confirm-event`,
+    inboundText: 'Confirm order',
+  }) as { ok: boolean; order_id?: number; total?: number };
+}
+
+// Creates a 'placed' order through the same domain functions the booking
+// path uses (server pricing + order/debit/initial-audit insert), for tests
+// that need to walk the FSM from 'placed'.
+function placeOrderForTest(customerId: number, items: unknown[], idempotencyKey?: string): number {
+  const check = validateOrderItems(items);
+  if (!check.ok) throw new Error(check.error);
+  return insertValidatedOrder(customerId, check.items, check.totalMinor, {
+    actorType: 'customer',
+    actorCustomerId: customerId,
+    source: idempotencyKey ? 'whatsapp_customer_tool' : 'direct_customer_tool',
+    sourceEventKey: idempotencyKey,
+    evidence: 'Customer confirmed the order contents before placement.',
+  });
+}
+
+function exportsAnyToolNamed(name: string): boolean {
+  return Object.values(toolExports).some((value: any) =>
+    value?.name === name || (Array.isArray(value) && value.some((tool: any) => tool?.name === name)));
 }
 
 console.log('\n============================================================');
@@ -650,10 +698,11 @@ it('ignores a model-supplied price and records the product database price', () =
     // `price` is deliberately malicious extra input. The tool schema no longer
     // advertises it, and server validation must ignore it even if a caller
     // bypasses the schema and invokes the tool directly.
-    const result = recordOrder.execute(
-      { items: [{ product_id: productId, qty: 2, price: 1 }] },
-      { customerId, idempotencyKey: `price-test-event-${Date.now()}` },
-    ) as { ok: boolean; order_id?: number; total?: number };
+    const result = bookOrderViaTwoStep(
+      customerId,
+      [{ product_id: productId, qty: 2, price: 1 }],
+      `price-test-event-${Date.now()}`,
+    );
 
     assert.equal(result.ok, true);
     assert.equal(result.total, 6400);
@@ -688,10 +737,7 @@ it('records an order when the model supplies only product_id and quantity', () =
     const productId = db
       .prepare('insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)')
       .run(`server-priced-shirt-${Date.now()}`, 'large', 'navy', rupeesToMinor(2750), 3).lastInsertRowid as number;
-    const result = recordOrder.execute(
-      { items: [{ product_id: productId, qty: 1 }] },
-      { customerId },
-    ) as { ok: boolean; order_id?: number; total?: number };
+    const result = bookOrderViaTwoStep(customerId, [{ product_id: productId, qty: 1 }], `price-shape-${Date.now()}`);
     assert.equal(result.ok, true);
     assert.equal(typeof result.order_id, 'number');
     assert.equal(result.total, 2750);
@@ -712,28 +758,65 @@ it('deduplicates order/payment effects for one provider event but permits a new 
     const product = { id: productId, price_minor: productPriceMinor };
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`retry-test-${Date.now()}`)
       .lastInsertRowid as number;
-    const input = { items: [{ product_id: product.id, qty: 1 }] };
+    const items = [{ product_id: product.id, qty: 1 }];
     const eventKey = `waha:test-order-${Date.now()}`;
 
-    const firstOrder = recordOrder.execute(input, { customerId, idempotencyKey: eventKey });
-    const retriedOrder = recordOrder.execute(input, { customerId, idempotencyKey: eventKey });
-    assert.deepEqual(retriedOrder, firstOrder);
+    const firstOrder = bookOrderViaTwoStep(customerId, items, eventKey);
+    assert.equal(firstOrder.ok, true);
+    // WAHA redelivers the same confirmation event after a crash.
+    const retriedOrder = confirmPendingOrderDraft({
+      customerId,
+      idempotencyKey: `${eventKey}:confirm-event`,
+      inboundText: 'Confirm order',
+    }) as { ok: boolean; order_id?: number; already_confirmed?: boolean };
+    assert.equal(retriedOrder.ok, true);
+    assert.equal(retriedOrder.order_id, firstOrder.order_id);
+    assert.equal(retriedOrder.already_confirmed, true);
     assert.equal(
       (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n,
       1,
     );
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'debit'").get(customerId) as { n: number }).n,
+      1,
+    );
 
-    recordOrder.execute(input, { customerId, idempotencyKey: `${eventKey}-separate-message` });
+    assert.equal(bookOrderViaTwoStep(customerId, items, `${eventKey}-separate-message`).ok, true);
     assert.equal(
       (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n,
       2,
     );
 
-    const paymentKey = `waha:test-payment-${Date.now()}`;
+    // Payments: a customer can only create a claim (keyed per provider event,
+    // exactly as claim_payment does); the ledger credit is written once, on
+    // owner approval, and neither a redelivered claim event nor a redelivered
+    // owner confirmation duplicates it.
+    const ownerId = db.prepare('insert into customers (phone) values (?)').run(`retry-owner-${Date.now()}`)
+      .lastInsertRowid as number;
+    const paymentKey = `waha:test-payment-${Date.now()}:payment_claim`;
     const paymentRupees = minorToRupees(product.price_minor);
-    const firstPayment = recordPayment.execute({ amount: paymentRupees }, { customerId, idempotencyKey: paymentKey });
-    const retriedPayment = recordPayment.execute({ amount: paymentRupees }, { customerId, idempotencyKey: paymentKey });
+    const firstPayment = createPaymentClaim({ customerId, amount: paymentRupees, eventKey: paymentKey });
+    const retriedPayment = createPaymentClaim({ customerId, amount: paymentRupees, eventKey: paymentKey });
     assert.deepEqual(retriedPayment, firstPayment);
+    assert.equal(
+      (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as {
+        n: number;
+      }).n,
+      0,
+    );
+    const verifiedRef = `EP-RETRY-${Date.now()}`;
+    assert.equal(handleOwnerPaymentCommand({
+      ownerCustomerId: ownerId,
+      text: `APPROVE CLAIM ${firstPayment.id} REF ${verifiedRef}`,
+      eventKey: `${paymentKey}:owner-prepare`,
+    }).mutation, 'none');
+    const ownerConfirm = {
+      ownerCustomerId: ownerId,
+      text: `CONFIRM APPROVE CLAIM ${firstPayment.id} REF ${verifiedRef}`,
+      eventKey: `${paymentKey}:owner-confirm`,
+    };
+    assert.equal(handleOwnerPaymentCommand(ownerConfirm).mutation, 'approved');
+    assert.equal(handleOwnerPaymentCommand(ownerConfirm).mutation, 'none');
     assert.equal(
       (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as {
         n: number;
@@ -1048,11 +1131,7 @@ it('fails closed without audit context and enforces actor-specific transition au
     const productId = db.prepare(
       'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
     ).run('audit-shirt', 'medium', 'navy', rupeesToMinor(1000), 5).lastInsertRowid as number;
-    const order = recordOrder.execute(
-      { items: [{ product_id: productId, qty: 1 }] },
-      { customerId, idempotencyKey: `waha:audit-create-${Date.now()}` },
-    ) as { ok: boolean; order_id: number };
-    assert.equal(order.ok, true);
+    const order = { order_id: placeOrderForTest(customerId, [{ product_id: productId, qty: 1 }], `waha:audit-create-${Date.now()}`) };
 
     const creation = db.prepare('select * from order_status_events where order_id = ?').get(order.order_id) as {
       from_status: string | null;
@@ -1103,11 +1182,7 @@ it('records every permitted actor transition with source and evidence', () => {
     const productId = db.prepare(
       'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
     ).run('audit-kurta', 'large', 'black', rupeesToMinor(2000), 2).lastInsertRowid as number;
-    const order = recordOrder.execute(
-      { items: [{ product_id: productId, qty: 1 }] },
-      { customerId, idempotencyKey: `waha:audit-chain-${Date.now()}` },
-    ) as { ok: boolean; order_id: number };
-    assert.equal(order.ok, true);
+    const order = { order_id: placeOrderForTest(customerId, [{ product_id: productId, qty: 1 }], `waha:audit-chain-${Date.now()}`) };
     assert.equal(transitionOrderStatus(order.order_id, 'confirmed', customerAudit(customerId, 'Customer confirmed order.')).ok, true);
     const providerWithoutEventKey = transitionOrderStatus(order.order_id, 'paid', {
       actorType: 'payment_provider',
@@ -1187,14 +1262,15 @@ it('rolls back order and debit when the initial audit event cannot be written', 
     db.exec(`
       create trigger test_reject_initial_order_audit
       before insert on order_status_events
-      when new.source = 'direct_customer_tool'
+      when new.source = 'whatsapp_fulfillment_confirmation' and new.from_status is null
       begin
         select raise(abort, 'simulated initial audit failure');
       end;
     `);
     const beforeOrders = (db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n;
-    const result = recordOrder.execute({ items: [{ product_id: productId, qty: 1 }] }, { customerId }) as { ok: boolean };
+    const result = bookOrderViaTwoStep(customerId, [{ product_id: productId, qty: 1 }], `audit-create-rollback-${Date.now()}`);
     assert.equal(result.ok, false);
+    assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 2);
     assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, beforeOrders);
     assert.equal((db.prepare('select count(*) n from ledger where customer_id = ?').get(customerId) as { n: number }).n, 0);
   } finally {
@@ -1206,6 +1282,8 @@ it('rolls back order and debit when the initial audit event cannot be written', 
 console.log('\n▶ Trusted Payment Claims');
 it('exposes claims—not verified-payment mutation—to customers and keeps resolution owner-only', () => {
   assert.equal(baseTools.some((tool) => tool.name === 'record_payment'), false);
+  assert.equal(ownerTools.some((tool) => tool.name === 'record_payment'), false);
+  assert.equal(exportsAnyToolNamed('record_payment'), false);
   assert.equal(baseTools.some((tool) => tool.name === 'claim_payment'), true);
   assert.equal(baseTools.some((tool) => tool.name === 'resolve_payment_claim'), false);
   assert.equal(ownerTools.some((tool) => tool.name === 'pending_payment_claims'), true);
@@ -1355,6 +1433,8 @@ it('keeps a claim pending when owner approval cannot write its ledger credit', (
 console.log('\n▶ Two-step Fulfillment');
 it('exposes prepare/confirm but not the immediate record_order tool to customers', () => {
   assert.equal(baseTools.some((tool) => tool.name === 'record_order'), false);
+  assert.equal(ownerTools.some((tool) => tool.name === 'record_order'), false);
+  assert.equal(exportsAnyToolNamed('record_order'), false);
   assert.equal(baseTools.some((tool) => tool.name === 'prepare_order'), true);
   assert.equal(baseTools.some((tool) => tool.name === 'confirm_order'), true);
 });
@@ -1787,11 +1867,7 @@ it('blocks a false confirmation reply unless this inbound event actually confirm
     const eventKey = 'confirmation-claim-event';
     assert.equal(checkOrderConfirmationReply('Bhai, order confirm ho gaya hai!', { customerId, idempotencyKey: eventKey }).ok, false);
     assert.equal(checkOrderConfirmationReply('Please confirm your order.', { customerId, idempotencyKey: eventKey }).ok, true);
-    const order = recordOrder.execute(
-      { items: [{ product_id: productId, qty: 1 }] },
-      { customerId, idempotencyKey: 'confirmation-claim-create' },
-    ) as { ok: boolean; order_id: number };
-    assert.equal(order.ok, true);
+    const order = { order_id: placeOrderForTest(customerId, [{ product_id: productId, qty: 1 }], 'confirmation-claim-create') };
     assert.equal(transitionOrderStatus(order.order_id, 'confirmed', {
       actorType: 'customer',
       actorCustomerId: customerId,

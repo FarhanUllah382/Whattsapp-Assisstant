@@ -1,8 +1,10 @@
 import { db } from '../src/db';
-import { checkStock, recordOrder, updateOrderStatus, recordPayment } from '../src/tools';
+import { checkStock, confirmOrder, prepareOrder, updateOrderStatus } from '../src/tools';
 import { getBalance } from '../src/ledger';
 import { getPendingFollowups } from '../src/followups';
-import { insertValidatedOrder, validateOrderItems } from '../src/tools';
+import { validateOrderItems } from '../src/tools';
+import { claimPayment } from '../src/payments';
+import { handleOwnerPaymentCommand } from '../src/payment-resolution';
 import { rupeesToMinor } from '../src/money';
 
 function assert(condition: boolean, message: string): void {
@@ -15,7 +17,10 @@ function assert(condition: boolean, message: string): void {
 async function runV2Verification(): Promise<void> {
   console.log('=== Starting Comprehensive Version 2 Verification ===\n');
 
-  // Clean test setup
+  // Everything below runs inside one transaction that is rolled back at the
+  // end. Approved payment-claim history is append-only (SQLite triggers
+  // forbid deleting it), so row-by-row cleanup is not possible.
+  db.exec('begin');
   const testRunId = Date.now();
   const testPhone = `test-v2-${testRunId}`;
   const testProductName = `test-shirt-${testRunId}`;
@@ -26,6 +31,8 @@ async function runV2Verification(): Promise<void> {
     'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)'
   ).run(testProductName, 'medium', 'black', rupeesToMinor(2500), 10);
   const productId = productResult.lastInsertRowid as number;
+  const ownerId = db.prepare('insert into customers (phone, name) values (?, ?)')
+    .run(`test-v2-owner-${testRunId}`, 'Test Owner').lastInsertRowid as number;
 
   const ctx = { customerId };
 
@@ -43,40 +50,59 @@ async function runV2Verification(): Promise<void> {
     const initialStock: any = db.prepare('select stock from products where id = ?').get(productId);
     assert(initialStock.stock === 10, 'Internal stock remains exactly 10');
 
-    // 2. Order Placement (status: placed)
-    console.log('\nTest 2: Order placement & initial ledger debit');
-    const orderResult: any = recordOrder.execute({
+    // 2. Two-step booking, step 1: prepare_order saves a draft only
+    console.log('\nTest 2: prepare_order saves a server-priced draft without booking');
+    const prepareResult: any = prepareOrder.execute({
       items: [{ product_id: productId, qty: 2 }],
-    }, ctx);
-    assert(orderResult.ok === true, 'record_order succeeded');
-    const orderId = orderResult.order_id;
-    const orderReference = orderResult.order_reference;
-    assert(typeof orderId === 'number', 'Generated orderId');
-    assert(/^ORD-[0-9A-F]{20}$/.test(orderReference), 'Generated public order reference');
+      recipient_name: 'Test Customer',
+      contact_phone: '03120000000',
+      delivery_address: 'House 1, Main Road, Sector F',
+      city: 'Islamabad',
+      payment_method: 'cash on delivery',
+    }, { customerId, idempotencyKey: `test-v2-${testRunId}-prepare` });
+    assert(prepareResult.ok === true, 'prepare_order succeeded');
+    assert(prepareResult.total === 5000, 'Draft total is the server catalog price (Rs 5000)');
+    const ordersAfterPrepare: any = db.prepare('select count(*) n from orders where customer_id = ?').get(customerId);
+    assert(ordersAfterPrepare.n === 0, 'No order exists before explicit confirmation');
+    assert(getBalance(customerId) === 0, 'No ledger debit before explicit confirmation');
+    const stockAfterPrepare: any = db.prepare('select stock from products where id = ?').get(productId);
+    assert(stockAfterPrepare.stock === 10, 'Stock remains unchanged while only a draft exists');
 
-    const orderRow: any = db.prepare('select * from orders where id = ?').get(orderId);
-    assert(orderRow.status === 'placed', 'Initial status is "placed"');
+    const bareYes: any = confirmOrder.execute({}, {
+      customerId,
+      idempotencyKey: `test-v2-${testRunId}-bare-yes`,
+      inboundText: 'yes',
+    });
+    assert(bareYes.ok === false, 'A bare "yes" cannot book the order');
+
+    // 3. Two-step booking, step 2: explicit confirm books + reserves stock
+    console.log('\nTest 3: confirm_order books the order, debits the ledger and reserves stock');
+    const confirmResult: any = confirmOrder.execute({}, {
+      customerId,
+      idempotencyKey: `test-v2-${testRunId}-confirm`,
+      inboundText: 'Confirm order',
+    });
+    assert(confirmResult.ok === true, 'confirm_order succeeded');
+    const orderReference = confirmResult.order_reference;
+    assert(/^ORD-[0-9A-F]{20}$/.test(orderReference), 'Generated public order reference');
+    assert(!Object.hasOwn(confirmResult, 'order_id'), 'Internal order id is not exposed to the model');
+    const orderRow: any = db.prepare('select * from orders where public_ref = ?').get(orderReference);
+    const orderId = orderRow?.id;
+    assert(typeof orderId === 'number', 'Generated orderId');
+    assert(orderRow.status === 'confirmed', 'Status after explicit confirmation is "confirmed"');
     assert(orderRow.total_minor === rupeesToMinor(5000), 'Order total is exactly 500000 paisas (Rs 5000)');
     const placedAudit: any = db.prepare(
       'select from_status, to_status, actor_type, source, evidence from order_status_events where order_id = ? order by id limit 1',
     ).get(orderId);
     assert(placedAudit?.from_status === null && placedAudit?.to_status === 'placed', 'Initial placed status is audited');
-    assert(placedAudit?.actor_type === 'customer' && placedAudit?.source === 'direct_customer_tool', 'Order creation records customer actor and source');
-
-    const balanceAfterOrder = getBalance(customerId);
-    assert(balanceAfterOrder === 5000, 'Ledger balance owed is 5000 (debit recorded)');
-
-    const stockAfterPlaced: any = db.prepare('select stock from products where id = ?').get(productId);
-    assert(stockAfterPlaced.stock === 10, 'Stock remains unchanged at "placed" status');
-
-    // 3. Order Confirmation (status: confirmed) -> Stock Decrements
-    console.log('\nTest 3: Confirming order decrements live stock');
-    const confirmResult: any = updateOrderStatus.execute({ order_reference: orderReference, status: 'confirmed' }, ctx);
-    assert(confirmResult.ok === true, 'updateOrderStatus to confirmed succeeded');
+    assert(placedAudit?.actor_type === 'customer' && placedAudit?.source === 'whatsapp_fulfillment_confirmation', 'Order creation records customer actor and source');
     const confirmAudit: any = db.prepare(
       "select actor_type, source, evidence from order_status_events where order_id = ? and to_status = 'confirmed'",
     ).get(orderId);
-    assert(confirmAudit?.actor_type === 'customer' && confirmAudit?.source === 'direct_customer_tool', 'Confirmation records customer actor and source');
+    assert(confirmAudit?.actor_type === 'customer' && confirmAudit?.source === 'whatsapp_fulfillment_confirmation', 'Confirmation records customer actor and source');
+
+    const balanceAfterOrder = getBalance(customerId);
+    assert(balanceAfterOrder === 5000, 'Ledger balance owed is 5000 (debit recorded)');
 
     const stockAfterConfirm: any = db.prepare('select stock from products where id = ?').get(productId);
     assert(stockAfterConfirm.stock === 8, 'Stock decremented from 10 to 8');
@@ -89,10 +115,30 @@ async function runV2Verification(): Promise<void> {
     const skipAttempt: any = updateOrderStatus.execute({ order_reference: orderReference, status: 'delivered' }, ctx);
     assert(skipAttempt.ok === false, 'Cannot skip from confirmed directly to delivered');
 
-    // 5. Payment Recording (ledger credit)
-    console.log('\nTest 5: Recording payment and reducing balance');
-    const paymentResult: any = recordPayment.execute({ amount: 3000 }, ctx);
-    assert(paymentResult.ok === true, 'record_payment of 3000 succeeded');
+    // 5. Payment: customer claim, then owner-verified two-step approval
+    console.log('\nTest 5: Payment claim + owner approval reduces balance');
+    const paymentResult: any = await claimPayment.execute(
+      { amount: 3000, method: 'Easypaisa' },
+      { customerId, idempotencyKey: `test-v2-${testRunId}-claim` },
+    );
+    assert(paymentResult.ok === true && paymentResult.status === 'pending', 'claim_payment of 3000 created a pending claim');
+    assert(paymentResult.ledger_credited === false, 'claim_payment reports no ledger credit');
+    assert(getBalance(customerId) === 5000, 'Unverified claim does not change the balance');
+
+    const verifiedRef = `EP-V2-${testRunId}`;
+    const preparedApproval = handleOwnerPaymentCommand({
+      ownerCustomerId: ownerId,
+      text: `APPROVE CLAIM ${paymentResult.claim_id} REF ${verifiedRef}`,
+      eventKey: `test-v2-${testRunId}-owner-prepare`,
+    });
+    assert(preparedApproval.mutation === 'none', 'Owner APPROVE step alone changes nothing');
+    assert(getBalance(customerId) === 5000, 'Balance unchanged before owner CONFIRM');
+    const confirmedApproval = handleOwnerPaymentCommand({
+      ownerCustomerId: ownerId,
+      text: `CONFIRM APPROVE CLAIM ${paymentResult.claim_id} REF ${verifiedRef}`,
+      eventKey: `test-v2-${testRunId}-owner-confirm`,
+    });
+    assert(confirmedApproval.mutation === 'approved', 'Owner CONFIRM APPROVE credits the claim');
 
     const balanceAfterPayment = getBalance(customerId);
     assert(balanceAfterPayment === 2000, 'Customer balance owed reduced from 5000 to 2000');
@@ -132,15 +178,7 @@ async function runV2Verification(): Promise<void> {
 
     console.log('\n=== ALL VERSION 2 TESTS PASSED PERFECTLY ===\n');
   } finally {
-    // Clean up test rows
-    db.prepare('delete from ledger where customer_id = ?').run(customerId);
-    db.prepare('delete from order_status_events where order_id in (select id from orders where customer_id = ?)').run(customerId);
-    db.prepare('delete from orders where customer_id = ?').run(customerId);
-    db.prepare('delete from messages where customer_id = ?').run(customerId);
-    db.prepare('delete from checkpoints where customer_id = ?').run(customerId);
-    db.prepare('delete from order_lookup_attempts where customer_id = ?').run(customerId);
-    db.prepare('delete from customers where id = ?').run(customerId);
-    db.prepare('delete from products where id = ?').run(productId);
+    db.exec('rollback');
   }
 }
 
