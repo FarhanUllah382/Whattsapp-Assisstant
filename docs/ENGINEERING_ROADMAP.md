@@ -3112,6 +3112,30 @@ claim beside an older contradictory one.
   duplicate acknowledgement, reassignment, stale decision, and exact
   customer-visible wording for every real state.
 
+#### HARD-12a Owner fulfilment commands (shipped / delivered)
+
+- **Status (2026-11-01):** `BUILT + LOCALLY VERIFIED; LIVE VERIFICATION
+  PENDING` (part of HARD-01 scenario 7).
+- **Built:** `src/fulfilment-commands.ts`, called from `runOwnerTurn` before
+  the model and before payment commands. Exact, case-insensitive owner-only
+  grammar: `SHIP ORDER <ORD-ref>` / `DELIVER ORDER <ORD-ref>` returns a
+  server-built summary; only a later `CONFIRM SHIP ORDER <ORD-ref>` /
+  `CONFIRM DELIVER ORDER <ORD-ref>` applies the change once via
+  `transitionOrderStatus` (actor `owner`, provider message id as
+  `source_event_key`, no stock/ledger effect). `CANCEL FULFILMENT ACTION`
+  discards the pending intent. Intents live in the additive
+  `order_fulfilment_intents` table (10-minute expiry, one pending per owner).
+  Natural-language requests and customer senders change nothing. No customer
+  notification is sent; owner cancellation is not offered.
+- **Tests:** `tests/fulfilment-commands.test.ts` (two-step, same-message,
+  wrong/missing reference, customer sender, natural language, replay and
+  duplicate confirm, illegal transitions, delivered → refund-eligible).
+- **Owner decision required (HARD-09/HARD-10):** the FSM only allows
+  `paid → shipped`, and no WhatsApp path sets `paid`, so a COD order (the only
+  enabled method) stays `confirmed` and cannot be shipped. Decide whether COD
+  orders may go `confirmed → shipped` (and when COD cash is recorded in the
+  ledger), or define an authenticated `paid` transition.
+
 #### HARD-13 Move the client runtime to an approved production WhatsApp path
 
 - **Status:** `DECISION REQUIRED; CURRENT WAHA PATH IS DEVELOPMENT/PILOT INFRASTRUCTURE`.

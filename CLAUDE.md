@@ -133,8 +133,23 @@ Core conventions (see `docs/ARCHITECTURE_GUIDELINES.md`):
 ```
 src/
   server.ts               Express entry: /health, /ready, /operations/metrics, /webhook/whatsapp
-  agent.ts                runTurn / runOwnerTurn, prompts, send guardrails (largest file, ~1500 lines)
-  tools.ts                All model tools + validation (~1160 lines)
+  agent.ts                Public barrel (runTurn, runOwnerTurn, send helpers) — import from here
+  agent/  shared.ts           send lock (withSendLock), nowSql, inbound recording, pacing state, customer row
+          prompts.ts          customer SYSTEM_PROMPT + OWNER_SYSTEM_PROMPT
+          send-guards.ts      guarded customer send_message + customer-send checks
+          customer-sends.ts   show_product_images, consent confirmation, busy reply
+          owner-send.ts       paced owner send_message, owner-alert send, retryOwnerAlerts
+          customer-turn.ts    runTurn OPEN + LOOP + silent-no-reply guard
+          turn-close.ts       runTurn CLOSE: checkpoint/notes + order/payment safety net
+          owner-turn.ts       runOwnerTurn
+  tools.ts                Public barrel: re-exports all tools, builds baseTools / ownerTools (order fixed)
+  tools/  catalog-stock.ts    check_stock, search_catalog
+          customer-memory.ts  get_customer_balance, get_customer_note
+          order-validation.ts server pricing, fulfilment validation, stock check, order insert
+          order-drafts.ts     draft row/summary, getPendingOrderDraft, isExplicitOrderConfirmation
+          orders.ts           prepare_order, confirm_order, update_order_status
+          handoff.ts          recordHandoff, notify_owner
+          owner-analytics.ts  inventory_overview, sales_today, unpaid_customers, top_selling_product, pending_followups
   llm.ts                  Gemini REST seam
   db.ts  ../db/schema.sql SQLite singleton + startup migrations (28 tables)
   orders.ts order-access.ts order-summary.ts   FSM, sender-bound lookup, summaries
@@ -162,16 +177,20 @@ ahmed.db                  REAL production database (gitignored) — never open f
 ```
 
 Customer tools (`baseTools` in `tools.ts`, plus `send_message` and
-`show_product_images` added in `agent.ts`): `check_stock`,
+`show_product_images` added in `agent/`): `check_stock`,
 `get_customer_balance`, `get_customer_note`, my-order-status, `prepare_order`,
 `confirm_order`, `update_order_status` (actor-limited), `claim_payment`,
 `request_refund`, `get_my_refund_status`, `notify_owner`, payment options,
-`search_catalog`. `record_order` / `record_payment` still exist in
-`tools.ts` but are legacy and deliberately NOT exposed (tests assert this) —
-never add them back to `baseTools`.
+`search_catalog`. The legacy `record_order` / `record_payment` tools were
+removed on 2026-11-01 (they bypassed two-step booking and claim verification);
+tests assert no exported tool list contains them — never re-add them.
 Owner tools (`ownerTools` in `tools.ts`): `inventory_overview`, `sales_today`,
 `unpaid_customers`, `top_selling_product`, `pending_followups`,
 `pending_payment_claims`, `pending_refund_requests`, `resolve_refund_request`.
+Order shipping/delivery is also NOT a tool: exact two-step owner commands
+`SHIP ORDER <ref>` / `DELIVER ORDER <ref>` then `CONFIRM SHIP ORDER <ref>` /
+`CONFIRM DELIVER ORDER <ref>`, parsed in `src/fulfilment-commands.ts` before
+the model (only `paid → shipped → delivered` is allowed today — see §10).
 Payment-claim approval is deliberately NOT a tool — it is the exact two-step
 text command parsed in `payment-resolution.ts`.
 
@@ -246,9 +265,17 @@ rows — kept for history); README rewritten; `.gitattributes` added;
 `npm run live:verify`, read-only).
 
 Still open:
-- Live acceptance (HARD-01) has not been run since the hardening work. The
-  delivered-order refund scenario is blocked: nothing on the WhatsApp path can
-  move an order to shipped/delivered (no owner/courier status tool yet).
+- **COD decision needed (HARD-09/10):** the FSM only allows
+  `confirmed → paid → shipped`, and nothing reachable from WhatsApp sets
+  `paid` (approving a payment claim credits the ledger but never changes
+  order status). With COD the only enabled method, real orders stop at
+  `confirmed`, so SHIP/DELIVER can't be used on them yet. Decide: allow owner
+  `confirmed → shipped` for COD (and record cash at delivery), or add an
+  authenticated owner `paid` command requiring a settled balance.
+- Live acceptance (HARD-01) has not been run since the hardening work;
+  scenario 7 (delivered-order refund) waits on the COD decision.
+- Shipped/delivered changes do not message the customer yet (needs the
+  guarded customer-send path + a messaging-window decision).
 - `agent.ts` (~1500 lines) and `tools.ts` are very large — split only with
   tests green before and after.
 - Stale `record_order` mentions in comments: `src/orders.ts`,

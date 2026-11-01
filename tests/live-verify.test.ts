@@ -157,7 +157,7 @@ test('snapshot counts every schema table and reports integrity and foreign keys'
     assert.equal(snapshot.foreign_key_violations, 0);
     const schemaTables = [...fs.readFileSync(path.join(__dirname, '..', 'db', 'schema.sql'), 'utf8')
       .matchAll(/create table if not exists (\w+)/g)].map((match) => match[1]);
-    assert.equal(schemaTables.length, 28);
+    assert.equal(schemaTables.length, 29);
     for (const table of schemaTables) assert.ok(`rows.${table}` in snapshot.values, `missing rows.${table}`);
     assert.equal(snapshot.values['rows.customers'], 3);
     assert.equal(snapshot.values['orders.status.delivered'], 1);

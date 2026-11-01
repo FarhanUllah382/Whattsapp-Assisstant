@@ -395,12 +395,23 @@ PASS: diff PASS (stock unchanged); neither new outbound message has
 ### Scenario 7 — Delivered-order refund request creates one case and no money/state change
 
 HARD-01 bullet 7. **Precondition:** CUST-A owns an order whose status is
-`delivered` (see P7). There is no WhatsApp/tool path that moves an order to
-`shipped`/`delivered` (customers may only confirm/cancel; no owner or courier
-transition tool is exposed), so the order from scenario 3 cannot be used. If no
-delivered order exists for a test phone, mark this scenario **BLOCKED** and get
-an owner decision; do not hand-edit `ahmed.db` outside the CLAUDE.md
-backup/integrity procedure.
+`delivered` (see P7). From the **owner phone**, an order is moved forward only
+by the exact two-step fulfilment commands (each `CONFIRM` in a separate, later
+message; replies are server-built, no model involved):
+
+1. `SHIP ORDER <ORD-REF>` → reply ends with the exact confirm text;
+   `CONFIRM SHIP ORDER <ORD-REF>` → `SHIPPED: …` (one `order_status_events`
+   row, actor `owner`, source `owner_fulfilment_command`).
+2. `DELIVER ORDER <ORD-REF>` → `CONFIRM DELIVER ORDER <ORD-REF>` → `DELIVERED: …`.
+
+Current FSM rule: only a `paid` order can be shipped. Nothing on the WhatsApp
+path moves an order to `paid` today (an approved payment claim credits the
+ledger but does not change order status), and the scenario-3 order is COD and
+stays `confirmed`, so `SHIP ORDER` answers "not paid yet" for it. Until the
+owner makes the COD shipping decision (HARD-09/HARD-10), mark this scenario
+**BLOCKED** unless a `paid` or `delivered` test order already exists; do not
+hand-edit `ahmed.db` outside the CLAUDE.md backup/integrity procedure. Run the
+fulfilment commands before taking `07-before.json`.
 
 ```bash
 npm run --silent live:verify -- snapshot --out tmp/hard01/07-before.json

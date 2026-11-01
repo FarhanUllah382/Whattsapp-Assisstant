@@ -186,6 +186,34 @@ create table if not exists order_status_events (
 create index if not exists order_status_events_order_idx
   on order_status_events(order_id, id);
 
+-- Owner fulfilment commands (SHIP ORDER / DELIVER ORDER) never change order
+-- status in the message that names them. The deterministic owner command path
+-- (src/fulfilment-commands.ts) first records one short-lived intent bound to
+-- the provider event, then requires an exact CONFIRM in a later message. The
+-- status change itself goes through transitionOrderStatus and its
+-- order_status_events row; this table only proves the two-step happened.
+-- Additive: `create table if not exists` touches no existing rows.
+create table if not exists order_fulfilment_intents (
+  id text primary key,
+  owner_customer_id integer not null references customers(id),
+  order_id integer not null references orders(id),
+  target_status text not null check (target_status in ('shipped', 'delivered')),
+  from_status text not null
+    check (from_status in ('placed', 'confirmed', 'paid', 'shipped', 'delivered', 'cancelled')),
+  status text not null default 'pending'
+    check (status in ('pending', 'confirmed', 'cancelled', 'expired')),
+  source_event_key text not null unique,
+  confirm_event_key text unique,
+  status_event_id integer references order_status_events(id),
+  expires_at text not null,
+  created_at text not null default (datetime('now')),
+  confirmed_at text
+);
+
+create unique index if not exists order_fulfilment_one_pending_intent_per_owner
+  on order_fulfilment_intents(owner_customer_id)
+  where status = 'pending';
+
 -- One row per debit (an order placed — customer now owes more) or credit
 -- (a payment — customer owes less) event. `customers`' balance is always
 -- this table's running sum, never a mutated standalone field (Version 2.1)

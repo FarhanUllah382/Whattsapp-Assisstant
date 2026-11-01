@@ -92,6 +92,11 @@ export const allTestTargets: readonly TestTarget[] = [
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/fulfilment-commands.test.ts',
+    securityAreas: ['order state authorization', 'owner-only deterministic fulfilment commands'],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/refunds.test.ts',
     securityAreas: ['refund ownership and authorization'],
     includeInSecurityRegression: true,
