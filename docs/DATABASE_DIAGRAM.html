@@ -1,0 +1,809 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ahmed's WhatsApp Assistant — Complete Database Diagram</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --primary: #2ea043;
+    --accent: #58a6ff;
+    --purple: #bc8cff;
+    --amber: #d29922;
+    --rose: #f85149;
+    --teal: #1f6feb;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    background: #010409;
+    border-bottom: 1px solid var(--border);
+    padding: 18px 32px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  header h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  header .badge {
+    background: #1f6feb26;
+    color: #58a6ff;
+    border: 1px solid #1f6feb66;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .actions {
+    display: flex;
+    gap: 12px;
+  }
+  button {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: 0.2s;
+  }
+  button:hover {
+    background: #21262d;
+    border-color: #8b949e;
+  }
+  button.primary {
+    background: #238636;
+    border-color: #2ea043;
+    color: #fff;
+  }
+  button.primary:hover {
+    background: #2ea043;
+  }
+  main {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 32px;
+  }
+  .hero-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 24px;
+    margin-bottom: 28px;
+  }
+  .hero-card h2 {
+    margin-top: 0;
+    font-size: 22px;
+    color: #58a6ff;
+  }
+  .stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-top: 18px;
+  }
+  .stat-box {
+    background: #0d1117;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+  }
+  .stat-box .num {
+    font-size: 26px;
+    font-weight: 700;
+    color: #2ea043;
+    margin-bottom: 4px;
+  }
+  .stat-box .label {
+    font-size: 12px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+  }
+
+  /* Diagram Box */
+  .diagram-container {
+    background: #0e131a;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 32px;
+    overflow-x: auto;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+  }
+  .diagram-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 14px;
+    margin-bottom: 20px;
+  }
+  .diagram-header h3 {
+    margin: 0;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* Table Cards Grid */
+  .section-title {
+    font-size: 20px;
+    font-weight: 600;
+    margin: 36px 0 18px 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tables-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 20px;
+  }
+  .table-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .table-card-header {
+    background: #1f242c;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .table-card-title {
+    font-weight: 700;
+    font-size: 14px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    color: #58a6ff;
+  }
+  .table-card-body {
+    padding: 14px 16px;
+    font-size: 13px;
+    flex-grow: 1;
+  }
+  .col-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid #21262d;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+    font-size: 12px;
+  }
+  .col-row:last-child {
+    border-bottom: none;
+  }
+  .col-name {
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .col-type {
+    color: var(--text-muted);
+  }
+  .tag {
+    font-size: 9px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+  .tag-pk { background: #238636; color: white; }
+  .tag-fk { background: #1f6feb; color: white; }
+  .tag-uk { background: #8957e5; color: white; }
+  .tag-sec { background: #d29922; color: #161b22; }
+
+  /* Security Matrix */
+  .security-card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--primary);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .security-card h4 {
+    margin: 0 0 8px 0;
+    color: #e6edf3;
+    font-size: 15px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .security-card p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>
+    <span>🛒 Ahmed's WhatsApp Assistant</span>
+    <span class="badge">SQLite · 20 Tables · Production Schema</span>
+  </h1>
+  <div class="actions">
+    <button onclick="window.print()">🖨️ Print / PDF</button>
+    <button class="primary" onclick="alert('Open docs/database_diagram.svg for the raw vector image!')">View Vector SVG</button>
+  </div>
+</header>
+
+<main>
+  <div class="hero-card">
+    <h2>Complete Database Architecture & Security Map</h2>
+    <p style="margin: 0; color: var(--text-muted); line-height: 1.6;">
+      Authoritative database diagram for <code>ahmed.db</code>. Reflects all tables, relations, triggers, constraints, and audit layers.
+    </p>
+    <div class="stats-grid">
+      <div class="stat-box">
+        <div class="num">20</div>
+        <div class="label">Total Tables</div>
+      </div>
+      <div class="stat-box">
+        <div class="num">100%</div>
+        <div class="label">Prepared Queries</div>
+      </div>
+      <div class="stat-box">
+        <div class="num">80-bit</div>
+        <div class="label">Order Entropy (Anti-IDOR)</div>
+      </div>
+      <div class="stat-box">
+        <div class="num">Paisas</div>
+        <div class="label">Exact-Money Integers</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- VISUAL MERMAID DIAGRAM -->
+  <div class="diagram-container">
+    <div class="diagram-header">
+      <h3>📊 Visual Entity Relationship Diagram</h3>
+      <span style="font-size: 12px; color: var(--text-muted);">Interactive Mermaid Render</span>
+    </div>
+    <div class="mermaid">
+erDiagram
+    CUSTOMERS ||--o{ CUSTOMER_CONSENT_EVENTS : "consents / opts-out"
+    CUSTOMERS ||--o{ MESSAGES : "exchanges"
+    CUSTOMERS ||--o| CHECKPOINTS : "rolling memory"
+    CUSTOMERS ||--o{ CUSTOMER_NOTES : "durable facts"
+    CUSTOMERS ||--o{ SEND_LEDGER : "outbound idempotency"
+    CUSTOMERS ||--o{ BOOKKEEPING_RECEIPTS : "webhook side-effect dedup"
+    CUSTOMERS ||--o{ HANDOFF_LEDGER : "human escalations"
+    CUSTOMERS ||--o{ ORDER_DRAFTS : "buffers fulfillment draft"
+    CUSTOMERS ||--o{ ORDERS : "places orders"
+    CUSTOMERS ||--o{ ORDER_LOOKUP_ATTEMPTS : "records attempts"
+    CUSTOMERS ||--o{ ORDER_STATUS_EVENTS : "state transition history"
+    CUSTOMERS ||--o{ LEDGER : "debits & credits"
+    CUSTOMERS ||--o{ PAYMENT_CLAIMS : "submits claims"
+    CUSTOMERS ||--o{ OWNER_ALERTS : "first / latest affected"
+
+    CUSTOMER_NOTES ||--o| CUSTOMER_NOTES : "superseded_by"
+    ORDERS ||--o{ ORDER_STATUS_EVENTS : "audit history"
+    ORDERS ||--o{ ORDER_DRAFTS : "promoted from draft"
+    ORDERS ||--o{ LEDGER : "associated debit"
+    ORDERS ||--o{ PAYMENT_CLAIMS : "target of claim"
+    OWNER_ALERTS ||--o{ OWNER_ALERT_EVENTS : "deduplicates"
+
+    CUSTOMERS {
+        int id PK
+        text phone UK
+        text name
+        text disclosure_sent_at
+        int automation_opted_out
+        text created_at
+    }
+
+    PRODUCTS {
+        int id PK
+        text sku UK
+        text name
+        text size
+        text color
+        int price_minor
+        int stock
+        int active
+    }
+
+    ORDERS {
+        int id PK
+        text public_ref UK
+        int customer_id FK
+        text items_json
+        int total_minor
+        text status
+        text created_at
+    }
+
+    ORDER_DRAFTS {
+        int id PK
+        int customer_id FK
+        text items_json
+        int total_minor
+        text recipient_name
+        text delivery_address
+        text status
+        int order_id FK
+    }
+
+    LEDGER {
+        int id PK
+        int customer_id FK
+        int order_id FK
+        text kind
+        int amount_minor
+        text created_at
+    }
+
+    PAYMENT_CLAIMS {
+        int id PK
+        int customer_id FK
+        int order_id FK
+        int amount_minor
+        text status
+        int resolved_by_customer_id FK
+    }
+
+    MESSAGES {
+        int id PK
+        int customer_id FK
+        text direction
+        text body
+        text created_at
+    }
+
+    CHECKPOINTS {
+        int customer_id PK
+        text summary
+        text updated_at
+    }
+
+    CUSTOMER_NOTES {
+        int id PK
+        int customer_id FK
+        text headline
+        text body
+        int superseded_by FK
+    }
+
+    ORDER_LOOKUP_ATTEMPTS {
+        int id PK
+        int customer_id FK
+        text reference_hash
+        text outcome
+        text created_at
+    }
+
+    ORDER_STATUS_EVENTS {
+        int id PK
+        int order_id FK
+        text from_status
+        text to_status
+        text actor_type
+        int actor_customer_id FK
+    }
+
+    SEND_LEDGER {
+        text id PK
+        int customer_id FK
+        text status
+    }
+
+    BOOKKEEPING_RECEIPTS {
+        text id PK
+        int customer_id FK
+        text effect
+    }
+
+    HANDOFF_LEDGER {
+        int id PK
+        int customer_id FK
+        text reason
+    }
+
+    OWNER_ALERTS {
+        int id PK
+        text kind
+        text status
+        int occurrence_count
+        int first_customer_id FK
+        int latest_customer_id FK
+    }
+
+    OWNER_ALERT_EVENTS {
+        text event_key PK
+        int alert_id FK
+    }
+
+    INBOUND_GUARD_STATE {
+        int id PK
+        text accept_after
+    }
+
+    INBOUND_EVENTS {
+        text event_key PK
+        text channel
+        text message_id UK
+        text status
+    }
+
+    CUSTOMER_CONSENT_EVENTS {
+        int id PK
+        int customer_id FK
+        text event_key UK
+        text action
+        text confirmation_status
+    }
+
+    PRIVACY_MIGRATIONS {
+        text migration_key PK
+        int checkpoint_rows_redacted
+        int note_rows_redacted
+    }
+    </div>
+  </div>
+
+  <!-- TABLE CARDS BREAKDOWN -->
+  <div class="section-title">📦 Complete 20-Table Structural Directory</div>
+  <div class="tables-grid">
+
+    <!-- 1. Customers -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">customers</span>
+        <span class="tag tag-sec">Identity Root</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-uk">UK</span> phone</span><span class="col-type">TEXT (E.164)</span></div>
+        <div class="col-row"><span class="col-name">name</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">disclosure_sent_at</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">automation_opted_out</span><span class="col-type">INTEGER (0/1)</span></div>
+        <div class="col-row"><span class="col-name">created_at</span><span class="col-type">TEXT</span></div>
+      </div>
+    </div>
+
+    <!-- 2. Products -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">products</span>
+        <span class="tag tag-sec">Stock Triggers</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-uk">UK</span> sku</span><span class="col-type">TEXT (2-64)</span></div>
+        <div class="col-row"><span class="col-name">name</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">size, color</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">price_minor</span><span class="col-type">INTEGER (Paisas)</span></div>
+        <div class="col-row"><span class="col-name">stock</span><span class="col-type">INTEGER (>= 0)</span></div>
+        <div class="col-row"><span class="col-name">active</span><span class="col-type">INTEGER (0/1)</span></div>
+      </div>
+    </div>
+
+    <!-- 3. Orders -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">orders</span>
+        <span class="tag tag-sec">80-bit Entropy</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER (Internal)</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-uk">UK</span> public_ref</span><span class="col-type">TEXT (ORD-...)</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">items_json</span><span class="col-type">JSON SNAPSHOT</span></div>
+        <div class="col-row"><span class="col-name">total_minor</span><span class="col-type">INTEGER (Paisas)</span></div>
+        <div class="col-row"><span class="col-name">recipient_name, delivery_address</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">status</span><span class="col-type">placed..delivered</span></div>
+      </div>
+    </div>
+
+    <!-- 4. Order Drafts -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">order_drafts</span>
+        <span class="tag tag-sec">2-Phase Guard</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-uk">UK</span> prepared_event_key</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> order_id</span><span class="col-type">-> orders.id</span></div>
+        <div class="col-row"><span class="col-name">status</span><span class="col-type">awaiting|confirmed</span></div>
+      </div>
+    </div>
+
+    <!-- 5. Ledger -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">ledger</span>
+        <span class="tag tag-sec">Double-Entry</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> order_id</span><span class="col-type">-> orders.id</span></div>
+        <div class="col-row"><span class="col-name">kind</span><span class="col-type">debit | credit</span></div>
+        <div class="col-row"><span class="col-name">amount_minor</span><span class="col-type">INTEGER (Paisas)</span></div>
+      </div>
+    </div>
+
+    <!-- 6. Payment Claims -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">payment_claims</span>
+        <span class="tag tag-sec">Owner Approval</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> order_id</span><span class="col-type">-> orders.id</span></div>
+        <div class="col-row"><span class="col-name">amount_minor</span><span class="col-type">INTEGER (> 0)</span></div>
+        <div class="col-row"><span class="col-name">status</span><span class="col-type">pending|approved</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> resolved_by_customer_id</span><span class="col-type">-> customers.id</span></div>
+      </div>
+    </div>
+
+    <!-- 7. Order Lookup Attempts -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">order_lookup_attempts</span>
+        <span class="tag tag-sec">Rate Limiter</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">reference_hash</span><span class="col-type">TEXT (SHA-256)</span></div>
+        <div class="col-row"><span class="col-name">outcome</span><span class="col-type">success|not_found</span></div>
+      </div>
+    </div>
+
+    <!-- 8. Order Status Events -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">order_status_events</span>
+        <span class="tag tag-sec">Audit Log</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> order_id</span><span class="col-type">-> orders.id</span></div>
+        <div class="col-row"><span class="col-name">from_status -> to_status</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">actor_type</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">evidence</span><span class="col-type">TEXT</span></div>
+      </div>
+    </div>
+
+    <!-- 9. Messages -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">messages</span>
+        <span class="tag">Transcript</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">direction</span><span class="col-type">inbound | outbound</span></div>
+        <div class="col-row"><span class="col-name">body</span><span class="col-type">TEXT</span></div>
+      </div>
+    </div>
+
+    <!-- 10. Checkpoints -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">checkpoints</span>
+        <span class="tag tag-sec">PII Scrubbed</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">summary</span><span class="col-type">TEXT (Sanitized)</span></div>
+        <div class="col-row"><span class="col-name">updated_at</span><span class="col-type">TEXT</span></div>
+      </div>
+    </div>
+
+    <!-- 11. Customer Notes -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">customer_notes</span>
+        <span class="tag tag-sec">PII Scrubbed</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">headline, body</span><span class="col-type">TEXT (Sanitized)</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> superseded_by</span><span class="col-type">-> customer_notes.id</span></div>
+      </div>
+    </div>
+
+    <!-- 12. Send Ledger -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">send_ledger</span>
+        <span class="tag tag-sec">Idempotency</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">TEXT (Deterministic Hash)</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">status</span><span class="col-type">pending | sent</span></div>
+      </div>
+    </div>
+
+    <!-- 13. Bookkeeping Receipts -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">bookkeeping_receipts</span>
+        <span class="tag tag-sec">Idempotency</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">TEXT (Hash)</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">effect, result_json</span><span class="col-type">TEXT</span></div>
+      </div>
+    </div>
+
+    <!-- 14. Handoff Ledger -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">handoff_ledger</span>
+        <span class="tag">Escalation</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">reason</span><span class="col-type">TEXT</span></div>
+      </div>
+    </div>
+
+    <!-- 15. Owner Alerts -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">owner_alerts</span>
+        <span class="tag tag-sec">Debounced</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name">kind</span><span class="col-type">TEXT (Unique pending)</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> first / latest_customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">occurrence_count</span><span class="col-type">INTEGER</span></div>
+      </div>
+    </div>
+
+    <!-- 16. Owner Alert Events -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">owner_alert_events</span>
+        <span class="tag">Alert Event</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> event_key</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> alert_id</span><span class="col-type">-> owner_alerts.id</span></div>
+      </div>
+    </div>
+
+    <!-- 17. Inbound Guard State -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">inbound_guard_state</span>
+        <span class="tag tag-sec">Singleton Guard</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">CHECK (id = 1)</span></div>
+        <div class="col-row"><span class="col-name">accept_after</span><span class="col-type">TEXT (Cutoff)</span></div>
+      </div>
+    </div>
+
+    <!-- 18. Inbound Events -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">inbound_events</span>
+        <span class="tag tag-sec">Replay Shield</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> event_key</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-uk">UK</span> (channel, message_id)</span><span class="col-type">UNIQUE TUPLE</span></div>
+        <div class="col-row"><span class="col-name">status</span><span class="col-type">processing|completed</span></div>
+      </div>
+    </div>
+
+    <!-- 19. Customer Consent Events -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">customer_consent_events</span>
+        <span class="tag">Opt-out Gate</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> id</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name"><span class="tag tag-fk">FK</span> customer_id</span><span class="col-type">-> customers.id</span></div>
+        <div class="col-row"><span class="col-name">action</span><span class="col-type">opt_out | opt_in</span></div>
+        <div class="col-row"><span class="col-name">confirmation_status</span><span class="col-type">pending | sent</span></div>
+      </div>
+    </div>
+
+    <!-- 20. Privacy Migrations -->
+    <div class="table-card">
+      <div class="table-card-header">
+        <span class="table-card-title">privacy_migrations</span>
+        <span class="tag tag-sec">Audit Marker</span>
+      </div>
+      <div class="table-card-body">
+        <div class="col-row"><span class="col-name"><span class="tag tag-pk">PK</span> migration_key</span><span class="col-type">TEXT</span></div>
+        <div class="col-row"><span class="col-name">checkpoint_rows_redacted</span><span class="col-type">INTEGER</span></div>
+        <div class="col-row"><span class="col-name">note_rows_redacted</span><span class="col-type">INTEGER</span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- SECURITY OVERVIEW -->
+  <div class="section-title">🛡️ Database Security Architecture & Controls</div>
+  <div class="security-card">
+    <h4>1. Anti-IDOR (Insecure Direct Object Reference) Protection</h4>
+    <p>Internal sequential primary keys (<code>orders.id</code>) are never accepted from or shown to customers. Orders are referenced externally solely by <code>public_ref</code> — an 80-bit cryptographically random token (<code>'ORD-' || upper(hex(randomblob(10)))</code>) validated by database check constraints and triggers.</p>
+  </div>
+  <div class="security-card">
+    <h4>2. Customer Identity Scoping & Anti-Brute-Force Rate Limiting</h4>
+    <p>Order lookups require both the public token and matching authenticated customer ID (<code>where public_ref = ? and customer_id = ?</code>). All attempts are recorded in <code>order_lookup_attempts</code> with SHA-256 hashed queries; 10 failed queries within a 15-minute sliding window triggers an automatic lockout.</p>
+  </div>
+  <div class="security-card">
+    <h4>3. Double-Entry Accounting & Exact-Money Protection</h4>
+    <p>Floats are eliminated. Monetary fields use non-negative integers in Pakistani paisas. The mutable <code>balance_owed</code> column was dropped — customer balances are derived dynamically from the immutable <code>ledger</code>. Stock cannot go negative due to database-level abort triggers.</p>
+  </div>
+  <div class="security-card">
+    <h4>4. PII Minimization & Segregation (Correction #5)</h4>
+    <p>Delivery information (phone numbers, full addresses) is strictly confined to authoritative fulfillment tables (<code>orders</code>, <code>order_drafts</code>). Derived LLM memories (<code>checkpoints</code>, <code>customer_notes</code>) are actively sanitized via <code>sanitizeMemoryText</code>, tracked idempotently via <code>privacy_migrations</code>.</p>
+  </div>
+  <div class="security-card">
+    <h4>5. Replay Defense & Distributed Idempotency</h4>
+    <p><code>inbound_guard_state</code> and <code>inbound_events</code> drop duplicate webhooks and isolate offline backlogs on restart. <code>send_ledger</code> prevents duplicate WhatsApp sends if the Node process restarts midway through a turn.</p>
+  </div>
+
+</main>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      primaryColor: '#1f6feb',
+      primaryTextColor: '#e6edf3',
+      primaryBorderColor: '#388bfd',
+      lineColor: '#58a6ff',
+      secondaryColor: '#238636',
+      tertiaryColor: '#161b22'
+    }
+  });
+</script>
+</body>
+</html>

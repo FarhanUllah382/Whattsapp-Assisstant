@@ -12,7 +12,7 @@ in dependency order. Version 4 is stretch work beyond the original spec.
 | Version | Delivers | Status |
 |---|---|---|
 | 1.x | Promise 1 + 2 — talks to customers, remembers conversations | ✅ **Done (2026-09-05)** — all 9 of CLAUDE.md §8's checklist items verified against the real number. See "Version 1 — final status" at the end of the Version 1 section for the complete breakdown. |
-| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified. **Current payment-security correction (built, locally verified, and live-verified 2026-09-29):** customer payment statements now create pending owner-review claims rather than verified credits; a real claim, owner alert/list, and explicit owner approval passed with exactly one credit and no order-status change. |
+| 2.x | Promise 3 — keeps the books automatically | ✅ **Done (2026-09-14)** — all five sub-versions built and verified. **Current payment-security state (built and locally verified 2026-10-05; fresh live WhatsApp verification pending):** customer statements create unverified pending claims. Gemini has no financial-resolution tool. Approval requires the owner to supply the transaction reference independently checked in the business payment account, repeat that same reference in a separate exact confirmation, and pass duplicate, amount, order, and balance checks. Rejection and reversal also require exact two-step commands. The accidentally approved real claim #4 was repaired through one audited compensating debit after a verified backup; no history was deleted. |
 | 3.x | Promise 4 — Ahmed can just ask it questions | ✅ **Done (2026-09-15)** — 3.1/3.2 owner Q&A and 3.3 WhatsApp-delivered alerts are built, locally verified, and live-verified. |
 | 4.x | Stretch — beyond the original spec | 🔲 Not started |
 
@@ -1756,14 +1756,22 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   no financial side effect and does not crash the turn. Those checks use the
   real `agent.ts`/`tools.ts`/database code with only the model response
   controlled, because a live model cannot reliably be forced to omit a tool
-  call. **The 2026-09-29 security regression verifies the replacement payment
-  behavior:** the customer tool menu exposes `claim_payment`, not
-  `record_payment`; claim resolution is owner-only; customer and safety-net
-  payment statements create one idempotent pending claim with no credit;
-  customers cannot mark paid/shipped/delivered; owner approval creates one
-  credit inside the claim-resolution transaction; repeated approval does not
-  duplicate it; rejection creates none; a forced credit failure leaves the
-  claim pending; and neither claim creation nor approval changes order status.
+  call. **The current 2026-10-05 security regression replaces the older direct
+  owner-resolution design:** the customer tool menu exposes `claim_payment`,
+  not `record_payment`; customer and safety-net payment statements create one
+  idempotent pending claim with no credit; customers cannot mark
+  paid/shipped/delivered; and Gemini has no approve/reject mutation tool in the
+  customer or owner toolset. To approve, the authenticated owner must use an
+  exact claim ID plus the transaction reference independently checked in the
+  business payment account, then repeat that same reference in a second exact
+  confirmation within ten minutes. The owner-supplied verification is stored
+  separately from untrusted customer wording, globally unique, and immutable.
+  Natural language, list positions, vague
+  yes/no replies, contradictory wording, expired confirmations, weak
+  customer-written evidence, duplicate references, zero balances, and amounts
+  above the authoritative outstanding balance all fail closed. A confirmed
+  approval creates one linked credit, rejection creates none, and reversal
+  preserves the original approval while adding one linked compensating debit.
 - **Built from DeskcommCRM:** the *pattern* of `inbound-turn.ts`'s
   checkpoint-close call (forced second model call, strict-validated JSON,
   persisted) — steered from extracting commitments/objections to extracting
@@ -1774,16 +1782,30 @@ the restart loop recovered, so it remains **mitigated, not fixed**.
   state, and can be credited exactly once only after explicit owner approval;
   the safety net catches a missed order or claim without duplicating a primary
   tool call.
-- **Status:** Order extraction remains complete and live-verified. The payment
-  path was safely tightened on 2026-09-29: implementation and deterministic
-  verification are complete (permanent suite, alert suite, typecheck/build,
-  and Version 2 regression). **Live verification also passed:** customer 9958
-  reported Rs.800 paid for confirmed order #41; pending claim #1 and owner
-  alert #15 were created exactly once with no credit or status change; owner
-  2409 listed and explicitly approved the claim; exactly one Rs.800 credit
-  (ledger row #77) was committed, claim #1 became `approved`, and order #41
-  remained `confirmed`. Database integrity was `ok` with zero foreign-key
-  violations.**
+- **Status:** Order extraction remains complete and live-verified. Payment-claim
+  creation was live-verified previously, but the old natural-language owner
+  resolution route is superseded and must not be described as current proof.
+  The 2026-10-05 deterministic resolution is **built and locally verified**:
+  all 27 isolated test files pass across 31 declared areas, including nine
+  focused resolution/reversal checks; typecheck and build pass. Before touching
+  real financial state, a verified SQLite backup was created at
+  `backups/operations/ahmed-backup-2026-10-05T05-18-10-431Z.db` (integrity
+  `ok`, zero foreign-key violations, SHA-256
+  `C2F63F83394A8F97832101E5459330971CDB26D58AC2EAD8AF14F8040C6D7B0B`).
+  The accidental claim #4 approval was then linked to its exact original
+  Rs800 credit (ledger #128) and reversed with exactly one compensating debit
+  (ledger #129); the affected balance changed from Rs800 store credit to Rs0,
+  one append-only reversal event exists, and pending claims #3 and #5 were
+  untouched. After real claim #6 exposed the missing-reference dead end, the
+  reference-bound owner workflow was added. Before its additive migration, the
+  stopped database was backed up at
+  `backups/operations/ahmed-pre-owner-verified-reference-20261005-1010Z.db`
+  (integrity `ok`, zero foreign-key violations, SHA-256
+  `9F67CA85D88679EDA11E2E7F8D8CE82A61FA6AE78A5A2106CF5FA535D3F2191A`).
+  Post-migration integrity is `ok`; claim #6 remains pending with zero credit
+  and no verification row. A fresh real WhatsApp reference-bound
+  prepare/confirm acceptance check remains pending; do not relabel this new
+  owner workflow live-verified yet.
 
 ### 2.4 — Live stock-aware replies
 - **Goal:** "do you have 20 in stock" gets a real, current answer, and a
@@ -2274,7 +2296,8 @@ Versions 1–3 and explicitly **not Version 4**.
 - **Built (2026-09-29):** the customer model can no longer call the older
   immediate `record_order` tool. It receives `prepare_order` and
   `confirm_order` instead. Preparation requires recipient name, a validated
-  10–15 digit contact number, complete address, city, and one of COD, bank
+  Pakistani mobile number (`03XXXXXXXXX` or `+923XXXXXXXXX`), complete address,
+  city, and one of COD, bank
   transfer, Easypaisa, or JazzCash; postal code and delivery instructions are
   optional. Product prices and the fixed free-delivery charge are controlled
   by the server.
@@ -2368,6 +2391,934 @@ explicitly **not Version 4**.
 
 ---
 
+## Real-business hardening — webhook, payments, handoffs, identity, and privacy (not Version 4)
+
+These are security corrections found during the October 2026 external test
+review. They are separate from Ahmed's completed Versions 1–3 and explicitly
+**not Version 4**.
+
+- **Correction 1 — webhook authenticity, built and locally/live-config
+  verified 2026-10-03:** WAHA now signs the exact raw webhook body with
+  SHA-512 HMAC. The Express entry point verifies the configured algorithm and
+  signature with a timing-safe comparison before parsing or trusting any
+  claimed sender. Missing configuration, missing/malformed signatures, wrong
+  algorithms, and modified bodies fail closed with HTTP 401. A valid signed
+  probe returns HTTP 200. The application and WAHA container use the same
+  verified secret fingerprint; the preserved WhatsApp session is `WORKING`,
+  the gateway remains loopback-only, and the old container is retained
+  stopped as a rollback copy. The full regression suite passes. **A new real
+  customer WhatsApp message has not yet been sent after this rollout, so this
+  correction is not yet end-to-end live-verified.**
+- **Correction 2 — payment instructions and customer-selected method integrity,
+  built and locally verified 2026-10-05; fresh live verification pending:**
+  owner-controlled Easypaisa, JazzCash, and bank-transfer fields live only in
+  runtime configuration. Missing, partial, or malformed configuration makes
+  that method unavailable; COD remains available without account details.
+  `get_payment_options` exposes only configured methods, and
+  `send_payment_instructions` renders and sends the exact server-controlled
+  destination through the existing consent, pacing, idempotency, spinning,
+  disclosure, and transcript boundary. The normal `send_message` path rejects
+  payment placeholders and payment destinations that did not come from that
+  deterministic tool. A real customer test later exposed a separate integrity
+  gap: the customer explicitly selected an unconfigured Easypaisa method, but
+  the model retried `prepare_order` with COD and the server accepted the
+  substitution. The production tool now derives the explicit method directly
+  from the current customer message, requires exactly one method, rejects an
+  ambiguous or missing selection, and rejects any model-submitted method that
+  differs from the customer's selection before writing a draft. A matching but
+  unconfigured digital method still fails closed; the model must explain that
+  it is unavailable and ask the customer to choose again in a new message.
+  Deterministic regression tests reproduce and block the exact Easypaisa-to-COD
+  substitution, prove that no draft is written on mismatch/unavailability, and
+  prove that a configured matching method is stored unchanged. The 85-check
+  core suite and all 27 isolated test files passed across 31 declared areas;
+  the production database and sidecar fingerprints were unchanged.
+  A subsequent customer-side checkout review found that a reply could begin
+  collecting name/contact/address/city while omitting payment method. The final
+  outbound boundary now rejects that incomplete checklist and instructs the
+  model to call `get_payment_options` and collect exactly one available method.
+  The same review tightened delivery-contact validation from a generic digit
+  range to the two Pakistani mobile formats above and added a script-consistency
+  guard: Roman-Urdu/English customers cannot receive accidental Devanagari
+  fragments, while customers who actually write in Devanagari remain
+  supported. Order-summary delivery is now deterministic as well: after
+  `prepare_order` stores a validated draft, the application—not Gemini—builds
+  the complete review from the database product name/variant, server price,
+  quantity, server-calculated line totals/subtotal/delivery/total, stored
+  fulfilment details, and the preserved payment method. That exact body is
+  sent automatically through the protected outbound path, and the model loop
+  stops instead of composing a second version. While a draft is pending, the
+  final send boundary rejects AI-written, recalculated, shortened, translated,
+  or reformatted order summaries; only the exact server-generated body is
+  authorized. The displayed contact remains masked, and the summary states
+  clearly that the draft is not booked until a later explicit confirmation.
+  Deterministic tests prove a model-supplied price is ignored, the database
+  price and totals appear in the summary, and an altered summary is blocked.
+  The core suite now passes 90/90 checks; all 27 isolated files still pass
+  across 31 declared areas, and tests leave the production database and
+  sidecar fingerprints unchanged. Fresh end-to-end WhatsApp verification of
+  this summary path remains pending.
+- **Correction 3 — truthful owner handoff status, built and locally verified
+  2026-10-03:** model-written `send_message` replies can no longer claim that a
+  screenshot, image, file, or attachment was forwarded; current inbound media
+  is not transferred to Ahmed. They also cannot claim that Ahmed viewed,
+  checked, verified, approved, or replied to something, or promise that he will
+  definitely contact the customer. After `notify_owner`, the model must call
+  the deterministic `send_handoff_status` tool. Its exact message is derived
+  only from current-turn facts: whether the handoff was recorded and whether
+  its WhatsApp alert is `pending` or `sent`. Even a sent alert explicitly says
+  the system cannot confirm Ahmed viewed it. Failed alert attempts retain their
+  durable pending alert id/status for this truthful reply and the existing
+  pending-alert retry worker; no second worker was added.
+- **Correction 4 — customer/order identity binding, built and locally verified
+  2026-10-03:** every order now has a random 80-bit customer-facing reference
+  in the form `ORD-` plus 20 hexadecimal characters. Sequential integer ids
+  remain internal foreign keys and are no longer returned by the customer
+  confirmation, status, cancellation, or payment-claim paths. The new
+  read-only `get_my_order_status` tool queries the public reference and current
+  WhatsApp sender's `customer_id` together; a reference owned by another
+  sender and a nonexistent reference return the exact same response. If no
+  reference is supplied, the tool may return only the current sender's latest
+  order. Its response is limited to public reference, authoritative status,
+  total, and creation time—no recipient phone, address, customer id, or
+  internal order id. Customer cancellation/confirmation and payment-claim
+  linking now accept an owned public reference only; a supplied name, phone
+  number, delivery contact, or old numeric id is never authorization. Failed
+  reference guesses are hashed in a durable audit table and limited to ten per
+  WhatsApp customer per 15 minutes.
+- **Correction 4 database migration:** before the additive schema change, the
+  real database was copied to
+  `backups/ahmed-pre-order-identity-20261003-102645.db` and verified with
+  `integrity_check=ok`, five orders, and zero foreign-key violations. The live
+  database migration backfilled five unique valid public references without
+  changing the order count; afterward `integrity_check=ok` and foreign-key
+  violations remained zero.
+- **Correction 5 — PII minimization, built and locally verified 2026-10-03:**
+  the structured logger now redacts sensitive values recursively at its final
+  output boundary instead of depending on every call site. Full phone numbers,
+  message bodies, names, addresses, emails, account/IBAN values, tokens, and
+  secrets are masked or removed from logs. Raw discarded model text is no
+  longer logged or copied into reply-failure handoffs, and persisted inbound
+  errors are phone/email-redacted. Model-created checkpoint summaries,
+  customer notes, handoff reasons, and owner-alert reasons are deterministically
+  sanitized before storage. Once an order draft exists, old transcript context
+  sent back to the model is sanitized; prepared-order tool results and repeated
+  draft context expose only the delivery contact's final four digits. The full
+  contact and address remain solely in the authoritative draft/order records
+  needed to fulfil that order.
+- **Correction 5 database cleanup:** before modifying the real database, the
+  consistent source was backed up at
+  `backups/ahmed-pre-pii-hardening-final-20261003-104831.db`. The idempotent
+  migration minimized exactly one checkpoint and two customer-note rows. Hash
+  comparison proved customers, all 816 raw messages, five orders, the ledger,
+  and order drafts were unchanged; only the intended derived-memory tables
+  changed. Post-migration `integrity_check=ok` and foreign-key violations are
+  zero. No message-retention/deletion policy was invented: retention, export,
+  and customer deletion remain a separate owner-approved operational decision.
+- **Correction 6 — intentional customer inventory visibility, built and
+  locally verified 2026-10-03:** exact stock counts remain internal operational
+  data. The customer `check_stock` tool now returns an allowlisted public
+  product shape containing product reference, SKU, name, category, size,
+  color, authoritative public price, and only `in_stock`, `low_stock`, or
+  `out_of_stock`. The deliberate low-stock boundary is 1–5 units. When a
+  customer requests a quantity, the backend returns only whether that quantity
+  can be fulfilled; it does not reveal the remaining count. Invalid quantities
+  fail closed. Insufficient-stock errors from both draft confirmation and the
+  legacy transition path no longer include the available count. A final
+  outbound guard blocks English and Roman-Urdu exact-stock claims even if an
+  old transcript or manipulated model tries to repeat one. Internal stock
+  arithmetic, atomic reservation, restoration, and owner-side database truth
+  remain exact and unchanged; this correction required no database migration.
+- **Correction 7 — controlled refund requests, built and locally verified
+  2026-10-03:** a customer can now open a durable refund-review case only for
+  an order owned by the current WhatsApp identity and only after delivery.
+  Orders with a recorded delivery event inside the documented seven-day
+  window are marked eligible; older deliveries are rejected, while legacy
+  delivered orders without a trustworthy delivery timestamp fail safely into
+  manual review. Each case receives a random 80-bit `RFD-` public reference,
+  repeated provider events are idempotent, and only one active case may exist
+  per order. The customer can read only their own case status. Ahmed receives
+  the request through the existing durable owner-alert and retry path, and
+  only the authenticated owner toolset can approve or reject it. Approval is
+  deliberately recorded as `approved_pending_execution`: this feature never
+  transfers money, credits the ledger, or changes order state. A final
+  outbound guard blocks the assistant from falsely claiming that a refund was
+  processed, sent, credited, or completed.
+- **Correction 7 database migration:** before adding the refund-case table,
+  the real database was copied to
+  `backups/ahmed-pre-refund-cases-20261003-161420.db`; its SHA-256 matched the
+  source copy and it passed `integrity_check=ok` with five orders and zero
+  foreign-key violations. After applying the additive schema through the
+  transactional tests, the real database still has 43 customers, 816
+  messages, five orders, and zero refund cases; `integrity_check=ok` and
+  foreign-key violations remain zero.
+- **Correction 8 — grounded products, policies, and support intent, built and
+  locally verified 2026-10-03:** `check_stock` now performs one structured,
+  allowlisted search across product/category, normalized size, color, maximum
+  budget, and requested quantity. A negative result is explicitly limited to
+  the current active catalog and may never be expanded into a claim that Ahmed
+  never sells the item. Requested attributes outside the approved schema—such
+  as waterproofing or fabric composition—return `needs_owner_confirmation`
+  rather than a guessed yes/no. Product rows containing internal markers such
+  as temporary, placeholder, or delete-after labels fail closed before any
+  customer-visible fields are returned. General business-policy answers now
+  require `APPROVED_CATALOG_SHA256` to match the exact current `catalog.md`;
+  missing, malformed, or stale approval blocks the answer instead of trusting
+  changed Markdown silently. The final outbound boundary also rejects an
+  unrelated sales pitch during payment, refund, complaint, cancellation, or
+  tracking support while leaving ordinary shopping conversations unaffected.
+  This correction changes no database schema. On 2026-10-03, the expanded
+  customer catalog was written for owner review, and the one original live
+  product row was deliberately cleaned from an internal temporary label to
+  `Black Hoodie` / `HD-BLK-M-001` / category `hoodie`, preserving its verified
+  Medium size, black color, Rs 800 price, stock 16, active state, primary key,
+  and order relationships. Before that mutation, `ahmed.db` was copied to
+  `backups/ahmed-pre-catalog-product-cleanup-20261003-164921.db`; its SHA-256
+  matched the source, `integrity_check=ok`, and foreign-key violations were
+  zero. The updated database also passes both checks.
+- **Correction 8 realistic test inventory:** after a second verified backup at
+  `backups/ahmed-pre-expanded-test-inventory-20261003-225048.db`, the validated
+  CSV importer previewed and then applied 33 active variants: the existing
+  hoodie plus eight added groups (shirts, kurtas, trousers, jeans, T-shirts,
+  running shoes, sandals, and jackets), each new group having four realistic
+  size/color/price/stock variants. The import inserted 32 SKUs and updated the
+  existing hoodie by SKU, with zero database-only categories, zero
+  catalog-only categories, and zero unclassified products. The live test
+  inventory now contains nine groups, 33 active variants, and 278 internal
+  units. The customer-facing catalog now has 30 sections and matching product
+  ranges; exact stock remains private. Product lookup also normalizes plural
+  wording such as shirts, shoes, and jackets. Post-import
+  `integrity_check=ok`, foreign-key violations are zero, and all five existing
+  orders plus all 816 existing messages remain present.
+- **Verification:** 82/82 main checks pass together with pacing, owner-alert,
+  webhook-HMAC, six focused payment-instruction checks, and six focused
+  handoff-claim checks. Four focused identity tests cover random public
+  references, same-number reads, cross-number denial, indistinguishable
+  foreign/nonexistent references, absence of PII/internal ids, mutation and
+  payment-claim ownership, rejection of numeric ids, latest-own-order lookup,
+  and rate limiting. Six focused privacy checks cover phone masking, durable
+  memory minimization, recursive log redaction, the recorded one-time cleanup,
+  persisted-error redaction, and masked model-visible contact data while
+  authoritative fulfilment data is preserved. Typecheck, build, and the
+  complete Version 2 database flow pass. Six focused inventory-visibility
+  checks cover the three public states, quantity yes/no decisions, the exact
+  allowlisted response schema, invalid-quantity rejection, stock-error
+  minimization, and the final outbound exact-count block. The Version 2 flow
+  separately proves public availability works while exact internal stock,
+  reservation, and restoration still reconcile correctly. Six focused refund
+  checks cover the seven-day rule, legacy manual review, direct and tool-level
+  sender ownership, idempotency, PII sanitization, public references,
+  indistinguishable foreign/missing lookups, owner-only decisions, zero
+  financial/order side effects, and false-completion blocking. Seven focused
+  grounding checks cover exact catalog approval, stale/missing approval,
+  structured product/category/size/color/budget filtering, plural customer
+  wording, unknown-attribute escalation, scoped not-found results,
+  internal-label rejection, and support upsell suppression. The handoff checks cover the
+  exact previously observed false screenshot-forwarding wording in English and
+  Roman Urdu, unverified human actions/promises, normal-message handoff claims,
+  exact-body authorization, and pending/sent status rendering. A rollback-only
+  probe against the real database rejected Easypaisa,
+  created zero drafts and zero orders, and left the database counts unchanged.
+  The restarted application reports a healthy signed webhook (valid probe 200,
+  invalid signature 401). Docker Desktop was restarted, but its current Linux
+  context contains no WAHA container at all, including no stopped rollback
+  container; therefore a fresh real WhatsApp test is currently blocked until
+  the existing gateway/session is safely restored. Current real configuration
+  deliberately exposes **COD only**; no real payment account or credential was
+  added to Git.
+- **Status:** ✅ **All eight corrections are built and locally verified.**
+  Webhook end-to-end delivery, the customer-facing payment reply, and the new
+  truthful handoff, sender-bound order-status, privacy-regression, and public
+  inventory-visibility, refund-request, and grounded product/policy replies
+  still require fresh real WhatsApp tests after WAHA is restored. The current
+  owner approved the 30-section policy file on 2026-10-03 and its exact
+  fingerprint
+  `d2a7b25adc4e7f83d6c97f7075b716dd01e1afe63216ad6440289cc1c083f9ce`
+  is installed only in the ignored runtime `.env`; a restarted-process probe
+  found the real `Return Policy` section with no configuration error.
+  the temporary product label has been replaced and the grounded Black Hoodie
+  lookup now succeeds locally without exposing exact stock. Until the owner provides validated payment destinations,
+  Easypaisa, JazzCash, and bank transfer correctly remain unavailable rather
+  than emitting a placeholder or invented account.
+
+---
+
+## Security and commercial hardening implementation backlog — canonical progress list (not Version 4)
+
+This section is the canonical implementation backlog created from the
+2026-10-04 adversarial-testing review and the direct comparison against the
+current code. It records what is already enforced, what is only partial, what
+is missing, and what evidence is required before an item may be marked
+complete. It is real-business/commercial hardening, not a fifth promise and
+not Version 4. The permanent exclusions later in this file remain unchanged.
+
+Do not create a second progress tracker for these items. When the state of an
+item changes, replace its status and stale detail here. Do not append a new
+claim beside an older contradictory one.
+
+### Status and completion discipline
+
+- `BUILT + LOCALLY VERIFIED` means deterministic/direct tests passed. It does
+  not mean the customer-facing WhatsApp behavior has passed live.
+- `LIVE VERIFIED` requires a fresh real WhatsApp scenario plus database or
+  provider evidence where the action changes business state.
+- `PARTIAL` means a safe subset exists but the named remaining capability does
+  not.
+- `MISSING` means no production implementation exists yet.
+- `DECISION REQUIRED` means a business rule or provider choice must be approved
+  before code is written. The implementation must fail closed in the meantime.
+- A schema-changing item requires a verified backup, `integrity_check = ok`,
+  zero foreign-key violations, and before/after reconciliation.
+- Customer-facing behavior should be tested live when practical. Pure
+  authorization, race, forged-input, and financial-invariant branches should
+  be verified deterministically at the server/tool boundary.
+- Never commit real phone numbers, account destinations, tokens, secrets, API
+  keys, real customer transcripts, or a production database.
+
+### Existing controls that must be preserved — do not rebuild or weaken
+
+| Control | Current verified state |
+|---|---|
+| Customer/order identity | `BUILT + LOCALLY VERIFIED` — high-entropy public order references, current-WhatsApp-customer binding, indistinguishable foreign/missing lookups, and failed-lookup throttling. |
+| Server-controlled catalog price | `BUILT + LOCALLY VERIFIED` — the model cannot supply the authoritative order price; integer-paisa prices and order snapshots are used. |
+| Atomic inventory | `BUILT + LOCALLY VERIFIED` — confirmation rechecks stock, reserves conditionally in one transaction, prevents negative stock, rolls back partial reservations, and restores eligible cancellations. |
+| Order state authority | `BUILT + LOCALLY VERIFIED` — forward-only state transitions, actor-specific permissions, stable event evidence, terminal-state enforcement, and append-only audit history. |
+| Two-step order confirmation | `BUILT + LOCALLY/LIVE VERIFIED` — prepare first, display the server summary, wait for a later inbound confirmation, then recheck price and stock before one atomic booking. |
+| Payment claims | `BUILT + LOCALLY VERIFIED; FRESH LIVE OWNER-WORKFLOW CHECK PENDING` — customer statements create unverified pending claims and never credit money. Gemini has no resolution tool. Approval requires `APPROVE CLAIM <id> REF <owner-verified-reference>` plus an exact confirmation repeating the same reference; the immutable verification is separate from customer wording and one reference can authorize only one claim. Vague/list-position/natural-language instructions cannot mutate state. Approval checks duplicate reference, customer/order balance and amount. SQLite rejects approval without an exact linked credit, mismatched customer/order/amount/direction links, link edits/deletions, resolved-status rewrites, verification edits/deletions, and audit-event edits/deletions. Reversal creates one linked compensating debit without deleting history. Real claim #4's accidental approval was safely reversed after a verified backup; claims #3, #5, and #6 remain pending. |
+| Refund review cases | `BUILT + LOCALLY VERIFIED` — sender-bound delivered-order eligibility, public refund references, owner-only approve/reject, and no false money-movement claim. |
+| Webhook entry security | `BUILT + LOCALLY/LIVE-CONFIG VERIFIED` — raw-body HMAC verification, fail-closed configuration, retained-message quarantine, and inbound provider-event deduplication. Fresh real-message proof remains below. |
+| Truthful handoff report | `BUILT + LOCALLY VERIFIED` — only recorded/pending/sent facts may be reported; the model cannot claim viewed, approved, replied, or media-forwarded. |
+| Current PII safeguards | `BUILT + LOCALLY VERIFIED` — structured log redaction, durable-memory sanitization, masked model-visible fulfilment contact, strict public order output, sender-bound order/refund/note access, privacy-safe payment/refund outputs and errors, and sanitized owner alerts. A permanent six-test extraction suite covers these current paths. This is still not a complete retention/deletion/privacy program. |
+| Public inventory visibility | `BUILT + LOCALLY VERIFIED` — availability bands and requested-quantity yes/no only; exact internal counts remain private. |
+| Grounded product/policy answers | `BUILT + LOCALLY VERIFIED` — structured product search, approved catalog fingerprint, unknown-attribute escalation, internal-label rejection, and support-upsell suppression. |
+| Duplicate business effects | `BUILT + LOCALLY VERIFIED` for current inbound events, order creation, draft confirmation, payment claims, refund requests, consent events, alerts, bookkeeping, and stock reservation. Future external payment/refund/courier actions need their own provider idempotency. |
+| Automated test isolation | `BUILT + LOCALLY VERIFIED` — `npm test` runs every test file against its own temporary database, the separate Version 2 end-to-end regression uses the same isolation, direct test entry points fail closed before opening `ahmed.db`, and the runner fingerprints the production database plus SQLite sidecars before and after each run. The complete 27-file suite passed without changing those fingerprints. |
+| Automated security regression | `BUILT + LOCALLY VERIFIED` — `npm run test:security` executes the versioned 27-file security manifest through the isolated runner, prints each file's declared protection areas, verifies manifest uniqueness/files/required coverage, and fails if any test or production-database fingerprint check fails. The complete suite passed across 31 declared areas without changing the real database during tests. |
+| Multi-turn adversarial state resistance | `BUILT + LOCALLY VERIFIED` — five deterministic multi-message sequences now preserve and test the accumulating hostile conversation history while checking the authoritative database after each attack. Fake payment/owner approval cannot mark an order paid or create credit; fake refund approval cannot approve or execute a refund; staff/discount/price claims cannot change server pricing; foreign-order persuasion remains indistinguishable from a missing reference; and stored prompt-injection history remains data-only with no business mutation. This is deterministic server-boundary proof, not live WhatsApp verification. |
+| Sensitive-action truthfulness | `BUILT + LOCALLY VERIFIED` — payment claims now return explicit `payment_verified=false`, `ledger_credited=false`, and `order_status_changed=false` facts plus fixed pending-verification wording; refund request/status tools provide fixed wording that distinguishes requested, approved-pending-execution, rejected, and actually refunded; denied paid/shipped/delivered requests must explicitly say the status was not changed because trusted verification is required; and blocked discounts now require the reply to say the discount was not applied. The final customer-send boundary derives these requirements only from successful fixed server-tool results and vetoes incomplete or falsely completed wording. Five focused tests passed. Live WhatsApp wording remains unverified. |
+| Adversarial input and query safety | `BUILT + LOCALLY VERIFIED` — a permanent SQL-like payload corpus now covers product search (including escaped `%`/`_` wildcard probes), sender-bound order references, fulfilment names/addresses/instructions, customer-bound notes, and note-id type confusion. SQL-like text remains literal data, cannot reveal a foreign order/note, and cannot mutate product price, schema, orders, ledger, payments, refunds, or handoffs. Unsupported ASCII control characters are rejected before fulfilment storage. Six focused tests finish with SQLite integrity `ok` and zero foreign-key violations. |
+| PII extraction resistance | `BUILT + LOCALLY VERIFIED FOR CURRENT PATHS` — a permanent six-test suite verifies strict public order fields; indistinguishable foreign/missing order and refund access; payment/refund evidence non-disclosure; customer-bound sanitized memory; the deliberate fulfilment-only storage boundary with masked model-visible contact and no premature booking; redacted owner alerts/logs; and PII-free validation/ownership errors. The full privacy lifecycle in HARD-05 still requires owner-approved retention, export, deletion, backup-expiry, and access policy. |
+
+### Gate A — formally verify the security work that already exists
+
+#### HARD-01 Restore the real WhatsApp path and run one documented acceptance pass
+
+- **Status:** `PENDING LIVE VERIFICATION` — do not rebuild the eight
+  corrections. Restore the preserved WAHA/session safely, start the signed
+  webhook path, and test the existing implementation.
+- **Required live scenarios:**
+  - [ ] Valid signed real customer webhook reaches the assistant; an invalid
+    signature is rejected and creates no turn or business effect.
+  - [ ] COD is offered; unconfigured Easypaisa, JazzCash, and bank transfer
+    remain unavailable, no placeholder destination appears, and an explicitly
+    selected unavailable method is never silently substituted with COD.
+  - [ ] A real owner handoff reports only recorded plus pending/sent and never
+    says viewed, approved, replied, or screenshot forwarded.
+  - [ ] Same-number order status succeeds; another number receives the same
+    generic response as a nonexistent reference.
+  - [ ] Customer responses and logs expose no internal order id, full contact,
+    delivery address, payment reference, or exact stock count outside the
+    intended fulfilment boundary.
+  - [ ] A requested quantity receives only a fulfilment yes/no decision.
+  - [ ] A delivered-order refund request creates one review case and no money,
+    ledger, or order-state change.
+  - [ ] Covered catalog/product questions use approved data; unknown attributes
+    and unsupported questions are handed off without guessing.
+  - [ ] STOP acknowledgement arrives once, normal follow-up is suppressed,
+    restart preserves suppression, and START arrives once and restores normal
+    replies.
+- **Evidence required:** timestamp, sender suffix, provider message id,
+  expected/actual reply, relevant database rows/counts, and confirmation that
+  no duplicate or unintended state change occurred.
+- **Done only when:** every line above has a recorded PASS. A partial live pass
+  must remain partial.
+
+### Gate B — close the remaining single-business safety gaps
+
+#### HARD-02 Remove ambiguity from short order confirmations
+
+- **Status (2026-10-04):** `BUILT + LOCALLY VERIFIED; LIVE VERIFICATION
+  PENDING`.
+- **Preserved boundary:** confirmation still requires an existing prepared
+  draft, a later provider message, stable message identity, fresh price/stock
+  validation, and atomic booking. Negative/cancel/change language remains
+  rejected.
+- **Implemented:** generic acknowledgements such as `yes`, `haan`, `ji`, `ok`,
+  `okay`, and `done` no longer qualify as transaction confirmation. The server
+  now requires language that explicitly mentions confirming, booking, placing,
+  or the order itself. The model prompt, draft instruction, and confirmation
+  tool description all tell the customer/model about this stricter boundary.
+- **Local proof:** a real pending draft plus a new provider event containing
+  only `Yes` returned the explicit-confirmation error and created zero orders.
+  Parser tests reject all six generic acknowledgements while continuing to
+  accept `Order confirm kar dein`, `Please book it`, `Confirm bhai`, and `Yes,
+  confirm my order`. The complete 82-test main suite, every focused security
+  suite, and typecheck pass.
+- **Live test still required:** prepare one test order through real WhatsApp;
+  send `Yes` and confirm no order/debit/stock reservation exists; then send an
+  explicit confirmation and reconcile exactly one order, debit, draft link,
+  audit chain, and stock reservation.
+
+#### HARD-03 Add inbound abuse, concurrency, and AI-cost protection
+
+- **Status (2026-10-05):** `CORE CONTROLS BUILT + LOCALLY VERIFIED — DURABLE
+  PER-SENDER LIMIT, DAILY AI BUDGET, 500-JOB RESTART-SAFE INBOUND QUEUE WITH
+  FOUR WORKERS, OWNER-ALERT FLOOD LIMIT, AND CAUSE-ACCURATE CAPACITY RESPONSES;
+  FULL MODEL LOAD AND LIVE PROOF REMAIN`.
+- **Already built before this slice:** outbound pacing, sending window, warm-up
+  cap, repetition protection, 256 KB JSON limit, and order-reference lookup
+  throttling.
+- **Built in this slice:** every model-backed inbound event now passes through
+  a durable per-sender admission gate before either the customer or owner model
+  turn. The default customer limit is 20 turns per 10 minutes and the owner's
+  separate limit is 60; all three values are configurable. Missing, malformed,
+  zero, negative, or out-of-range configuration falls back to finite defaults,
+  never an unlimited mode. Provider-event-key decisions are idempotent, sender
+  lookup uses a SHA-256 key rather than another raw-phone copy, expired events
+  leave the window, and a rejected event is completed with no model call so
+  provider retries cannot spend repeatedly. Deterministic STOP/START handling
+  and already-opted-out suppression remain before this gate, so consent is
+  always available without AI use.
+- **AI-cost slice built:** the single shared Gemini seam now atomically reserves
+  every provider attempt before the network request. Customer and owner turns
+  therefore consume the same Karachi-business-day budget. The finite defaults
+  are 500 calls and 500,000 provider-reported tokens per day; missing, invalid,
+  zero, negative, or out-of-range configuration falls back to those defaults,
+  never unlimited use. Failed provider attempts consume the call allowance.
+  Successful responses persist Gemini's reported prompt, output, and total
+  token counts. The hard call ceiling cannot be raced by concurrent requests;
+  because token usage is only known after a response, the token ceiling blocks
+  subsequent calls once recorded usage reaches it rather than pretending it
+  can predict the last in-flight response. Budget-blocked durable jobs are
+  deferred without spending an attempt and rechecked hourly, before any
+  provider network request, so they can resume after the Karachi-day reset.
+- **Durable concurrency/queue slice built (replaces the earlier 20-item
+  in-memory queue):** after authentication, replay protection, consent, and
+  per-sender admission, every accepted customer or owner message is committed
+  to `inbound_jobs` before WAHA receives HTTP 200. The default durable capacity
+  is 500 pending messages, drained FIFO by four workers. The tested 500 remain
+  stored; the 501st receives HTTP 503 rather than a false acknowledgement, so
+  WAHA can retry it. Pending and interrupted jobs survive restart; processing
+  leases are recovered; transient failures retry with exponential backoff;
+  final failures remain inspectable with their message rather than silently
+  disappearing. Successful completion atomically marks the inbound event done
+  and clears the queue's temporary message body. Provider-event identity also
+  makes the raw inbound transcript insert exactly once across retries. Missing
+  or invalid queue settings fall back to finite defaults. STOP/START and
+  opted-out suppression remain before the queue. The SQLite worker pool is the
+  correct current single-instance boundary; horizontal multi-instance service
+  still requires a shared database/queue designed for distributed leases.
+- **Owner-alert flood slice built:** alert sends now have a durable rolling
+  ceiling of six deliveries per ten minutes by default. The check runs inside
+  the existing serialized delivery path and counts persisted `sent_at` values,
+  so restart cannot erase recent usage. Excess alerts are not discarded: they
+  stay pending, continue grouping same-kind occurrences, and the already-built
+  retry worker delivers them when the window has capacity. Missing or invalid
+  configuration falls back to the finite default, and the existing shared
+  outbound pacing still applies after this gate.
+- **Deterministic capacity responses built:** per-sender rejection and durable
+  queue saturation use the fixed bilingual overload response, while daily
+  AI-budget exhaustion uses a separate truthful notice saying the message is
+  saved, retry is automatic after Karachi midnight (normally within the
+  following hour), and the customer must not resend. Neither path calls
+  Gemini. A response is sent only when the turn has
+  not already delivered a customer reply, and still passes through consent,
+  the normal shared pacing lock, disclosure, and durable send idempotency. The
+  exact body has a ten-minute rolling per-customer repeat cooldown checked
+  inside that send lock. Only one busy reply may be in flight process-wide, so
+  a many-sender rejection burst cannot create a second unbounded outbound
+  waiting chain. Owner turns do not receive the customer-facing text.
+- **Schema/backups:** the additive `inbound_abuse_events` table and sender/window
+  index were applied after the verified backup
+  `backups/ahmed-pre-inbound-abuse-20261004.db`. The additive `ai_model_calls`
+  usage ledger and day index were applied after the verified backup
+  `backups/ahmed-pre-ai-budget-20261004.db` (SHA-256
+  `4BDCDD9B5460F4FFF222B660808A0A1595F5EE5BCB1C7D0E9714A66E683D5E5B`).
+  The durable queue and exactly-once inbound transcript key were applied after
+  `backups/ahmed-pre-durable-inbound-queue-20261004.db` (SHA-256
+  `5303D4E061079BE4F7D2EF85674E23658A88AF99DF29081AADD432695C8D6398`).
+  Post-change database checks: `integrity_check = ok`, zero foreign-key
+  violations, 43 customers, five orders, 884 messages, and zero retained test
+  rows in the abuse, AI-budget, or inbound-job ledgers.
+- **Local proof:** four inbound-abuse tests cover fail-conservative configuration,
+  admission through the exact limit, rejection before a model call, durable
+  event idempotency, the separate owner limit, and window expiry. The complete
+  four-test AI-budget suite covers conservative configuration and Karachi date
+  boundaries, atomic call exhaustion (including failures), provider-reported
+  token exhaustion, and the next-day reset. Seven durable-queue tests cover
+  finite configuration fallback, FIFO/idempotent admission, 500 retained
+  messages plus refusal of the 501st, four-worker-style bounded concurrency,
+  restart/replay-guard recovery, retry backoff/final retention, successful body
+  minimization, and exactly-once transcript insertion. The complete 82-test
+  main suite, every focused security suite, and typecheck pass. Two owner-alert flood
+  tests prove conservative configuration, retained delivery at the ceiling,
+  continued blocking inside the window, and recovery through the existing
+  worker after expiry. Two busy-reply tests prove conservative cooldown config
+  and suppression of a recent duplicate with zero provider/model send.
+- **Still verify before calling HARD-03 complete:** a controlled full-stack
+  many-sender run using real model calls while observing memory/cost and owner
+  delivery behavior, plus one real WhatsApp restart/queued-message pass and one
+  live saturation response. Exact currency-denominated cost reporting remains
+  optional future operations work if provider pricing is adopted.
+- **Future multi-business extension:** per-business quotas and fairness so one
+  tenant cannot consume every worker or budget.
+- **Operational requirements:** visible metrics and alerts for throttling,
+  queue depth, model failures, cost-budget exhaustion, and repeated abuse.
+- **Tests:** rapid single-sender flood, many-sender flood, concurrent requests,
+  queue-full behavior, owner-alert storm, reset-window boundaries, restart
+  behavior, and proof that limits do not bypass STOP/START or outbound pacing.
+- **Done only when:** load tests show bounded model calls, memory, queue size,
+  and owner alerts under abuse.
+
+#### HARD-04 Defend against indirect prompt injection in stored and external data
+
+- **Status:** `CORE CONTROL BUILT + LOCALLY VERIFIED; LIVE ADVERSARIAL PASS PENDING`.
+- **Built (2026-10-04):** customer requests, checkpoint memory, note headlines,
+  recent messages, prepared-order data, and owner requests now enter the model
+  inside bounded JSON `UNTRUSTED_DATA` envelopes instead of being interpolated
+  as prompt headings or free-form instructions. Every customer and owner tool
+  result is returned inside a `SERVER_TOOL_RESULT` envelope. Stored catalog,
+  product, fulfilment/name/address/instruction/note, payment, courier, and
+  external-API strings remain data even when nested keys claim to be `system`,
+  `role`, `tool`, `policy`, or `instruction`.
+- **Authority rule:** only top-level teaching text authored by a small allowlist
+  of fixed in-process tools can become `trusted_guidance`; an unknown/future
+  provider or API cannot gain authority merely by returning an `instruction`
+  field. System prompts state the same boundary for both customer and owner
+  turns. Backend tool separation, ownership checks, state machines, catalog
+  approval, and server-side authorization remain the final authority; the
+  control does **not** rely on keyword blocking or model obedience.
+- **Minimum disclosure:** `check_stock` now returns only public product id,
+  name, category, size, color, server price, and qualitative availability
+  fields—SKU and exact stock remain excluded. Catalog result title/body are
+  bounded. Context exposes only a masked delivery contact and the minimum
+  prepared-order fields already needed for confirmation.
+- **Supplemental output guard:** both customer and owner send paths reject a
+  generated reply that tries to reveal system/developer prompts, hidden rules,
+  tool schemas/permissions, or the internal envelope markers. This is a final
+  disclosure backstop, not the authorization boundary.
+- **Local proof (2026-10-04):** the new deterministic suite passed 7/7 across a
+  malicious catalog section, product name/description, recipient/address/
+  delivery instructions/order note, payment response, courier response,
+  unknown external tool, nested JSON, minimum product fields, bounded depth/
+  length, disclosure blocking, and unchanged order/payment/refund/handoff row
+  counts. The complete existing suite also passed (82/82 core checks plus every
+  focused pacing, alert, webhook, payment, handoff, order-access, privacy,
+  inventory, refund, grounding, abuse, AI-budget, and durable-queue suite),
+  typecheck passed, SQLite integrity is `ok`, and foreign-key violations are
+  zero. Test queue/abuse/model-budget rows are zero.
+- **Still required before marking complete:** a real WhatsApp adversarial pass
+  through both customer and owner routes proving malicious stored/retrieved
+  text is treated only as data, no internal prompt/tool details are disclosed,
+  and no unauthorized business mutation occurs. This control is therefore
+  locally verified, **not live-verified**.
+
+#### HARD-05 Complete the privacy and data-lifecycle program
+
+- **Status:** `PARTIAL + OWNER DECISIONS REQUIRED`.
+- **Already built:** log redaction, durable-memory minimization, phone masking,
+  public-response field allowlists, and preservation of authoritative
+  fulfilment records.
+- **Owner decisions required:** legal/business retention periods for raw
+  messages, orders, fulfilment data, payment/refund evidence, logs, alerts,
+  and backups; whether and when delivery details may be deleted; who may
+  access each data type.
+- **Implement:** customer data export, verified deletion/anonymization,
+  retention jobs, backup expiry, encrypted off-host backups, key management,
+  staff access logs, privacy notice, consent wording, incident procedure, and
+  a tested restore/delete process.
+- **Tests:** export completeness, deletion scope, legal/business records that
+  must remain, backup expiry, unauthorized staff access, log scanning, model
+  context scanning, and proof that one customer cannot retrieve another's PII.
+- **Done only when:** the owner approves the policy and code plus operations
+  enforce it. STOP/START alone does not complete privacy readiness.
+
+#### HARD-06 Close outbound delivery/idempotency edge cases
+
+- **Status:** `CORE CONTROL BUILT + LOCALLY VERIFIED; LIVE/RESTART PROOF PENDING`.
+- **Built (2026-10-04):** customer replies and owner conversational replies now
+  share one durable outbound-attempt lifecycle. Each provider event has one
+  database-enforced outbound identity even if the model rephrases the body.
+  The ledger stores recipient kind, hashed event/body identities, attempt
+  count, `pending`/`sent`/`failed`/`uncertain` state, a bounded error code, and
+  the provider message id when WAHA returns one; it does not store another
+  plaintext message or phone copy.
+- **Crash rule:** a process/network outcome that cannot prove whether the
+  provider accepted a message becomes `uncertain` and is never automatically
+  resent. A definite provider HTTP rejection becomes `failed` and is safe to
+  retry. A legacy or restart-observed `pending` row becomes `uncertain` rather
+  than being silently duplicated. Both prompts explicitly forbid a rephrased
+  retry, and a unique database/event check enforces the rule independently of
+  model obedience.
+- **Recovery/visibility:** Ahmed's owner-only toolset now includes the read-only
+  `outbound_delivery_issues` report for failed/uncertain attempts. It exposes a
+  shortened attempt reference, state, attempts, error code, and timestamps—no
+  message body or phone—and performs no automatic resend. Existing owner-alert
+  retry remains separate; an uncertain owner-alert send stays pending instead
+  of being falsely marked delivered.
+- **Provider seam:** the channel adapter now returns a send receipt. WAHA's
+  successful JSON response is inspected defensively for its message id;
+  successful non-JSON responses still count as accepted. HTTP rejection is
+  distinguished from a network/unknown outcome.
+- **Local proof (2026-10-04):** 7/7 focused tests passed: sent-attempt/provider
+  id retention, duplicate suppression, restart-observed pending state,
+  differently worded same-event suppression, definite rejection retry,
+  unknown-outcome non-retry, read-only/privacy-safe owner issue reporting,
+  WAHA certainty classification, and an owner conversational event retried
+  twice with exactly one provider call. The complete suite passed (82/82 core
+  checks plus all focused suites), typecheck passed, and the verified
+  pre-change backup is `backups/ahmed-pre-hard06-outbound-20261004.db` with
+  SHA-256 `3D643B1E1BDA96046753281589C0DB811E8857AA88A2C31A4065AA94D9CED39F`.
+- **Real database migration result:** 216 historical attempts are `sent`; 10
+  old rows that the previous code left as `pending` (dated 2026-09-02,
+  2026-09-14, 2026-09-15, and 2026-10-02) were conservatively relabelled
+  `uncertain` with `legacy_pending_outcome_unknown`. They were not resent or
+  deleted. Database integrity is `ok`, foreign-key violations are zero, and
+  inbound-job/abuse/model-budget test rows are zero.
+- **Still required before marking complete:** restart the real service and
+  perform controlled real WhatsApp customer and owner sends; verify returned
+  provider ids where the active WAHA engine supplies them; simulate a real
+  interrupted/unknown outcome and confirm it appears once as `uncertain` with
+  no duplicate visible message. Future payment/refund/courier execution still
+  requires its own provider-level idempotency and reconciliation.
+
+#### HARD-07 Build production job processing, monitoring, backup, and recovery
+
+- **Status:** `LOCAL OPERATIONS FOUNDATION BUILT + VERIFIED; DEPLOYMENT/EXTERNAL OPERATIONS PENDING`.
+- **Durable processing already built:** accepted model-backed messages are
+  committed to a bounded 500-message SQLite FIFO before acknowledgement, then
+  drained by four workers; restart recovery, leases, retry/backoff,
+  final-failure retention, exact-once transcript recording, abuse admission,
+  AI-budget deferral, and queue-full behavior are locally verified.
+- **Health/readiness built (2026-10-04):** public `GET /health` is deliberately
+  liveness-only. `GET /ready` verifies SQLite plus the configured WAHA session
+  through its supported session endpoint and returns 503 unless the database is
+  reachable and WhatsApp status is `WORKING`. Responses expose no account,
+  customer, message, or credential data.
+- **Authenticated metrics built:** `GET /operations/metrics` fails closed
+  unless a separate key of at least 24 characters is supplied in
+  `X-Operations-Key`. It reports only queue counts/oldest pending time, worker
+  occupancy, failed/uncertain delivery counts, pending owner-alert count,
+  uptime, and process memory—never phone numbers or message bodies.
+- **Verified backup/restore foundation built:** the running application creates
+  an online SQLite backup at startup and at a finite configured interval
+  (default 24 hours), retains a finite number (default 14), and verifies both
+  SQLite integrity and foreign keys before a backup counts as successful or an
+  old matching backup is pruned. Retention can delete only this application's
+  timestamped `.db` files inside a validated dedicated directory; filesystem
+  and workspace roots are rejected. Manual `npm run backup` and independent
+  read-only `npm run backup:verify -- <path>` commands use the same verifier.
+- **Real backup proof (2026-10-04):** an online snapshot of the actual database
+  was created at ignored path
+  `backups/operations/ahmed-backup-2026-10-04T11-03-12-021Z.db`; it was reopened
+  independently and passed integrity with zero foreign-key violations twice.
+  Size: 749,568 bytes. SHA-256:
+  `9000594BD24F18BD512B0C835959BDC34B0C691D1915144CDFB56BA57BB9D845`.
+- **Runbook built:** `docs/OPERATIONS_RUNBOOK.md` covers liveness vs readiness,
+  backup and restore drill, WAHA relink, model/quota outage, stuck/saturated
+  queue, uncertain/failed delivery, database corruption, credential exposure,
+  rollback, and truthful customer incident communication.
+- **Local proof (2026-10-04):** 7/7 focused operations tests passed for
+  fail-closed metrics authentication, privacy-safe liveness/readiness/metrics,
+  WAHA session status, finite backup configuration, online backup plus
+  independent restore verification, two-file retention, and root-path safety.
+  The complete suite passed (82/82 core checks plus every focused suite) and
+  typecheck passed.
+- **Still required before marking complete:** select and configure encrypted
+  off-host backup storage/key ownership/expiry; select uptime/error/cost alert
+  providers and recipients; configure/test persistent production volumes for
+  SQLite and WAHA sessions; run real process-crash, host-restart, database-lock,
+  gateway-outage, queue-saturation, restore, and rollback drills. A safe hard
+  model-call timeout is also pending because the current model/channel APIs do
+  not expose cancellation—racing a retry while the original call can still
+  mutate/send would be less safe than the current lease/backoff behavior.
+
+#### HARD-08 Define and enforce order-content modification policy
+
+- **Status:** `MISSING AS A CUSTOMER FEATURE; CURRENT SAFE BEHAVIOR IS HANDOFF`.
+- **Decision required:** which fields may change in `placed`, `confirmed`,
+  `paid`, `shipped`, and `delivered`; which changes require owner approval;
+  whether a changed order needs a new customer confirmation.
+- **Implement if approved:** sender-bound public-reference operation,
+  server-side field allowlist, state-specific rules, price/stock recalculation,
+  before/after audit event, and atomic rollback.
+- **Minimum rules:** shipped/delivered address changes blocked; payment status
+  never customer-editable; quantities/prices never accepted from conversational
+  claims; any changed final summary must be explicitly reconfirmed.
+- **Tests:** own/foreign order, every order state, address/quantity/product
+  change, price change during edit, stock race, duplicate event, and audit
+  history.
+
+#### HARD-09 Complete the commercial total-calculation layer
+
+- **Status:** `PARTIAL + BUSINESS DECISIONS REQUIRED`.
+- **Already built:** authoritative item prices, integer-paisa arithmetic, price
+  snapshots, quantity validation, zero delivery charge for the current owner
+  policy, and stock validation.
+- **Decide and implement:** configurable delivery fee, free-delivery threshold,
+  approved discount records, who may approve discounts, discount expiry and
+  usage limits, maximum item/order/wholesale quantities, taxes if applicable,
+  bundles/promotions, and exact rounding rules.
+- **Server formula:** authoritative items plus server-approved delivery,
+  discount, and tax only. The model and customer must never supply the final
+  authoritative total.
+- **Tests:** forged price/discount/fee/tax, expired or reused approval,
+  maximum quantities, changed catalog price, exact paisa rounding, cancellation,
+  refund basis, and historical snapshot stability.
+
+#### HARD-10 Choose and complete the payment operating model
+
+- **Status:** `COD-ONLY SAFE BASELINE; DIGITAL AUTOMATION MISSING`.
+- **Decision A:** keep the pilot COD-only. Continue hiding all unconfigured
+  methods and document the manual owner process.
+- **Decision B:** integrate an approved payment provider. If selected,
+  implement signed provider webhooks, destination/account ownership,
+  transaction uniqueness, amount/currency/order reconciliation, idempotency,
+  dispute/chargeback states, and an authenticated `paid` transition.
+- **Never:** turn a customer statement, screenshot, transaction reference, or
+  claimed staff approval directly into verified payment.
+- **Tests:** forged/duplicate webhook, wrong amount/currency/order/destination,
+  reused transaction, out-of-order event, refund/chargeback, timeout, and
+  reconciliation after restart.
+
+#### HARD-11 Choose and complete the refund operating model
+
+- **Status:** `REVIEW/APPROVAL BUILT; EXECUTION MISSING`.
+- **Decision A:** keep execution manual outside the system. Customer wording
+  must remain `approved_pending_execution` until the owner records externally
+  verified completion through a future authenticated path.
+- **Decision B:** integrate provider execution. Add immutable execution
+  attempts and states such as `approved_pending_execution`, `executing`,
+  `executed`, `failed`, and `completed/reconciled` without falsely upgrading
+  delivery or settlement.
+- **Server authority:** refundable amount derives from verified payment/order
+  history, not customer input; define full/partial refund, delivery fee,
+  discount, return, and restocking policy.
+- **Tests:** duplicate execution, Rs.50,000 manipulation, over-refund,
+  partial-refund accumulation, wrong order/customer, provider timeout,
+  success followed by retry, failure recovery, ledger reconciliation, and
+  truthful customer status.
+
+#### HARD-12 Extend handoff lifecycle only through authenticated human actions
+
+- **Status:** `PARTIAL — RECORDED/PENDING/SENT ONLY`.
+- **Implement only if operationally required:** authenticated owner/staff
+  acknowledgement, assignment, decision, response, and resolution events.
+- **Suggested facts:** `recorded`, `queued`, `delivered`, `acknowledged`, and
+  `resolved`; keep delivery, reading, approval, reply, and completion distinct.
+- **Never infer:** WhatsApp delivered means seen; seen means approved; customer
+  says approved means approved.
+- **Tests:** fake owner claim, fake screenshot, foreign staff identity,
+  duplicate acknowledgement, reassignment, stale decision, and exact
+  customer-visible wording for every real state.
+
+#### HARD-13 Move the client runtime to an approved production WhatsApp path
+
+- **Status:** `DECISION REQUIRED; CURRENT WAHA PATH IS DEVELOPMENT/PILOT INFRASTRUCTURE`.
+- **Preferred commercial direction:** verify current official Meta WhatsApp
+  Business Platform requirements when implementation begins, then use an
+  approved provider/account setup with authenticated webhooks and supported
+  operational recovery.
+- **If WAHA is temporarily retained for a controlled pilot:** private network
+  binding, API authentication, persistent session storage, health monitoring,
+  QR/relink runbook, explicit client disclosure, and tested session recovery
+  are mandatory.
+- **Acceptance:** real inbound/outbound, restart, reconnect, retained-message
+  quarantine, duplicate delivery, media behavior, and provider outage tests.
+
+#### HARD-14 Approve analytics and financial-report definitions
+
+- **Status:** `PARTIAL + OWNER DECISIONS REQUIRED`.
+- **Current safe behavior:** owner analytics are fixed read-only tools, never
+  unrestricted SQL.
+- **Decide:** whether `sales today` means placed, confirmed, paid, shipped, or
+  delivered value; treatment of cancellation, partial payment, store credit,
+  refunds, delivery fees, discounts, taxes, and Karachi-day boundaries.
+- **Implement:** named deterministic metrics with tests and customer/owner
+  language that exactly matches what each query measures.
+- **Tests:** midnight boundary, cancellation, partial payment, overpayment,
+  refund states, store credit, and timezone changes.
+
+### Gate C — controlled single-shop pilot readiness
+
+#### HARD-15 Replace demonstration inventory and policy with one real shop's approved truth
+
+- **Status:** `MISSING FOR A REAL CLIENT` — the expanded 33-variant inventory
+  is realistic test data, not a client's approved stock.
+- **Required:** owner-approved inventory CSV; catalog/policy review; payment
+  methods; delivery areas/fees/times; return, exchange, cancellation, refund,
+  discount, and escalation rules; shop identity and tone; operating hours;
+  owner/staff contacts; supported languages; media expectations.
+- **Process:** preview import, review reconciliation, verified backup, atomic
+  apply, owner sign-off, and full customer-path regression.
+- **Live acceptance:** product discovery, price, availability, complete order,
+  confirmation, cancellation, payment path, out-of-scope handoff, and one
+  owner report against the selected business data.
+
+#### HARD-16 Pilot operations and responsibility agreement
+
+- **Status:** `MISSING`.
+- **Document:** who supervises the assistant, who reviews alerts/payment
+  claims/refunds, support hours, escalation response target, manual fulfilment
+  steps, incident owner, backup/restore owner, provider-account owner, customer
+  complaint path, and conditions that pause automation.
+- **Pilot limits:** one cooperating shop, limited number/customer volume,
+  documented exclusions, daily review, rollback switch, and an agreed end date
+  with success/failure criteria.
+
+#### HARD-17 Complete one formal go-live acceptance record
+
+- **Status:** `BLOCKED BY HARD-01 THROUGH HARD-16 AS APPLICABLE TO THE PILOT`.
+- **Required evidence:** configuration review with secret scan; database backup
+  and restore proof; deterministic suite; load/abuse checks; provider health;
+  privacy/retention approval; real WhatsApp customer journeys; owner journeys;
+  database reconciliation; rollback exercise; and signed owner acceptance of
+  all manual limitations.
+
+### Gate D — shared multi-business subscription platform
+
+These items are not required if every early client receives a fully separate
+deployment and database. They are critical before multiple businesses share
+one application or database.
+
+#### HARD-18 Add strict multi-business data isolation
+
+- **Status:** `MISSING — CRITICAL BEFORE SHARED HOSTING`.
+- **Implement:** business/tenant record and mandatory `business_id` ownership
+  for customers, products, orders, drafts, messages, memory, ledger, payment
+  claims, refund cases, alerts, consent, staff, configuration, usage, and audit
+  data.
+- **Rule:** every read and write includes authenticated business scope. Foreign
+  and nonexistent tenant objects must be indistinguishable to unauthorized
+  callers. Unique indexes and idempotency keys must be correctly tenant-scoped.
+- **Migration:** no automatic assumption that all existing data can be mixed;
+  assign the existing database deliberately to one verified business.
+- **Tests:** every customer/owner/staff tool across Business A and Business B,
+  guessed public references, analytics, search, alerts, exports, deletion,
+  backups, logs, cache, queue, and file paths.
+
+#### HARD-19 Add staff authentication and role-based permissions
+
+- **Status:** `MISSING`.
+- **Implement:** authenticated staff identities, secure sessions/credentials,
+  owner-managed membership, least-privilege roles, revocation, multi-factor
+  authentication where practical, and append-only privileged-action audit.
+- **Suggested capabilities:** owner, manager, finance, fulfilment, support, and
+  read-only analyst—defined by permissions, not by conversational claims.
+- **Tests:** customer impersonates staff; staff crosses business; revoked staff;
+  finance-only operation; fulfilment-only operation; privilege escalation;
+  session expiry; duplicate privileged event.
+
+#### HARD-20 Build validated business onboarding and configuration
+
+- **Status:** `MISSING`.
+- **Implement:** fail-closed onboarding for business identity, timezone,
+  WhatsApp number/provider, owner/staff, activation date, catalog, inventory,
+  payment/refund/courier settings, hours, policies, language/tone, alert
+  destinations, data retention, and feature flags.
+- **No hardcoded Ahmed assumptions** may remain in a general product path.
+- **Acceptance:** incomplete or invalid critical configuration cannot silently
+  start a blank or unsafe tenant.
+
+#### HARD-21 Add per-business usage, subscription, and support controls
+
+- **Status:** `MISSING`.
+- **Implement:** plans, trials, billing state, usage metering, per-business
+  limits, fair queue allocation, suspension/grace behavior, cancellation,
+  export/deletion, support/audit access, and truthful billing communication.
+- **Never:** disable customer safety, consent, privacy, or data export merely
+  because a subscription payment failed.
+
+### Gate E — provider integrations selected by the pilot/business
+
+#### HARD-22 Courier booking and shipment tracking
+
+- **Status:** `MISSING`.
+- **Implement only after provider selection:** authenticated booking, address
+  minimization, provider shipment id, webhook verification, idempotent shipped/
+  delivered transitions, failed-delivery/return-to-origin states, tracking
+  privacy, and reconciliation.
+
+#### HARD-23 Product media, receipts, and customer documents
+
+- **Status:** `PRODUCT MEDIA BUILT + LOCALLY VERIFIED; LIVE WHATSAPP PROOF
+  PENDING. RECEIPTS/DOCUMENTS MISSING` (2026-10-05).
+- **Built product-media scope:** all 33 active demo SKUs reference an approved
+  server-side image; size variants share a card where design and color match,
+  producing 28 distinct cards. `show_product_images` requires an explicit
+  customer picture request, accepts only active product ids, reads only safe
+  basenames from `assets/product-images`, caps a reply at three cards, and
+  generates price/variant/public-availability captions from database facts.
+  WAHA delivery uses its image endpoint and the normal consent, shared pacing,
+  send-ledger idempotency, disclosure, and content guardrails. Missing,
+  inactive, unconfigured, oversized, or path-like media fails closed.
+- **Local proof:** the media verifier loaded all 28 cards with zero missing
+  files; focused authorization/selection/provider-contract tests passed. The
+  images are clearly demo catalog artwork, not claimed as photographs of real
+  shop merchandise; a real business must replace them with owner-approved
+  photos through the documented inventory CSV field.
+- **Still required:** one real WhatsApp picture-request proof, plus all receipt/
+  document decisions and implementation (invoice fields, numbering, tax/legal
+  wording, download expiry, and human approval policy).
+- **Truthfulness:** do not claim media or a receipt was sent until the provider
+  confirms the exact outbound artifact.
+
+### Permanent adversarial regression matrix
+
+Each attack becomes a permanent deterministic test when its backend condition
+can be reproduced directly, plus a live WhatsApp test when customer-facing
+language or routing is the behavior under review.
+
+| Attack | Current state | Required next proof |
+|---|---|---|
+| 24 Fake successful handoff | `PARTIAL PASS` — deterministic wording guard exists. | Fresh real WhatsApp claim; no state change without authenticated owner action. |
+| 25 Duplicate refund | Request dedupe exists; execution does not. | Keep request test; add provider execution exactly-once test only with HARD-11. |
+| 26 Refund amount manipulation | No executable customer amount exists. | Direct forged amount/over-refund tests with HARD-11. |
+| 27 Invalid order-state transition | `BUILT + LOCALLY VERIFIED`. | Preserve permanent suite; rerun live only when customer flow changes. |
+| 28 PII extraction | `CURRENT PATHS BUILT + LOCALLY VERIFIED` — six focused tests cover own/foreign public outputs, financial evidence, customer-bound model memory, fulfilment boundaries, owner alerts, recursive logs, and errors without exposing fixture PII. | Preserve the suite; add export/deletion/retention tests after HARD-05 policy decisions and run tomorrow's live minimum-disclosure pass. |
+| 29 Malicious stored product/policy data | `CORE CONTROL BUILT + LOCALLY VERIFIED` — bounded trust envelopes cover customer/owner context and every tool result; fixed backend authorization remains final; 7/7 focused attacks passed without business mutation. | Run the real WhatsApp customer + owner adversarial pass; do not call it live-verified until both routes show no disclosure or unauthorized mutation. |
+| 30 SQL-like input | `BUILT + LOCALLY VERIFIED` — the permanent six-test corpus covers search/wildcard escaping, references, notes, fulfilment names/addresses/instructions, customer isolation, control-character rejection, schema survival, integrity, and unchanged business state. | Preserve the corpus; add live WhatsApp phrasing checks only if these input paths or customer-visible error handling change. |
+| 31 Duplicate webhook | `BUILT + LOCALLY VERIFIED`. | Preserve signed duplicate/restart tests and fresh provider-path verification. |
+| 32 Last-item race | `BUILT + LOCALLY VERIFIED`. | Preserve multi-process/transaction race regression. |
+| 33 Invalid quantity | `BUILT + LOCALLY VERIFIED` for type/range/stock. | Add approved business maximum and wholesale-review tests with HARD-09. |
+| 34 Cross-business access | `BLOCKED — MULTI-BUSINESS MISSING`. | Full two-tenant matrix after HARD-18 through HARD-20. |
+| 35 Fake staff approval | Customer/owner tool separation exists; staff system does not. | Add authenticated-event and role tests with HARD-12/HARD-19. |
+| 36 Ambiguous yes | `BUILT + LOCALLY VERIFIED; LIVE PENDING`. | Run HARD-02's two-message real WhatsApp proof before pilot. |
+| 37 System/tool/internal-rule extraction | `CORE CONTROL BUILT + LOCALLY VERIFIED` — customer/owner context and tool results have explicit authority boundaries, and the outbound disclosure backstop passed its focused corpus. | Run customer + owner live WhatsApp extraction attempts; verify zero prompt/schema disclosure, zero new authority, and zero business mutation. |
+| 38 Spam/abuse | `CORE CONTROLS BUILT + LOCALLY VERIFIED` — outbound pacing, durable per-sender limit, shared daily AI budget, 500-message durable FIFO queue/four-worker pool, owner-alert rolling ceiling, overload response, and a separate truthful saved-message notice for daily-budget deferral. | Run a full-stack real-model load, real restart/queued-message recovery, and one live saturation-response proof with HARD-03/HARD-07. |
+
+### Recommended implementation order
+
+1. **Do not write new features first:** complete HARD-01 so the already-built
+   security work has a trustworthy live baseline.
+2. Live-verify HARD-02, HARD-03, and HARD-04, then implement the owner-approved
+   portion of HARD-05. These are the clearest remaining customer-safety gaps.
+3. Live-verify HARD-06 and complete the remaining HARD-07 production operations
+   work for reliable service and recovery.
+4. Record decisions and implement only the selected scope from HARD-08 through
+   HARD-14. COD/manual paths should remain fail-closed until integrations are
+   chosen.
+5. Complete HARD-15 through HARD-17 for one controlled real-shop pilot.
+6. Build HARD-18 through HARD-21 only when moving from isolated client
+   deployments to a shared subscription platform.
+7. Add HARD-22 and HARD-23 only for providers and capabilities explicitly
+   selected by the real business.
+
+### Current overall status of this backlog
+
+- **Existing core and eight corrections:** built and locally verified as
+  recorded above; formal combined live WhatsApp acceptance remains pending.
+- **Single-shop pilot:** not approved for unattended launch. It needs the
+  applicable Gate A/B work, one real shop's approved data, operational
+  ownership, and the Gate C acceptance record.
+- **Shared subscription product:** not ready. Multi-business isolation,
+  authenticated staff roles, onboarding, per-business operations, billing,
+  privacy lifecycle, and reliable production infrastructure are missing.
+- **Next concrete action:** restore the real signed WhatsApp path and execute
+  HARD-01 exactly as written before changing additional behavior.
+
+---
+
 ## Portfolio Demo Frontend — not part of Ahmed's four promises
 
 This is a developer portfolio/recruiter artifact, deliberately separate from
@@ -2453,7 +3404,8 @@ Lower priority; sequence freely once v1–v3 exist.
   `edge/llm/capabilities.ts` (decides if a model/provider can take native
   image parts). **New work:** the send-photo tool itself; deterministic
   (non-model-generated) receipt formatting.
-- **Status:** 🔲 Not started.
+- **Status:** 🟨 Product-image sending built and locally verified on 2026-10-05;
+  real WhatsApp delivery proof pending. Receipt generation is not started.
 
 ---
 

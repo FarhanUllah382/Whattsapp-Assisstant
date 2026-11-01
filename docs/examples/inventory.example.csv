@@ -1,4 +1,34 @@
-sku,name,category,size,color,price,stock,active,aliases
-SHIRT-BLK-M,Casual Shirt,shirts,M,black,2750,12,true,shirt|casual tee
-KURTA-WHT-L,Classic Kurta,kurtas,L,white,3200,8,true,kurta|traditional kurta
-TROUSER-GRY-M,Everyday Trouser,trousers,medium,grey,4100,10,true,trouser|pants
+sku,name,category,size,color,price,stock,active,aliases,image_filename
+HD-BLK-M-001,Black Hoodie,hoodie,M,black,800,16,true,hoodie|black hoodie,black-hoodie-black.png
+SHIRT-NVY-S,Casual Shirt,shirt,S,navy,2200,12,true,shirt|casual shirt,casual-shirt-navy.png
+SHIRT-NVY-M,Casual Shirt,shirt,M,navy,2200,18,true,shirt|casual shirt,casual-shirt-navy.png
+SHIRT-WHT-L,Casual Shirt,shirt,L,white,2350,7,true,shirt|casual shirt,casual-shirt-white.png
+SHIRT-BLK-XL,Casual Shirt,shirt,XL,black,2400,4,true,shirt|casual shirt,casual-shirt-black.png
+KURTA-WHT-S,Classic Kurta,kurta,S,white,3200,9,true,kurta|traditional kurta,classic-kurta-white.png
+KURTA-WHT-M,Classic Kurta,kurta,M,white,3200,14,true,kurta|traditional kurta,classic-kurta-white.png
+KURTA-BLK-L,Classic Kurta,kurta,L,black,3400,6,true,kurta|traditional kurta,classic-kurta-black.png
+KURTA-NVY-XL,Classic Kurta,kurta,XL,navy,3500,3,true,kurta|traditional kurta,classic-kurta-navy.png
+TROUSER-BGE-S,Chino Trouser,trouser,S,beige,2800,8,true,trouser|pants|chinos,chino-trouser-beige.png
+TROUSER-BLK-M,Chino Trouser,trouser,M,black,2900,11,true,trouser|pants|chinos,chino-trouser-black.png
+TROUSER-GRY-L,Chino Trouser,trouser,L,grey,3000,5,true,trouser|pants|chinos,chino-trouser-grey.png
+TROUSER-NVY-XL,Chino Trouser,trouser,XL,navy,3100,2,true,trouser|pants|chinos,chino-trouser-navy.png
+JEAN-BLU-30,Slim Fit Jeans,jean,30,blue,3300,10,true,jeans|denim|pants,slim-fit-jeans-blue.png
+JEAN-BLK-32,Slim Fit Jeans,jean,32,black,3400,13,true,jeans|denim|pants,slim-fit-jeans-black.png
+JEAN-BLU-34,Slim Fit Jeans,jean,34,blue,3500,6,true,jeans|denim|pants,slim-fit-jeans-blue.png
+JEAN-BLK-36,Slim Fit Jeans,jean,36,black,3600,3,true,jeans|denim|pants,slim-fit-jeans-black.png
+TSHIRT-WHT-S,Basic T-Shirt,t-shirt,S,white,1200,20,true,t-shirt|tee|shirt,basic-t-shirt-white.png
+TSHIRT-BLK-M,Basic T-Shirt,t-shirt,M,black,1250,25,true,t-shirt|tee|shirt,basic-t-shirt-black.png
+TSHIRT-OLV-L,Basic T-Shirt,t-shirt,L,olive,1300,10,true,t-shirt|tee|shirt,basic-t-shirt-olive.png
+TSHIRT-NVY-XL,Basic T-Shirt,t-shirt,XL,navy,1350,6,true,t-shirt|tee|shirt,basic-t-shirt-navy.png
+SHOE-BLK-40,Running Shoes,shoe,40,black,4500,8,true,shoes|sneakers|trainers,running-shoes-black.png
+SHOE-WHT-41,Running Shoes,shoe,41,white,4600,10,true,shoes|sneakers|trainers,running-shoes-white.png
+SHOE-NVY-42,Running Shoes,shoe,42,navy,4700,5,true,shoes|sneakers|trainers,running-shoes-navy.png
+SHOE-GRY-43,Running Shoes,shoe,43,grey,4800,2,true,shoes|sneakers|trainers,running-shoes-grey.png
+SANDAL-BRN-39,Comfort Sandals,sandal,39,brown,2200,7,true,sandals|slippers,comfort-sandals-brown.png
+SANDAL-BLK-40,Comfort Sandals,sandal,40,black,2250,9,true,sandals|slippers,comfort-sandals-black.png
+SANDAL-TAN-41,Comfort Sandals,sandal,41,tan,2300,5,true,sandals|slippers,comfort-sandals-tan.png
+SANDAL-BRN-42,Comfort Sandals,sandal,42,brown,2350,3,true,sandals|slippers,comfort-sandals-brown.png
+JACKET-BLK-S,Lightweight Jacket,jacket,S,black,5200,6,true,jacket|coat,lightweight-jacket-black.png
+JACKET-NVY-M,Lightweight Jacket,jacket,M,navy,5400,9,true,jacket|coat,lightweight-jacket-navy.png
+JACKET-OLV-L,Lightweight Jacket,jacket,L,olive,5600,4,true,jacket|coat,lightweight-jacket-olive.png
+JACKET-CHR-XL,Lightweight Jacket,jacket,XL,charcoal,5800,2,true,jacket|coat,lightweight-jacket-charcoal.png

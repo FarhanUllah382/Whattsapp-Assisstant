@@ -160,7 +160,6 @@ The application saves the incoming text, loads the most recent 20 transcript ent
 ### LOOP: interpret, validate, execute
 
 The model chooses from a fixed tool list. Business functions validate inputs before acting and return structured results. Errors can guide the model to correct a request on a later step. Plain model text does not itself send a WhatsApp reply. A successful `send_message` call is the delivery path.
-
 | Customer tool | Operation |
 |---|---|
 | `check_stock` | Read matching product rows, prices, and current stock |

@@ -79,3 +79,10 @@ tmp/
 temp/
 .claude/
 .gemini/
+
+# ==========================================
+# Local review evidence & personal outputs (may contain customer data)
+# ==========================================
+output/
+outputs/
+.codex-*/
