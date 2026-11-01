@@ -5,12 +5,17 @@ import { db } from './db';
 import { rupeesToMinor } from './money';
 
 const REQUIRED_HEADERS = ['sku', 'name', 'category', 'size', 'color', 'price', 'stock', 'active', 'aliases'] as const;
-const NON_PRODUCT_CATALOG_SECTIONS = new Set([
-  'product',
-  'payment method',
-  'delivery',
-  'return policy',
-  'exchange policy',
+const OPTIONAL_HEADERS = ['image_filename'] as const;
+const PRODUCT_CATALOG_SECTIONS = new Set([
+  'hoodie',
+  'shirt',
+  'kurta',
+  'trouser',
+  'jean',
+  't-shirt',
+  'shoe',
+  'sandal',
+  'jacket',
 ]);
 
 export interface InventoryRow {
@@ -23,6 +28,7 @@ export interface InventoryRow {
   stock: number;
   active: boolean;
   aliases: string[];
+  imageFilename: string | null;
 }
 
 export interface InventoryReconciliation {
@@ -140,7 +146,8 @@ export function parseInventoryCsv(text: string): InventoryRow[] {
   const headers = records[0].map((header) => header.trim().toLowerCase());
   if (new Set(headers).size !== headers.length) throw new Error('Inventory CSV contains duplicate headers.');
   const missing = REQUIRED_HEADERS.filter((header) => !headers.includes(header));
-  const unknown = headers.filter((header) => !(REQUIRED_HEADERS as readonly string[]).includes(header));
+  const allowedHeaders = [...REQUIRED_HEADERS, ...OPTIONAL_HEADERS] as readonly string[];
+  const unknown = headers.filter((header) => !allowedHeaders.includes(header));
   if (missing.length || unknown.length) {
     throw new Error(`Inventory CSV headers are invalid. Missing: ${missing.join(', ') || 'none'}. Unknown: ${unknown.join(', ') || 'none'}.`);
   }
@@ -153,6 +160,8 @@ export function parseInventoryCsv(text: string): InventoryRow[] {
       throw new Error(`CSV row ${rowNumber}: expected ${headers.length} fields but received ${record.length}.`);
     }
     const value = (header: typeof REQUIRED_HEADERS[number]) => record[indexes[header]].trim();
+    const optionalValue = (header: typeof OPTIONAL_HEADERS[number]) =>
+      indexes[header] === undefined ? '' : record[indexes[header]].trim();
     const sku = value('sku').toUpperCase();
     if (!/^[A-Z0-9][A-Z0-9._-]{1,63}$/.test(sku)) {
       throw new Error(`CSV row ${rowNumber}: sku must be 2-64 characters using letters, numbers, dot, underscore, or hyphen.`);
@@ -179,6 +188,11 @@ export function parseInventoryCsv(text: string): InventoryRow[] {
       throw new Error(`CSV row ${rowNumber}: aliases allow at most 20 values of 80 characters each.`);
     }
 
+    const imageFilename = optionalValue('image_filename') || null;
+    if (imageFilename && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,123}\.(?:png|jpe?g)$/i.test(imageFilename)) {
+      throw new Error(`CSV row ${rowNumber}: image_filename must be a safe PNG or JPEG basename.`);
+    }
+
     return {
       sku,
       name,
@@ -189,6 +203,7 @@ export function parseInventoryCsv(text: string): InventoryRow[] {
       stock,
       active: parseActive(value('active'), rowNumber),
       aliases,
+      imageFilename,
     };
   });
 }
@@ -199,7 +214,7 @@ function reconcile(rows: Array<{ name: string; category: string | null; active: 
   const catalogCategories = new Set(
     parseCatalog(catalogText)
       .map((section) => normalizeCategory(section.title))
-      .filter((title) => !NON_PRODUCT_CATALOG_SECTIONS.has(title)),
+      .filter((title) => PRODUCT_CATALOG_SECTIONS.has(title)),
   );
   return {
     databaseOnlyCategories: [...databaseCategories].filter((category) => !catalogCategories.has(category)).sort(),
@@ -217,8 +232,8 @@ export function importInventoryCsv(text: string, apply: boolean, catalogText?: s
 
   if (apply) {
     const upsert = db.prepare(`
-      insert into products (sku, name, category, size, color, price_minor, stock, active, aliases_json, created_at, updated_at)
-      values (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+      insert into products (sku, name, category, size, color, price_minor, stock, active, aliases_json, image_filename, created_at, updated_at)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
       on conflict(sku) do update set
         name = excluded.name,
         category = excluded.category,
@@ -228,6 +243,7 @@ export function importInventoryCsv(text: string, apply: boolean, catalogText?: s
         stock = excluded.stock,
         active = excluded.active,
         aliases_json = excluded.aliases_json,
+        image_filename = coalesce(excluded.image_filename, products.image_filename),
         updated_at = datetime('now')
     `);
     db.transaction(() => {
@@ -242,6 +258,7 @@ export function importInventoryCsv(text: string, apply: boolean, catalogText?: s
           row.stock,
           row.active ? 1 : 0,
           JSON.stringify(row.aliases),
+          row.imageFilename,
         );
       }
     }).immediate();

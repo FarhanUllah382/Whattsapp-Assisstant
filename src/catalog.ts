@@ -5,12 +5,36 @@
 // for a content change to take effect.
 import fs from 'node:fs';
 import path from 'node:path';
+import { createHash, timingSafeEqual } from 'node:crypto';
 
 const CATALOG_PATH = path.join(__dirname, '..', 'catalog.md');
 
 export interface CatalogSection {
   title: string;
   body: string;
+}
+
+export type CatalogApprovalState =
+  | { ok: true; fingerprint: string }
+  | { ok: false; fingerprint: string; reason: 'missing' | 'invalid' | 'mismatch' };
+
+export function catalogFingerprint(text: string): string {
+  return createHash('sha256').update(text, 'utf8').digest('hex');
+}
+
+export function verifyCatalogApproval(
+  text: string,
+  configuredFingerprint: string | undefined = process.env.APPROVED_CATALOG_SHA256,
+): CatalogApprovalState {
+  const fingerprint = catalogFingerprint(text);
+  if (!configuredFingerprint?.trim()) return { ok: false, fingerprint, reason: 'missing' };
+  const configured = configuredFingerprint.trim().toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(configured)) return { ok: false, fingerprint, reason: 'invalid' };
+  const approved = Buffer.from(configured, 'hex');
+  const actual = Buffer.from(fingerprint, 'hex');
+  return timingSafeEqual(approved, actual)
+    ? { ok: true, fingerprint }
+    : { ok: false, fingerprint, reason: 'mismatch' };
 }
 
 // Grammatical filler only — domain words like "price"/"return"/"cost" are
@@ -84,4 +108,13 @@ export function findBestMatch(sections: CatalogSection[], query: string): Catalo
 export function loadCatalogSections(): CatalogSection[] {
   const text = fs.readFileSync(CATALOG_PATH, 'utf-8');
   return parseCatalog(text);
+}
+
+export function loadApprovedCatalogSections():
+  | { ok: true; sections: CatalogSection[]; fingerprint: string }
+  | { ok: false; reason: 'missing' | 'invalid' | 'mismatch' } {
+  const text = fs.readFileSync(CATALOG_PATH, 'utf-8');
+  const approval = verifyCatalogApproval(text);
+  if (!approval.ok) return { ok: false, reason: approval.reason };
+  return { ok: true, sections: parseCatalog(text), fingerprint: approval.fingerprint };
 }

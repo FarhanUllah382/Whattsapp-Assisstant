@@ -21,12 +21,45 @@ export interface InboundMessage {
   occurredAt?: Date;
 }
 
+export interface ChannelSendReceipt {
+  /** Provider id returned after acceptance, when the configured engine exposes it. */
+  providerMessageId?: string;
+}
+
+export interface ChannelImageMessage {
+  /** Base64-encoded approved image bytes. Never an arbitrary model/customer URL. */
+  data: string;
+  mimetype: 'image/png' | 'image/jpeg';
+  filename: string;
+  caption: string;
+}
+
+export interface ChannelHealth {
+  ok: boolean;
+  status: string;
+}
+
+export class ChannelSendError extends Error {
+  constructor(
+    message: string,
+    /** False only when the provider definitively rejected the request before acceptance. */
+    readonly deliveryUncertain: boolean,
+  ) {
+    super(message);
+    this.name = 'ChannelSendError';
+  }
+}
+
 export interface ChannelAdapter {
   /** Stable id for logs/telemetry, e.g. 'waha'. */
   readonly channel: string;
   /** Sends one text message to a customer. Throws on failure — the caller
    * (send_message's execute()) already wraps every send in try/catch. */
-  sendText(phone: string, text: string): Promise<void>;
+  sendText(phone: string, text: string): Promise<ChannelSendReceipt>;
+  /** Sends one approved catalog image with its server-built caption. */
+  sendImage(phone: string, image: ChannelImageMessage): Promise<ChannelSendReceipt>;
+  /** Minimal provider/session readiness without exposing account details. */
+  healthCheck(): Promise<ChannelHealth>;
   /**
    * Turns one raw inbound webhook payload into {phone, text}, or null if
    * this event isn't a customer text message worth reacting to (a status

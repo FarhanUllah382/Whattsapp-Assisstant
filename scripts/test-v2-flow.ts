@@ -32,9 +32,16 @@ async function runV2Verification(): Promise<void> {
   try {
     // 1. Stock Check
     console.log('Test 1: Stock checking via check_stock');
-    const stockCheck: any = checkStock.execute({ name: testProductName, size: 'medium', color: 'black' }, ctx);
-    assert(Array.isArray(stockCheck) && stockCheck.length === 1, 'Found product by name, size, color');
-    assert(stockCheck[0].stock === 10, 'Initial stock is 10');
+    const stockCheck: any = checkStock.execute(
+      { name: testProductName, size: 'medium', color: 'black', requested_qty: 2 },
+      ctx,
+    );
+    assert(stockCheck.ok === true && stockCheck.found === true && stockCheck.products.length === 1, 'Found product by name, size, color');
+    assert(stockCheck.products[0].availability === 'in_stock', 'Customer receives public in-stock status');
+    assert(stockCheck.products[0].can_fulfill_requested_qty === true, 'Requested quantity can be fulfilled');
+    assert(!Object.hasOwn(stockCheck.products[0], 'stock'), 'Exact stock count is not exposed by the customer tool');
+    const initialStock: any = db.prepare('select stock from products where id = ?').get(productId);
+    assert(initialStock.stock === 10, 'Internal stock remains exactly 10');
 
     // 2. Order Placement (status: placed)
     console.log('\nTest 2: Order placement & initial ledger debit');
@@ -43,7 +50,9 @@ async function runV2Verification(): Promise<void> {
     }, ctx);
     assert(orderResult.ok === true, 'record_order succeeded');
     const orderId = orderResult.order_id;
+    const orderReference = orderResult.order_reference;
     assert(typeof orderId === 'number', 'Generated orderId');
+    assert(/^ORD-[0-9A-F]{20}$/.test(orderReference), 'Generated public order reference');
 
     const orderRow: any = db.prepare('select * from orders where id = ?').get(orderId);
     assert(orderRow.status === 'placed', 'Initial status is "placed"');
@@ -62,7 +71,7 @@ async function runV2Verification(): Promise<void> {
 
     // 3. Order Confirmation (status: confirmed) -> Stock Decrements
     console.log('\nTest 3: Confirming order decrements live stock');
-    const confirmResult: any = updateOrderStatus.execute({ order_id: orderId, status: 'confirmed' }, ctx);
+    const confirmResult: any = updateOrderStatus.execute({ order_reference: orderReference, status: 'confirmed' }, ctx);
     assert(confirmResult.ok === true, 'updateOrderStatus to confirmed succeeded');
     const confirmAudit: any = db.prepare(
       "select actor_type, source, evidence from order_status_events where order_id = ? and to_status = 'confirmed'",
@@ -74,10 +83,10 @@ async function runV2Verification(): Promise<void> {
 
     // 4. State Machine Guards (invalid backward / skip transitions)
     console.log('\nTest 4: Rejecting invalid state transitions');
-    const backwardAttempt: any = updateOrderStatus.execute({ order_id: orderId, status: 'placed' }, ctx);
+    const backwardAttempt: any = updateOrderStatus.execute({ order_reference: orderReference, status: 'placed' }, ctx);
     assert(backwardAttempt.ok === false, 'Cannot move backward to "placed"');
 
-    const skipAttempt: any = updateOrderStatus.execute({ order_id: orderId, status: 'delivered' }, ctx);
+    const skipAttempt: any = updateOrderStatus.execute({ order_reference: orderReference, status: 'delivered' }, ctx);
     assert(skipAttempt.ok === false, 'Cannot skip from confirmed directly to delivered');
 
     // 5. Payment Recording (ledger credit)
@@ -99,7 +108,7 @@ async function runV2Verification(): Promise<void> {
 
     // 7. Cancellation before shipping -> Stock Restores & Ledger Reverses
     console.log('\nTest 7: Cancelling confirmed order restores stock and reverses debit');
-    const cancelResult: any = updateOrderStatus.execute({ order_id: orderId, status: 'cancelled' }, ctx);
+    const cancelResult: any = updateOrderStatus.execute({ order_reference: orderReference, status: 'cancelled' }, ctx);
     assert(cancelResult.ok === true, 'updateOrderStatus to cancelled succeeded');
 
     const stockAfterCancel: any = db.prepare('select stock from products where id = ?').get(productId);
@@ -129,6 +138,7 @@ async function runV2Verification(): Promise<void> {
     db.prepare('delete from orders where customer_id = ?').run(customerId);
     db.prepare('delete from messages where customer_id = ?').run(customerId);
     db.prepare('delete from checkpoints where customer_id = ?').run(customerId);
+    db.prepare('delete from order_lookup_attempts where customer_id = ?').run(customerId);
     db.prepare('delete from customers where id = ?').run(customerId);
     db.prepare('delete from products where id = ?').run(productId);
   }

@@ -54,11 +54,25 @@ export const KNOB_BOUNDS = {
   hourEnd: 24,
 } as const;
 
+/**
+ * Optional shop-hours override. Invalid values deliberately fall back to the
+ * established 22:00 cutoff rather than widening the sending window by
+ * accident. The fixed start remains 07:00 and the end is exclusive. Values
+ * 01:00-06:00 represent a window that continues across midnight.
+ */
+export function parsePacingWindowEndHour(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/.test(value.trim())) return 22;
+  const hour = Number(value);
+  const isOvernightEnd = hour >= 1 && hour <= 6;
+  const isSameDayEnd = hour >= 8 && hour <= 24;
+  return Number.isInteger(hour) && (isOvernightEnd || isSameDayEnd) ? hour : 22;
+}
+
 export const PACING_DEFAULTS: PacingKnobs = {
   throttleMs: 1200, // 1 msg / 1,2s
   jitterMaxMs: 800,
   windowStartHour: 7, // janela 7h-22h
-  windowEndHour: 22,
+  windowEndHour: parsePacingWindowEndHour(process.env.PACING_WINDOW_END_HOUR),
   allowSunday: true,
   // Ahmed's shop is in Pakistan — confirmed 2026-09-05. Still overridable
   // via PACING_TIMEZONE (an IANA zone) for any future shop in another zone;

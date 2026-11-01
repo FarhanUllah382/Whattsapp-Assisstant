@@ -79,7 +79,7 @@ export function checkDiscountRule(
       reason:
         `You offered a ${percent}% discount, which is at or above Ahmed's ` +
         `${MAX_DISCOUNT_PERCENT_WITHOUT_CONFIRMATION}% confirmation threshold. Do not send this — ` +
-        `either drop the discount, or tell the customer you'll confirm with Ahmed first ` +
+        `state clearly that the discount has not been applied and needs Ahmed's approval ` +
         '(and actually call notify_owner if you do).',
     };
   }

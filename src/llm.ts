@@ -12,6 +12,7 @@
 // it here once instead of hunting through the codebase.
 // ═══════════════════════════════════════════════════════════════════════════
 
+import { finishAiModelCall, reserveAiModelCall } from './ai-budget';
 import type { ToolDef } from './types';
 
 // Provider swapped to Gemini for local WAHA end-to-end testing (2026-09-02) —
@@ -90,6 +91,8 @@ export async function callModel(
     throw new Error('GEMINI_API_KEY not set — export it before running the server.');
   }
 
+  const reservation = reserveAiModelCall({ model: MODEL });
+
   const body: Record<string, unknown> = {
     system_instruction: { parts: [{ text: system }] },
     contents: messages.map((m) => ({
@@ -109,38 +112,53 @@ export async function callModel(
     ];
   }
 
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-    },
-  );
+  let finished = false;
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      },
+    );
 
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`LLM call failed (${response.status}): ${text.slice(0, 300)}`);
-  }
-
-  const data = (await response.json()) as any;
-  const parts: any[] = data.candidates?.[0]?.content?.parts ?? [];
-
-  const content = parts.map((p, i) => {
-    if (p.functionCall) {
-      return {
-        type: 'tool_use',
-        id: `${p.functionCall.name}::${i}`,
-        name: p.functionCall.name,
-        input: p.functionCall.args ?? {},
-        thoughtSignature: p.thoughtSignature,
-      };
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`LLM call failed (${response.status}): ${text.slice(0, 300)}`);
     }
-    return { type: 'text', text: p.text ?? '' };
-  });
 
-  return {
-    content,
-    stop_reason: content.some((b) => b.type === 'tool_use') ? 'tool_use' : 'end_turn',
-  };
+    const data = (await response.json()) as any;
+    const usage = data.usageMetadata ?? {};
+    finishAiModelCall({
+      id: reservation.id,
+      status: 'succeeded',
+      promptTokens: usage.promptTokenCount,
+      outputTokens: usage.candidatesTokenCount,
+      totalTokens: usage.totalTokenCount,
+    });
+    finished = true;
+    const parts: any[] = data.candidates?.[0]?.content?.parts ?? [];
+
+    const content = parts.map((p, i) => {
+      if (p.functionCall) {
+        return {
+          type: 'tool_use',
+          id: `${p.functionCall.name}::${i}`,
+          name: p.functionCall.name,
+          input: p.functionCall.args ?? {},
+          thoughtSignature: p.thoughtSignature,
+        };
+      }
+      return { type: 'text', text: p.text ?? '' };
+    });
+
+    return {
+      content,
+      stop_reason: content.some((b) => b.type === 'tool_use') ? 'tool_use' : 'end_turn',
+    };
+  } catch (error) {
+    if (!finished) finishAiModelCall({ id: reservation.id, status: 'failed' });
+    throw error;
+  }
 }

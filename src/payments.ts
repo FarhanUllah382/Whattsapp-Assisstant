@@ -1,6 +1,9 @@
 import { db } from './db';
-import { recordCreditMinor } from './ledger';
+import { getBalance } from './ledger';
 import { minorToRupees, positiveRupeesToMinor } from './money';
+import { getOrderPublicReference, resolveOwnedOrderReference } from './order-access';
+import { paymentClaimInstruction } from './sensitive-action-wording';
+import { maskPhoneForDisplay } from './privacy';
 import type { ToolContext, ToolDef } from './types';
 
 export interface PaymentClaimRow {
@@ -92,14 +95,18 @@ export function createClaimPaymentTool(deliverAlert?: ClaimAlertDelivery): ToolD
       type: 'object',
       properties: {
         amount: { type: 'number', description: 'amount the customer says they paid' },
-        order_id: { type: 'number', description: 'related order id, if the customer identified one' },
+        order_reference: { type: 'string', description: 'related public order reference, if the customer identified one' },
         method: { type: 'string', description: 'claimed method, e.g. bank transfer, Easypaisa, JazzCash, COD' },
         reference: { type: 'string', description: 'transaction/reference text supplied by the customer' },
       },
       required: ['amount'],
     },
-    execute: async ({ amount, order_id, method, reference }, ctx) => {
+    execute: async (input, ctx) => {
       try {
+        const { amount, order_reference, method, reference } = input ?? {};
+        if (Object.hasOwn(input ?? {}, 'order_id')) {
+          return { ok: false, error: 'Use the public order_reference beginning with ORD-, not an internal numeric order id.' };
+        }
         if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) {
           return { ok: false, error: 'Please provide the claimed payment amount greater than 0.' };
         }
@@ -109,21 +116,38 @@ export function createClaimPaymentTool(deliverAlert?: ClaimAlertDelivery): ToolD
         if (reference !== undefined && typeof reference !== 'string') {
           return { ok: false, error: 'Payment reference must be plain text.' };
         }
+        let ownedOrderId: number | undefined;
+        let ownedOrderReference: string | undefined;
+        if (order_reference !== undefined) {
+          const resolved = resolveOwnedOrderReference(ctx.customerId, order_reference);
+          if (!resolved.ok) return { ok: false, error: resolved.error };
+          ownedOrderId = resolved.order.id;
+          ownedOrderReference = resolved.order.public_ref.toUpperCase();
+        }
         const eventKey = ctx.idempotencyKey ? `${ctx.idempotencyKey}:payment_claim` : undefined;
         const claim = createPaymentClaim({
           customerId: ctx.customerId,
           amount,
-          orderId: order_id,
+          orderId: ownedOrderId,
           method,
           reference,
           eventKey,
         });
         if (!deliverAlert) {
-          return { ok: true, claim_id: claim.id, status: claim.status };
+          return {
+            ok: true,
+            claim_id: claim.id,
+            status: claim.status,
+            order_reference: ownedOrderReference,
+            payment_verified: false,
+            ledger_credited: false,
+            order_status_changed: false,
+            instruction: paymentClaimInstruction(),
+          };
         }
         const detail = [
           `Payment claim #${claim.id}: amount ${claim.amount}`,
-          claim.order_id ? `order #${claim.order_id}` : null,
+          claim.order_id ? `order ${ownedOrderReference ?? getOrderPublicReference(claim.order_id)}` : null,
           claim.method ? `method ${claim.method}` : null,
           claim.reference ? `reference ${claim.reference}` : null,
         ].filter(Boolean).join(', ');
@@ -136,8 +160,13 @@ export function createClaimPaymentTool(deliverAlert?: ClaimAlertDelivery): ToolD
           ok: true,
           claim_id: claim.id,
           status: claim.status,
+          order_reference: ownedOrderReference,
+          payment_verified: false,
+          ledger_credited: false,
+          order_status_changed: false,
           alert_status: delivery.status,
           ...(delivery.alertId ? { alert_id: delivery.alertId } : {}),
+          instruction: paymentClaimInstruction(),
         };
       } catch (error) {
         return { ok: false, error: error instanceof Error ? error.message : 'Could not record the payment claim.' };
@@ -150,19 +179,42 @@ export const claimPayment = createClaimPaymentTool();
 
 export const pendingPaymentClaims: ToolDef = {
   name: 'pending_payment_claims',
-  description: 'List customer payment claims that still require Ahmed to approve or reject them.',
+  description:
+    'List unverified customer payment claims. This is read-only. Format each item only as CLAIM #<claim_id>; ' +
+    'never add separate list-position numbers. Natural-language replies cannot resolve a claim.',
   input_schema: { type: 'object', properties: {} },
   execute: () => ({
     claims: (db.prepare(`
-      select pc.id, pc.order_id, pc.amount_minor, pc.method, pc.reference, pc.created_at,
-             c.name as customer_name, c.phone as customer_phone
+      select pc.id, pc.customer_id, pc.amount_minor, pc.method, pc.reference, pc.created_at,
+             c.name as customer_name, c.phone as customer_phone,
+             o.public_ref as order_reference,
+             (select count(*) from payment_claims possible
+               where possible.customer_id = pc.customer_id
+                 and possible.amount_minor = pc.amount_minor
+                 and possible.id <> pc.id
+                 and possible.status in ('pending', 'approved')
+                 and possible.approval_reversed_at is null) as similar_claims
       from payment_claims pc
       join customers c on c.id = pc.customer_id
+      left join orders o on o.id = pc.order_id
       where pc.status = 'pending'
       order by pc.created_at, pc.id
-    `).all() as Array<Record<string, unknown> & { amount_minor: number }>).map(({ amount_minor, ...claim }) => ({
+    `).all() as Array<Record<string, unknown> & {
+      id: number;
+      customer_id: number;
+      amount_minor: number;
+      customer_phone: string;
+      similar_claims: number;
+    }>).map(({ id, customer_id, amount_minor, customer_phone, similar_claims, ...claim }) => ({
+      claim_id: id,
       ...claim,
       amount: minorToRupees(amount_minor, 'pending payment claim amount'),
+      customer_phone_masked: maskPhoneForDisplay(customer_phone),
+      outstanding_balance: getBalance(customer_id),
+      verification_status: 'unverified',
+      possible_duplicate: similar_claims > 0,
+      reference_requirement: 'For approval, independently verify the transaction in the business payment account.',
+      instruction: `Nothing changes from natural language. To approve, use APPROVE CLAIM ${id} REF <VERIFIED_TRANSACTION_REFERENCE>. To reject, use REJECT CLAIM ${id}.`,
     })),
   }),
 };
@@ -170,8 +222,7 @@ export const pendingPaymentClaims: ToolDef = {
 export const resolvePaymentClaim: ToolDef = {
   name: 'resolve_payment_claim',
   description:
-    'Approve or reject one pending payment claim after Ahmed personally verifies it. ' +
-    'Approval creates one ledger credit; it does not change order status.',
+    'Disabled legacy interface. Payment decisions are handled only by the deterministic exact-command, two-step owner path.',
   input_schema: {
     type: 'object',
     properties: {
@@ -180,49 +231,9 @@ export const resolvePaymentClaim: ToolDef = {
     },
     required: ['claim_id', 'decision'],
   },
-  execute: ({ claim_id, decision }, ctx: ToolContext) => {
-    if (!Number.isInteger(claim_id) || claim_id <= 0) {
-      return { ok: false, error: 'claim_id must be a positive whole number.' };
-    }
-    if (decision !== 'approve' && decision !== 'reject') {
-      return { ok: false, error: 'decision must be approve or reject.' };
-    }
-
-    try {
-      return db.transaction(() => {
-        const claim = db.prepare('select * from payment_claims where id = ?').get(claim_id) as
-          | StoredPaymentClaimRow
-          | undefined;
-        if (!claim) return { ok: false, error: `Payment claim ${claim_id} does not exist.` };
-        if (claim.status !== 'pending') {
-          return {
-            ok: true,
-            claim_id: claim.id,
-            status: claim.status,
-            already_resolved: true,
-            ledger_credit_created: claim.status === 'approved',
-          };
-        }
-
-        const nextStatus = decision === 'approve' ? 'approved' : 'rejected';
-        if (nextStatus === 'approved') {
-          recordCreditMinor(claim.customer_id, claim.amount_minor, claim.order_id);
-        }
-        db.prepare(`
-          update payment_claims
-             set status = ?, resolved_by_customer_id = ?, resolved_at = datetime('now')
-           where id = ? and status = 'pending'
-        `).run(nextStatus, ctx.customerId, claim.id);
-        return {
-          ok: true,
-          claim_id: claim.id,
-          status: nextStatus,
-          ledger_credit_created: nextStatus === 'approved',
-          order_status_changed: false,
-        };
-      }).immediate();
-    } catch {
-      return { ok: false, error: 'Could not resolve the payment claim safely; no credit was committed.' };
-    }
-  },
+  execute: () => ({
+    ok: false,
+    error:
+      'Direct model-controlled payment resolution is disabled. After independently checking the business payment account, use APPROVE CLAIM <id> REF <verified-reference>, or use REJECT CLAIM <id>, followed by the exact confirmation.',
+  }),
 };

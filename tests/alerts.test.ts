@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { deliverOwnerAlert, retryPendingOwnerAlerts } from '../src/alerts';
 import { db } from '../src/db';
 import { createClaimPaymentTool } from '../src/payments';
+import { createNotifyOwnerTool } from '../src/tools';
 
 async function run(): Promise<void> {
   db.exec('begin');
@@ -10,6 +11,7 @@ async function run(): Promise<void> {
     // Keep this regression test from treating genuine live pending alerts as
     // mock-delivered. The surrounding rollback restores their exact statuses.
     db.prepare("update owner_alerts set status = 'sent' where status = 'pending'").run();
+    db.prepare("update owner_alerts set sent_at = '2000-01-01 00:00:00' where status = 'sent'").run();
 
     const customerId = Number(
       db.prepare('insert into customers (phone) values (?)').run(`v33-test-${Date.now()}`).lastInsertRowid,
@@ -143,6 +145,24 @@ async function run(): Promise<void> {
       (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as { n: number }).n,
       0,
     );
+
+    const pendingHandoffTool = createNotifyOwnerTool(({ customerId, reason, eventKey }) =>
+      deliverOwnerAlert({
+        kind: 'customer_handoff',
+        customerId,
+        reason,
+        eventKey,
+        send: alwaysFail,
+      }),
+    );
+    const pendingHandoff = await pendingHandoffTool.execute(
+      { reason: 'Customer needs Ahmed to decide.' },
+      { customerId, idempotencyKey: 'v33:handoff:pending' },
+    ) as { ok: boolean; handoff_id: number; alert_status: string; alert_id: number };
+    assert.equal(pendingHandoff.ok, false);
+    assert.equal(pendingHandoff.alert_status, 'pending');
+    assert.equal(Number.isInteger(pendingHandoff.handoff_id), true);
+    assert.equal(Number.isInteger(pendingHandoff.alert_id), true);
 
     process.stdout.write('  ✔ V3.3 owner alerts and payment claims deliver once, recover, and group safely\n');
   } finally {

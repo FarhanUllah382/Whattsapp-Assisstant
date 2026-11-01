@@ -2,11 +2,44 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 import { multiplyMinor, rupeesToMinor } from './money';
+import { sanitizeMemoryText } from './privacy';
 
 // One file, one database. Swap for Postgres later if you outgrow SQLite —
 // nothing else in this project needs to change, because every other file
 // only ever imports `db` from here (same "one seam" idea as llm.ts).
-export const db = new Database(path.join(__dirname, '..', 'ahmed.db'));
+//
+// Automated tests must never share Ahmed's real database. The test runner
+// supplies a fresh absolute path for every test file. A test started directly
+// without that runner fails before opening any database, and the override is
+// rejected outside NODE_ENV=test so it cannot become a hidden production
+// database switch.
+const productionDatabasePath = path.resolve(__dirname, '..', 'ahmed.db');
+const requestedTestDatabasePath = process.env.AHMED_TEST_DATABASE_PATH?.trim();
+const directTestEntryPoint = process.argv.some((argument) =>
+  /(?:^|[\\/])tests[\\/][^\\/]+\.ts$/i.test(argument) ||
+  /(?:^|[\\/])scripts[\\/]test-v2-flow\.ts$/i.test(argument),
+);
+
+if (directTestEntryPoint && !requestedTestDatabasePath) {
+  throw new Error(
+    'Refusing to run a test against ahmed.db. Use `npm test` so the isolated test runner supplies a temporary database.',
+  );
+}
+
+if (requestedTestDatabasePath && (process.env.NODE_ENV !== 'test' || !directTestEntryPoint)) {
+  throw new Error('AHMED_TEST_DATABASE_PATH is accepted only for an isolated test entry point.');
+}
+
+const resolvedTestDatabasePath = requestedTestDatabasePath
+  ? path.resolve(requestedTestDatabasePath)
+  : null;
+
+if (resolvedTestDatabasePath === productionDatabasePath) {
+  throw new Error('The isolated test database cannot be ahmed.db.');
+}
+
+export const databasePath = resolvedTestDatabasePath ?? productionDatabasePath;
+export const db = new Database(databasePath);
 
 const schema = fs.readFileSync(path.join(__dirname, '..', 'db', 'schema.sql'), 'utf-8');
 db.exec(schema);
@@ -30,6 +63,47 @@ ensureColumn(
 );
 ensureColumn('customers', 'opted_out_at', 'opted_out_at text');
 ensureColumn('customers', 'opted_in_at', 'opted_in_at text');
+ensureColumn('products', 'image_filename', 'image_filename text');
+ensureColumn('payment_claims', 'approval_reversed_at', 'approval_reversed_at text');
+ensureColumn(
+  'payment_claims',
+  'approval_reversed_by_customer_id',
+  'approval_reversed_by_customer_id integer references customers(id)',
+);
+ensureColumn('payment_claim_action_intents', 'verified_reference', 'verified_reference text');
+ensureColumn(
+  'messages',
+  'source_event_key',
+  "source_event_key text check (source_event_key is null or direction = 'inbound')",
+);
+ensureColumn(
+  'send_ledger',
+  'recipient_kind',
+  "recipient_kind text not null default 'customer' check (recipient_kind in ('customer', 'owner'))",
+);
+ensureColumn('send_ledger', 'event_key', 'event_key text');
+ensureColumn('send_ledger', 'body_hash', 'body_hash text');
+ensureColumn(
+  'send_ledger',
+  'attempt_count',
+  'attempt_count integer not null default 1 check (attempt_count >= 1)',
+);
+ensureColumn('send_ledger', 'provider_message_id', 'provider_message_id text');
+ensureColumn('send_ledger', 'last_error_code', 'last_error_code text');
+ensureColumn('send_ledger', 'updated_at', "updated_at text not null default '1970-01-01 00:00:00'");
+db.exec(`
+  create unique index if not exists messages_source_event_key_unique_idx
+    on messages(source_event_key) where source_event_key is not null;
+  update send_ledger set body_hash = id where body_hash is null;
+  update send_ledger set updated_at = created_at where updated_at = '1970-01-01 00:00:00';
+  update send_ledger
+     set status = 'uncertain', last_error_code = 'legacy_pending_outcome_unknown'
+   where status = 'pending';
+  create index if not exists send_ledger_status_updated_idx
+    on send_ledger(status, updated_at);
+  create unique index if not exists send_ledger_recipient_event_unique_idx
+    on send_ledger(recipient_kind, event_key) where event_key is not null;
+`);
 
 // Version 2.1: `customers.balance_owed` is replaced by the `ledger` table
 // (schema.sql). `create table if not exists` never touches an already-
@@ -250,6 +324,105 @@ ensureColumn(
   'payment_method',
   "payment_method text check (payment_method is null or payment_method in ('cod', 'bank_transfer', 'easypaisa', 'jazzcash'))",
 );
+
+// Customer-facing order references are deliberately unrelated to the
+// sequential internal primary key. Existing rows are backfilled once; every
+// later insert (including a direct administrative insert) receives 80 random
+// bits from SQLite before it can be exposed to a customer. A unique index is
+// the collision backstop. Internal ids remain the foreign-key mechanism only.
+ensureColumn(
+  'orders',
+  'public_ref',
+  "public_ref text collate nocase check (public_ref is null or (length(public_ref) = 24 and upper(substr(public_ref, 1, 4)) = 'ORD-' and upper(substr(public_ref, 5)) not glob '*[^0-9A-F]*'))",
+);
+db.exec(`
+  update orders
+     set public_ref = 'ORD-' || upper(hex(randomblob(10)))
+   where public_ref is null;
+  create unique index if not exists orders_public_ref_unique_idx on orders(public_ref);
+  create trigger if not exists orders_public_ref_assign_after_insert
+  after insert on orders
+  when new.public_ref is null
+  begin
+    update orders
+       set public_ref = 'ORD-' || upper(hex(randomblob(10)))
+     where id = new.id;
+  end;
+  create trigger if not exists orders_public_ref_validate_insert
+  before insert on orders
+  when new.public_ref is not null and (
+    length(new.public_ref) != 24 or upper(substr(new.public_ref, 1, 4)) != 'ORD-' or
+    upper(substr(new.public_ref, 5)) glob '*[^0-9A-F]*'
+  )
+  begin
+    select raise(abort, 'invalid public order reference');
+  end;
+  create trigger if not exists orders_public_ref_validate_update
+  before update of public_ref on orders
+  when new.public_ref is null or (
+    length(new.public_ref) != 24 or upper(substr(new.public_ref, 1, 4)) != 'ORD-' or
+    upper(substr(new.public_ref, 5)) glob '*[^0-9A-F]*'
+  )
+  begin
+    select raise(abort, 'invalid public order reference');
+  end;
+`);
+
+// Correction #5: derived AI memory must retain business meaning without
+// becoming a second permanent copy of contact, address, or payment details.
+// The raw transcript and authoritative fulfilment records are intentionally
+// untouched. The migration marker makes this historical cleanup exactly once.
+const MEMORY_PII_MIGRATION = '2026-10-03-derived-memory-pii-minimization-v1';
+
+function minimizeHistoricalDerivedMemory(): void {
+  const applied = db
+    .prepare('select 1 from privacy_migrations where migration_key = ?')
+    .get(MEMORY_PII_MIGRATION);
+  if (applied) return;
+
+  db.transaction(() => {
+    let checkpointRowsRedacted = 0;
+    let noteRowsRedacted = 0;
+
+    const checkpoints = db.prepare('select customer_id, summary from checkpoints').all() as Array<{
+      customer_id: number;
+      summary: string;
+    }>;
+    const updateCheckpoint = db.prepare(
+      "update checkpoints set summary = ?, updated_at = datetime('now') where customer_id = ?",
+    );
+    for (const row of checkpoints) {
+      const sanitized = sanitizeMemoryText(row.summary);
+      if (sanitized !== row.summary) {
+        updateCheckpoint.run(sanitized, row.customer_id);
+        checkpointRowsRedacted += 1;
+      }
+    }
+
+    const notes = db.prepare('select id, headline, body from customer_notes').all() as Array<{
+      id: number;
+      headline: string;
+      body: string;
+    }>;
+    const updateNote = db.prepare('update customer_notes set headline = ?, body = ? where id = ?');
+    for (const row of notes) {
+      const headline = sanitizeMemoryText(row.headline);
+      const body = sanitizeMemoryText(row.body);
+      if (headline !== row.headline || body !== row.body) {
+        updateNote.run(headline, body, row.id);
+        noteRowsRedacted += 1;
+      }
+    }
+
+    db.prepare(`
+      insert into privacy_migrations
+        (migration_key, checkpoint_rows_redacted, note_rows_redacted)
+      values (?, ?, ?)
+    `).run(MEMORY_PII_MIGRATION, checkpointRowsRedacted, noteRowsRedacted);
+  }).immediate();
+}
+
+minimizeHistoricalDerivedMemory();
 
 // Real-inventory onboarding metadata. These additions are deliberately
 // nullable/defaulted so existing order-linked products keep their ids and

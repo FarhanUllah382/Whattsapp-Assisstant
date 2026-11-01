@@ -1,8 +1,9 @@
 /**
  * Logger estruturado MÍNIMO (F2-04): JSON por linha em stdout — ts, level, msg +
- * campos. PII nunca entra em `fields` (disciplina do call site — payload de job e
- * conteúdo de lead não são logáveis; o scanner de obs-metrics.test.ts vigia).
+ * campos. Every field is sanitized at this final boundary, so privacy does not
+ * depend only on every caller remembering which values contain PII.
  */
+import { sanitizeLogFields } from '../privacy';
 export type LogFields = Record<string, unknown>;
 
 export interface Logger {
@@ -13,7 +14,14 @@ export interface Logger {
 
 export function createLogger(stream: NodeJS.WritableStream = process.stdout): Logger {
   const write = (level: 'info' | 'warn' | 'error', msg: string, fields?: LogFields): void => {
-    stream.write(JSON.stringify({ ts: new Date().toISOString(), level, msg, ...fields }) + '\n');
+    stream.write(
+      JSON.stringify({
+        ts: new Date().toISOString(),
+        level,
+        msg: sanitizeLogFields({ msg })?.msg,
+        ...sanitizeLogFields(fields),
+      }) + '\n',
+    );
   };
   return {
     info: (msg, fields) => write('info', msg, fields),

@@ -250,7 +250,13 @@ export function proximaAberturaDaJanela(
 
 function insideWindow(wall: Wall, knobs: PacingKnobs): boolean {
   if (!knobs.allowSunday && wall.weekday === 'Sun') return false;
-  return wall.h >= knobs.windowStartHour && wall.h < knobs.windowEndHour;
+  if (knobs.windowStartHour < knobs.windowEndHour) {
+    return wall.h >= knobs.windowStartHour && wall.h < knobs.windowEndHour;
+  }
+  if (knobs.windowStartHour > knobs.windowEndHour) {
+    return wall.h >= knobs.windowStartHour || wall.h < knobs.windowEndHour;
+  }
+  return false;
 }
 
 /** Próxima abertura de janela ESTRITAMENTE depois de `now` (pula domingo se evitado). */

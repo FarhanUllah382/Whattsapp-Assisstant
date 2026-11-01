@@ -83,11 +83,11 @@ export function recordDebit(customerId: number, orderId: number, amount: number)
   recordDebitMinor(customerId, orderId, positiveRupeesToMinor(amount, 'Debit amount'));
 }
 
-export function recordDebitMinor(customerId: number, orderId: number, amountMinor: number): void {
+export function recordDebitMinor(customerId: number, orderId: number | null, amountMinor: number): number {
   if (!Number.isSafeInteger(amountMinor) || amountMinor < 0) throw new Error('Debit paisas must be a non-negative safe integer.');
-  getDb().prepare(
+  return Number(getDb().prepare(
     "insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'debit', ?)",
-  ).run(customerId, orderId, amountMinor);
+  ).run(customerId, orderId, amountMinor).lastInsertRowid);
 }
 
 // orderId is optional — a genuine payment usually isn't tied to one specific
@@ -99,11 +99,11 @@ export function recordCredit(customerId: number, amount: number, orderId: number
   recordCreditMinor(customerId, positiveRupeesToMinor(amount, 'Credit amount'), orderId);
 }
 
-export function recordCreditMinor(customerId: number, amountMinor: number, orderId: number | null = null): void {
+export function recordCreditMinor(customerId: number, amountMinor: number, orderId: number | null = null): number {
   if (!Number.isSafeInteger(amountMinor) || amountMinor < 0) throw new Error('Credit paisas must be a non-negative safe integer.');
-  getDb().prepare(
+  return Number(getDb().prepare(
     "insert into ledger (customer_id, order_id, kind, amount_minor) values (?, ?, 'credit', ?)",
-  ).run(customerId, orderId, amountMinor);
+  ).run(customerId, orderId, amountMinor).lastInsertRowid);
 }
 
 /** What this customer currently owes: sum of debits minus sum of credits, reconstructed from history every time. */

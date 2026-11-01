@@ -321,7 +321,7 @@ export function transitionOrderStatus(
             }
             const variant = [product.color, product.size, product.name].filter(Boolean).join(' ');
             throw new TransitionRejected(
-              `Not enough stock for ${variant}: requested ${qty}, available ${product.stock}. ` +
+              `The requested quantity (${qty}) cannot currently be fulfilled for ${variant}. ` +
               'The order remains placed and no stock was reserved.',
             );
           }

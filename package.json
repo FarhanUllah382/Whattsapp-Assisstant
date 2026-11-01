@@ -6,9 +6,15 @@
     "node": ">=24 <25"
   },
   "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "backup": "tsx scripts/backup-database.ts",
+    "backup:verify": "tsx scripts/verify-database-backup.ts",
+    "catalog:verify-media": "tsx scripts/verify-product-media.ts",
     "dev": "node --env-file-if-exists=.env --import tsx src/server.ts",
-    "test": "tsx tests/index.ts && tsx tests/pacing-activation.test.ts && tsx tests/alerts.test.ts",
-    "test:e2e": "tsx scripts/test-v2-flow.ts",
+    "test": "tsx scripts/run-isolated-tests.ts",
+    "test:security": "tsx scripts/run-isolated-tests.ts --security",
+    "test:e2e": "tsx scripts/run-isolated-tests.ts scripts/test-v2-flow.ts",
     "typecheck": "tsc --noEmit",
     "seed": "tsx scripts/seed-catalog.ts",
     "demo:seed": "tsx scripts/seed-portfolio-demo.ts",

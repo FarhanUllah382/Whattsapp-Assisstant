@@ -8,6 +8,7 @@ import { parseCatalog, findBestMatch, loadCatalogSections } from '../src/catalog
 import { wahaAdapter, WahaAdapter } from '../src/channel/waha';
 import { normalizeGeminiFunctionResponse } from '../src/llm';
 import { checkAutomatedCustomerSendAllowed, checkOrderConfirmationReply } from '../src/agent';
+import { checkCheckoutCollectionReply, checkCustomerReplyScript } from '../src/customer-reply-safety';
 import {
   detectConsentCommand,
   getPendingConsentConfirmations,
@@ -29,6 +30,10 @@ import {
 } from '../src/tools';
 import { createPaymentClaim, pendingPaymentClaims, resolvePaymentClaim } from '../src/payments';
 import { minorToRupees, multiplyMinor, positiveRupeesToMinor, rupeesToMinor } from '../src/money';
+import {
+  buildDeterministicOrderSummary,
+  checkDeterministicOrderSummaryReply,
+} from '../src/order-summary';
 import { importInventoryCsv, parseInventoryCsv } from '../src/inventory';
 import {
   claimInboundEvent,
@@ -127,6 +132,7 @@ it('parses quoted CSV fields, exact prices, aliases, and normalized sizes', () =
     stock: 3,
     active: true,
     aliases: ['shirt', 'tee'],
+    imageFilename: null,
   }]);
   assert.throws(
     () => parseInventoryCsv('sku,name,category,size,color,price,stock,active,aliases\nTEST-2,"Broken"text,shirts,M,black,1,1,true,\n'),
@@ -193,8 +199,14 @@ it('previews safely, upserts by SKU, searches aliases, and hides inactive produc
     assert.equal(typeof original.created_at, 'string');
     assert.equal(typeof original.updated_at, 'string');
 
-    const aliasResult = checkStock.execute({ name: 'tee', size: 'M', color: 'NAVY' }, { customerId: 1 }) as Array<{ id: number }>;
-    assert.equal(aliasResult.some((row) => row.id === original.id), true);
+    const aliasResult = checkStock.execute(
+      { name: 'tee', size: 'M', color: 'NAVY' },
+      { customerId: 1 },
+    ) as { ok: boolean; found: boolean; products: Array<{ product_id: number; availability: string }> };
+    assert.equal(aliasResult.ok, true);
+    assert.equal(aliasResult.found, true);
+    assert.equal(aliasResult.products.some((row) => row.product_id === original.id), true);
+    assert.equal(aliasResult.products.some((row) => Object.hasOwn(row, 'stock')), false);
 
     const updatedCsv = header + `${sku},Everyday Shirt,shirts,medium,navy,2800,7,true,shirt|tee\n`;
     const updated = importInventoryCsv(updatedCsv, true);
@@ -208,8 +220,11 @@ it('previews safely, upserts by SKU, searches aliases, and hides inactive produc
     assert.deepEqual(replacement, { id: original.id, price_minor: 280000, stock: 7 });
 
     importInventoryCsv(header + `${sku},Everyday Shirt,shirts,M,navy,2800,7,false,shirt|tee\n`, true);
-    const hidden = checkStock.execute({ name: 'tee', size: 'M' }, { customerId: 1 });
-    assert.deepEqual(hidden, { found: false, message: 'no matching product' });
+    const hidden = checkStock.execute({ name: 'tee', size: 'M' }, { customerId: 1 }) as {
+      found: boolean;
+      products?: Array<{ product_id: number }>;
+    };
+    assert.equal(hidden.products?.some((row) => row.product_id === original.id) ?? false, false);
   } finally {
     db.prepare('delete from products where sku = ?').run(sku);
   }
@@ -605,6 +620,7 @@ it('WahaAdapter class encapsulates config and implements ChannelAdapter polymorp
   });
   assert.equal(customAdapter.channel, 'waha');
   assert.equal(typeof customAdapter.sendText, 'function');
+  assert.equal(typeof customAdapter.sendImage, 'function');
   assert.equal(typeof customAdapter.parseInboundWebhook, 'function');
 });
 
@@ -689,10 +705,11 @@ console.log('\n▶ Bookkeeping Crash-Retry Idempotency');
 it('deduplicates order/payment effects for one provider event but permits a new event', () => {
   db.exec('begin');
   try {
-    const product = db.prepare('select id, price_minor from products order by id limit 1').get() as
-      | { id: number; price_minor: number }
-      | undefined;
-    assert.ok(product, 'At least one seeded product is required');
+    const productPriceMinor = rupeesToMinor(1800);
+    const productId = Number(db.prepare(
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run(`retry-product-${Date.now()}`, 'medium', 'navy', productPriceMinor, 5).lastInsertRowid);
+    const product = { id: productId, price_minor: productPriceMinor };
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`retry-test-${Date.now()}`)
       .lastInsertRowid as number;
     const input = { items: [{ product_id: product.id, qty: 1 }] };
@@ -895,7 +912,10 @@ it('rejects an over-stock confirmation without changing status, stock, or ledger
     const beforeLedger = (db.prepare('select count(*) n from ledger where order_id = ?').get(orderId) as { n: number }).n;
     const result = transitionOrderStatus(orderId, 'confirmed', customerAudit(customerId));
     assert.equal(result.ok, false);
-    if (!result.ok) assert.match(result.error, /requested 2, available 1/);
+    if (!result.ok) {
+      assert.match(result.error, /requested quantity \(2\) cannot currently be fulfilled/i);
+      assert.doesNotMatch(result.error, /available 1/i);
+    }
     assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'placed');
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 1);
     assert.equal(
@@ -1189,7 +1209,7 @@ it('exposes claims—not verified-payment mutation—to customers and keeps reso
   assert.equal(baseTools.some((tool) => tool.name === 'claim_payment'), true);
   assert.equal(baseTools.some((tool) => tool.name === 'resolve_payment_claim'), false);
   assert.equal(ownerTools.some((tool) => tool.name === 'pending_payment_claims'), true);
-  assert.equal(ownerTools.some((tool) => tool.name === 'resolve_payment_claim'), true);
+  assert.equal(ownerTools.some((tool) => tool.name === 'resolve_payment_claim'), false);
 });
 
 it('records a customer payment statement as one pending claim without crediting the ledger', () => {
@@ -1219,8 +1239,9 @@ it('prevents the customer status tool from marking orders paid, shipped, or deli
     const orderId = db.prepare(
       "insert into orders (customer_id, items_json, total_minor, status) values (?, '[]', ?, 'confirmed')",
     ).run(customerId, rupeesToMinor(800)).lastInsertRowid as number;
+    const orderReference = (db.prepare('select public_ref from orders where id = ?').get(orderId) as { public_ref: string }).public_ref;
     for (const status of ['paid', 'shipped', 'delivered']) {
-      const result = updateOrderStatus.execute({ order_id: orderId, status }, { customerId }) as {
+      const result = updateOrderStatus.execute({ order_reference: orderReference, status }, { customerId }) as {
         ok: boolean;
         error?: string;
       };
@@ -1233,7 +1254,7 @@ it('prevents the customer status tool from marking orders paid, shipped, or deli
   }
 });
 
-it('owner approval creates exactly one credit and leaves order status unchanged', () => {
+it('legacy direct approval is disabled and cannot change a claim or ledger', () => {
   db.exec('begin');
   try {
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-owner-customer-${Date.now()}`)
@@ -1247,28 +1268,21 @@ it('owner approval creates exactly one credit and leaves order status unchanged'
       .run(customerId, orderId, rupeesToMinor(800));
     const claim = createPaymentClaim({ customerId, orderId, amount: 800, eventKey: `approve-${Date.now()}` });
 
-    const pending = pendingPaymentClaims.execute({}, { customerId: ownerId }) as { claims: { id: number }[] };
-    assert.ok(pending.claims.some((row) => row.id === claim.id));
+    const pending = pendingPaymentClaims.execute({}, { customerId: ownerId }) as { claims: { claim_id: number }[] };
+    assert.ok(pending.claims.some((row) => row.claim_id === claim.id));
     const approved = resolvePaymentClaim.execute(
       { claim_id: claim.id, decision: 'approve' },
       { customerId: ownerId },
-    ) as { ok: boolean; status: string; ledger_credit_created: boolean; order_status_changed: boolean };
-    const retried = resolvePaymentClaim.execute(
-      { claim_id: claim.id, decision: 'approve' },
-      { customerId: ownerId },
-    ) as { ok: boolean; already_resolved?: boolean };
-    assert.deepEqual(approved, {
-      ok: true,
-      claim_id: claim.id,
-      status: 'approved',
-      ledger_credit_created: true,
-      order_status_changed: false,
-    });
-    assert.equal(retried.ok, true);
-    assert.equal(retried.already_resolved, true);
+    ) as { ok: boolean; error?: string };
+    assert.equal(approved.ok, false);
+    assert.match(approved.error ?? '', /disabled/i);
+    assert.equal(
+      (db.prepare('select status from payment_claims where id = ?').get(claim.id) as { status: string }).status,
+      'pending',
+    );
     assert.equal(
       (db.prepare("select count(*) n from ledger where order_id = ? and kind = 'credit'").get(orderId) as { n: number }).n,
-      1,
+      0,
     );
     assert.equal((db.prepare('select status from orders where id = ?').get(orderId) as { status: string }).status, 'confirmed');
   } finally {
@@ -1276,7 +1290,7 @@ it('owner approval creates exactly one credit and leaves order status unchanged'
   }
 });
 
-it('owner rejection resolves the claim without creating a credit', () => {
+it('legacy direct rejection is disabled and leaves the claim pending', () => {
   db.exec('begin');
   try {
     const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-reject-customer-${Date.now()}`)
@@ -1287,10 +1301,13 @@ it('owner rejection resolves the claim without creating a credit', () => {
     const rejected = resolvePaymentClaim.execute(
       { claim_id: claim.id, decision: 'reject' },
       { customerId: ownerId },
-    ) as { ok: boolean; status: string; ledger_credit_created: boolean };
-    assert.equal(rejected.ok, true);
-    assert.equal(rejected.status, 'rejected');
-    assert.equal(rejected.ledger_credit_created, false);
+    ) as { ok: boolean; error?: string };
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error ?? '', /disabled/i);
+    assert.equal(
+      (db.prepare('select status from payment_claims where id = ?').get(claim.id) as { status: string }).status,
+      'pending',
+    );
     assert.equal(
       (db.prepare("select count(*) n from ledger where customer_id = ? and kind = 'credit'").get(customerId) as { n: number }).n,
       0,
@@ -1362,6 +1379,258 @@ it('fails closed on missing delivery details and never creates a draft or order'
   }
 });
 
+it('rejects an unconfigured digital payment method before creating a draft', () => {
+  const keys = ['PAYMENT_EASYPAISA_ACCOUNT_NAME', 'PAYMENT_EASYPAISA_NUMBER'] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-config-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Payment-config kurta', rupeesToMinor(1800), 2).lastInsertRowid as number;
+    const result = prepareOrder.execute({
+      items: [{ product_id: productId, qty: 1 }],
+      recipient_name: 'Ali Khan',
+      contact_phone: '03120000000',
+      delivery_address: 'House 1, Main Road, Sector F',
+      city: 'Islamabad',
+      payment_method: 'easypaisa',
+    }, { customerId, idempotencyKey: 'payment-config-prepare' }) as { ok: boolean; error?: string };
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? '', /not currently available/i);
+    assert.equal((db.prepare('select count(*) n from order_drafts where customer_id = ?').get(customerId) as { n: number }).n, 0);
+  } finally {
+    db.exec('rollback');
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+});
+
+it('never substitutes COD for the payment method explicitly selected by the customer', () => {
+  const keys = ['PAYMENT_EASYPAISA_ACCOUNT_NAME', 'PAYMENT_EASYPAISA_NUMBER'] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  for (const key of keys) delete process.env[key];
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-choice-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Payment-choice shoes', rupeesToMinor(4500), 2).lastInsertRowid as number;
+    const common = {
+      items: [{ product_id: productId, qty: 1 }],
+      recipient_name: 'Asad Khan',
+      contact_phone: '03120000000',
+      delivery_address: 'House 1, Main Road, Topi',
+      city: 'Swabi',
+    };
+    const inboundText = 'Asad / 03120000000 / House 1 Main Road Topi Swabi / Easypaisa';
+
+    const substituted = prepareOrder.execute(
+      { ...common, payment_method: 'cod' },
+      { customerId, idempotencyKey: 'payment-choice-substitute', inboundText },
+    ) as { ok: boolean; error?: string };
+    assert.equal(substituted.ok, false);
+    assert.match(substituted.error ?? '', /selected Easypaisa/i);
+    assert.match(substituted.error ?? '', /never be substituted/i);
+    assert.equal((db.prepare('select count(*) n from order_drafts where customer_id = ?').get(customerId) as { n: number }).n, 0);
+
+    const unavailable = prepareOrder.execute(
+      { ...common, payment_method: 'easypaisa' },
+      { customerId, idempotencyKey: 'payment-choice-unavailable', inboundText },
+    ) as { ok: boolean; error?: string };
+    assert.equal(unavailable.ok, false);
+    assert.match(unavailable.error ?? '', /not currently available/i);
+    assert.equal((db.prepare('select count(*) n from order_drafts where customer_id = ?').get(customerId) as { n: number }).n, 0);
+  } finally {
+    db.exec('rollback');
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+});
+
+it('stores the configured payment method exactly as the customer selected it', () => {
+  const keys = ['PAYMENT_EASYPAISA_ACCOUNT_NAME', 'PAYMENT_EASYPAISA_NUMBER'] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  process.env.PAYMENT_EASYPAISA_ACCOUNT_NAME = 'Ahmed Store';
+  process.env.PAYMENT_EASYPAISA_NUMBER = '03120000000';
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-preserve-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Payment-preserve shoes', rupeesToMinor(4500), 2).lastInsertRowid as number;
+    const prepared = prepareOrder.execute({
+      items: [{ product_id: productId, qty: 1 }],
+      recipient_name: 'Asad Khan',
+      contact_phone: '03120000000',
+      delivery_address: 'House 1, Main Road, Topi',
+      city: 'Swabi',
+      payment_method: 'easypaisa',
+    }, {
+      customerId,
+      idempotencyKey: 'payment-preserve-prepare',
+      inboundText: 'My payment method is Easy Paisa',
+    }) as { ok: boolean; draft_id: number; payment_method: string };
+    assert.equal(prepared.ok, true);
+    assert.equal(prepared.payment_method, 'easypaisa');
+    assert.equal(
+      (db.prepare('select payment_method from order_drafts where id = ?').get(prepared.draft_id) as { payment_method: string }).payment_method,
+      'easypaisa',
+    );
+  } finally {
+    db.exec('rollback');
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  }
+});
+
+it('builds the customer order summary only from server-priced draft data', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`server-summary-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
+    ).run('Basic T-Shirt', 'S', 'White', rupeesToMinor(1200), 5).lastInsertRowid as number;
+    const prepared = prepareOrder.execute({
+      items: [{ product_id: productId, qty: 2, price: 1 }],
+      recipient_name: 'Hassan Khan',
+      contact_phone: '03466788766',
+      delivery_address: 'GIK Institute, Topi, Swabi',
+      city: 'Swabi',
+      payment_method: 'cod',
+    }, {
+      customerId,
+      idempotencyKey: 'server-summary-prepare',
+      inboundText: 'Use COD for this order',
+    }) as { ok: boolean; server_summary: string; summary_generated_by: string };
+    assert.equal(prepared.ok, true);
+    assert.equal(prepared.summary_generated_by, 'server');
+    assert.match(prepared.server_summary, /White \/ S \/ Basic T-Shirt/);
+    assert.match(prepared.server_summary, /Qty 2 × Rs 1,200 = Rs 2,400/);
+    assert.match(prepared.server_summary, /Total: Rs 2,400/);
+    assert.match(prepared.server_summary, /Delivery: Free/);
+    assert.match(prepared.server_summary, /Payment method: Cash on Delivery \(COD\)/);
+    assert.doesNotMatch(prepared.server_summary, /03466788766/);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('allows the exact server summary and rejects an AI-written replacement', () => {
+  const summary = buildDeterministicOrderSummary({
+    items: [{ name: 'Basic T-Shirt', size: 'S', color: 'White', qty: 1, unitPriceMinor: 120000 }],
+    subtotalMinor: 120000,
+    deliveryMinor: 0,
+    recipientName: 'Hassan Khan',
+    maskedContactPhone: '*******8766',
+    deliveryAddress: 'GIK Institute, Topi, Swabi',
+    city: 'Swabi',
+    postalCode: null,
+    deliveryInstructions: null,
+    paymentMethod: 'cod',
+  });
+  assert.equal(checkDeterministicOrderSummaryReply(summary, true, summary).ok, true);
+  const invented = summary.replaceAll('Rs 1,200', 'Rs 900');
+  const rejected = checkDeterministicOrderSummaryReply(invented, true);
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) assert.match(rejected.error, /server-generated draft/i);
+  assert.equal(checkDeterministicOrderSummaryReply('Which colour would you like?', false).ok, true);
+});
+
+it('requires one explicit payment method in the current customer message', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`payment-explicit-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Payment-explicit shirt', rupeesToMinor(1800), 2).lastInsertRowid as number;
+    const input = {
+      items: [{ product_id: productId, qty: 1 }],
+      recipient_name: 'Ali Khan',
+      contact_phone: '03120000000',
+      delivery_address: 'House 1, Main Road, Sector F',
+      city: 'Islamabad',
+      payment_method: 'cod',
+    };
+    const missing = prepareOrder.execute(input, {
+      customerId,
+      idempotencyKey: 'payment-explicit-missing',
+      inboundText: 'These are all my delivery details',
+    }) as { ok: boolean; error?: string };
+    assert.equal(missing.ok, false);
+    assert.match(missing.error ?? '', /explicitly name exactly one payment method/i);
+
+    const ambiguous = prepareOrder.execute(input, {
+      customerId,
+      idempotencyKey: 'payment-explicit-ambiguous',
+      inboundText: 'Should I use Easypaisa or COD?',
+    }) as { ok: boolean; error?: string };
+    assert.equal(ambiguous.ok, false);
+    assert.match(ambiguous.error ?? '', /more than one payment method/i);
+    assert.equal((db.prepare('select count(*) n from order_drafts where customer_id = ?').get(customerId) as { n: number }).n, 0);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('rejects an invalid Pakistani delivery contact before writing a draft', () => {
+  db.exec('begin');
+  try {
+    const customerId = db.prepare('insert into customers (phone) values (?)').run(`invalid-contact-${Date.now()}`).lastInsertRowid as number;
+    const productId = db.prepare(
+      'insert into products (name, price_minor, stock) values (?, ?, ?)',
+    ).run('Contact-validation shirt', rupeesToMinor(1200), 2).lastInsertRowid as number;
+    const result = prepareOrder.execute({
+      items: [{ product_id: productId, qty: 1 }],
+      recipient_name: 'Hassan Khan',
+      contact_phone: '034000000000',
+      delivery_address: 'GIK Institute, Topi, Swabi',
+      city: 'Swabi',
+      payment_method: 'cod',
+    }, { customerId, idempotencyKey: 'invalid-contact-prepare' }) as { ok: boolean; error?: string };
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? '', /valid Pakistani mobile number/i);
+    assert.equal((db.prepare('select count(*) n from order_drafts where customer_id = ?').get(customerId) as { n: number }).n, 0);
+  } finally {
+    db.exec('rollback');
+  }
+});
+
+it('blocks checkout-detail collection that omits payment method', () => {
+  const unsafe = checkCheckoutCollectionReply(
+    'White S Basic T-Shirt book this for me',
+    'Please send your full name, contact number, complete delivery address, and city.',
+  );
+  assert.equal(unsafe.ok, false);
+  assert.equal(checkCheckoutCollectionReply(
+    'White S Basic T-Shirt book this for me',
+    'Please send your full name, contact number, address, city, and choose COD as the available payment method.',
+  ).ok, true);
+  assert.equal(checkCheckoutCollectionReply('Show me shirts', 'Which colour do you prefer?').ok, true);
+});
+
+it('blocks accidental Devanagari fragments for Roman-Urdu customers without blocking real Devanagari input', () => {
+  assert.equal(checkCustomerReplyScript(
+    'Book this for me',
+    'Apna address bata d\u0947\u0902.',
+  ).ok, false);
+  assert.equal(checkCustomerReplyScript(
+    'Book this for me',
+    'Apna address bata dein.',
+  ).ok, true);
+  assert.equal(checkCustomerReplyScript(
+    '\u092e\u0941\u091d\u0947 \u092f\u0939 \u091a\u093e\u0939\u093f\u090f',
+    '\u0905\u092a\u0928\u093e \u092a\u0924\u093e \u092c\u0924\u093e \u0926\u0947\u0902\u0964',
+  ).ok, true);
+});
+
 it('prepares without booking, then explicit confirmation atomically books and reserves stock once', () => {
   db.exec('begin');
   try {
@@ -1412,23 +1681,35 @@ it('prepares without booking, then explicit confirmation atomically books and re
     assert.equal(rejected.ok, false);
     assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 0);
 
+    const ambiguous = confirmOrder.execute({}, {
+      customerId,
+      idempotencyKey: 'fulfillment-ambiguous-event',
+      inboundText: 'Yes',
+    }) as { ok: boolean; error?: string };
+    assert.equal(ambiguous.ok, false);
+    assert.match(ambiguous.error ?? '', /explicitly confirm/i);
+    assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 0);
+
     const confirmationContext = {
       customerId,
       idempotencyKey: 'fulfillment-confirm-event',
       inboundText: 'Yes, confirm my order',
     };
-    const confirmed = confirmOrder.execute({}, confirmationContext) as { ok: boolean; order_id: number; stock_reserved: boolean };
-    const retried = confirmOrder.execute({}, confirmationContext) as { ok: boolean; order_id: number; already_confirmed?: boolean };
+    const confirmed = confirmOrder.execute({}, confirmationContext) as { ok: boolean; order_reference: string; stock_reserved: boolean };
+    const retried = confirmOrder.execute({}, confirmationContext) as { ok: boolean; order_reference: string; already_confirmed?: boolean };
     assert.equal(confirmed.ok, true);
     assert.equal(confirmed.stock_reserved, true);
     assert.equal(retried.ok, true);
-    assert.equal(retried.order_id, confirmed.order_id);
+    assert.equal(retried.order_reference, confirmed.order_reference);
     assert.equal(retried.already_confirmed, true);
+    assert.match(confirmed.order_reference, /^ORD-[0-9A-F]{20}$/);
+    assert.equal(Object.hasOwn(confirmed, 'order_id'), false);
+    const confirmedOrderId = (db.prepare('select id from orders where public_ref = ?').get(confirmed.order_reference) as { id: number }).id;
     const order = db.prepare(`
       select status, total_minor, shipping_minor, recipient_name, contact_phone,
              delivery_address, city, postal_code, delivery_instructions, payment_method
       from orders where id = ?
-    `).get(confirmed.order_id) as Record<string, unknown>;
+    `).get(confirmedOrderId) as Record<string, unknown>;
     assert.deepEqual(order, {
       status: 'confirmed',
       total_minor: rupeesToMinor(6400),
@@ -1442,7 +1723,7 @@ it('prepares without booking, then explicit confirmation atomically books and re
       payment_method: 'cod',
     });
     assert.equal((db.prepare('select stock from products where id = ?').get(productId) as { stock: number }).stock, 3);
-    assert.equal((db.prepare("select count(*) n from ledger where order_id = ? and kind = 'debit'").get(confirmed.order_id) as { n: number }).n, 1);
+    assert.equal((db.prepare("select count(*) n from ledger where order_id = ? and kind = 'debit'").get(confirmedOrderId) as { n: number }).n, 1);
     assert.equal((db.prepare('select count(*) n from orders where customer_id = ?').get(customerId) as { n: number }).n, 1);
   } finally {
     db.exec('rollback');
@@ -1462,7 +1743,7 @@ it('rejects stale draft prices without creating any partial order', () => {
       contact_phone: '03120000000',
       delivery_address: 'Office 4, Main Boulevard',
       city: 'Lahore',
-      payment_method: 'easypaisa',
+      payment_method: 'cod',
     }, { customerId, idempotencyKey: 'fulfillment-stale-prepare' }) as { ok: boolean };
     assert.equal(prepared.ok, true);
     db.prepare('update products set price_minor = ? where id = ?').run(rupeesToMinor(1100), productId);
@@ -1481,10 +1762,15 @@ it('rejects stale draft prices without creating any partial order', () => {
 });
 
 it('recognizes explicit confirmation conservatively', () => {
-  assert.equal(isExplicitOrderConfirmation('Yes'), true);
+  assert.equal(isExplicitOrderConfirmation('Yes'), false);
+  assert.equal(isExplicitOrderConfirmation('OK'), false);
+  assert.equal(isExplicitOrderConfirmation('Haan'), false);
+  assert.equal(isExplicitOrderConfirmation('Ji'), false);
+  assert.equal(isExplicitOrderConfirmation('Done'), false);
   assert.equal(isExplicitOrderConfirmation('Order confirm kar dein'), true);
   assert.equal(isExplicitOrderConfirmation('Please book it'), true);
   assert.equal(isExplicitOrderConfirmation('Confirm bhai'), true);
+  assert.equal(isExplicitOrderConfirmation('Yes, confirm my order'), true);
   assert.equal(isExplicitOrderConfirmation('What is the total?'), false);
   assert.equal(isExplicitOrderConfirmation('No, do not confirm order'), false);
   assert.equal(isExplicitOrderConfirmation("Don't confirm it yet"), false);

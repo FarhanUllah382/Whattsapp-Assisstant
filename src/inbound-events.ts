@@ -1,4 +1,5 @@
 import { db } from './db';
+import { sanitizeMemoryText } from './privacy';
 
 const PROCESSING_LEASE_MS = 5 * 60 * 1000;
 const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
@@ -71,6 +72,11 @@ export function initializeInboundReplayGuard(
              last_error = null,
              updated_at = ?
        where status in ('processing', 'failed') and occurred_at < ?
+         and not exists (
+           select 1 from inbound_jobs j
+           where j.event_key = inbound_events.event_key
+             and j.status in ('pending', 'processing')
+         )
     `).run(processStartedAt.toISOString(), cutoff.toISOString());
   })();
   return cutoff;
@@ -200,7 +206,7 @@ export function completeInboundEvent(eventKey: string, now: Date = new Date()): 
 }
 
 export function failInboundEvent(eventKey: string, error: unknown, now: Date = new Date()): void {
-  const detail = error instanceof Error ? error.message : String(error);
+  const detail = sanitizeMemoryText(error instanceof Error ? error.message : String(error));
   db.prepare(`
     update inbound_events
        set status = 'failed', last_error = ?, updated_at = ?

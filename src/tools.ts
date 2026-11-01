@@ -9,54 +9,177 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { getSalesToday, getTopSellingProduct, getUnpaidCustomers } from './analytics';
-import { findBestMatch, loadCatalogSections } from './catalog';
+import { findBestMatch, loadApprovedCatalogSections } from './catalog';
+import { customerSafeProductRecord, normalizeRequiredFeatures } from './business-grounding';
 import { db } from './db';
 import { getPendingFollowups } from './followups';
 import { normalizeSize } from './inventory';
+import { publicInventoryFields } from './inventory-visibility';
 import { getBalance, recordCredit, recordDebitMinor } from './ledger';
 import { minorToRupees, multiplyMinor } from './money';
 import { createLogger } from './obs/logger';
+import { buildDeterministicOrderSummary } from './order-summary';
+import { getMyOrderStatus, getOrderPublicReference, resolveOwnedOrderReference } from './order-access';
 import { recordInitialOrderStatus, transitionOrderStatus, type OrderStatus, type OrderStatusAuditContext } from './orders';
-import { claimPayment, pendingPaymentClaims, resolvePaymentClaim } from './payments';
+import { claimPayment, pendingPaymentClaims } from './payments';
+import { maskPhoneForDisplay, sanitizeMemoryText } from './privacy';
+import {
+  getMyRefundStatus,
+  pendingRefundRequests,
+  requestRefund,
+  resolveRefundRequest,
+} from './refunds';
+import {
+  detectExplicitPaymentMethodSelection,
+  getAvailablePaymentMethods,
+  getPaymentInstructions,
+  parsePaymentMethod,
+  paymentMethodLabel,
+  paymentOptions,
+  PAYMENT_METHODS,
+  type PaymentMethod,
+} from './payment-instructions';
 import type { ToolContext, ToolDef } from './types';
 
 const log = createLogger();
 
+export const inventoryOverviewTool: ToolDef = {
+  name: 'inventory_overview',
+  description:
+    'Owner-only read-only inventory report. Use when Ahmed asks what is in stock, stock levels, products, sizes, colors, or prices.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      query: { type: 'string', description: 'optional product or category text filter' },
+    },
+  },
+  execute: ({ query }) => {
+    if (query !== undefined && typeof query !== 'string') {
+      return { ok: false, error: 'Inventory query must be plain text.' };
+    }
+    const normalized = query?.trim().toLowerCase() ?? '';
+    const escaped = normalized.replace(/[\\%_]/g, '\\$&');
+    const like = `%${escaped}%`;
+    const rows = db.prepare(`
+      select sku, name, category, size, color, price_minor, stock
+        from products
+       where active = 1
+         and (? = '' or lower(name) like ? escape '\\' or lower(coalesce(category, '')) like ? escape '\\')
+       order by category, name, color, size, sku
+    `).all(normalized, like, like) as Array<{
+      sku: string;
+      name: string;
+      category: string | null;
+      size: string | null;
+      color: string | null;
+      price_minor: number;
+      stock: number;
+    }>;
+    return {
+      ok: true,
+      active_sku_count: rows.length,
+      products: rows.map(({ price_minor, ...row }) => ({
+        ...row,
+        price: minorToRupees(price_minor, 'owner inventory price'),
+      })),
+    };
+  },
+};
+
 export const checkStock: ToolDef = {
   name: 'check_stock',
-  description: 'Look up whether a product is in stock, and how many are available.',
+  description:
+    'Search the current active product catalog using structured filters. Exact stock counts are private. ' +
+    'Pass every requested feature that is not name/category/size/color/budget in required_features; ' +
+    'the server will require owner confirmation instead of guessing.',
   input_schema: {
     type: 'object',
     properties: {
       name: { type: 'string', description: 'product name, e.g. "shirt"' },
+      category: { type: 'string', description: 'product category, e.g. "hoodie" (optional)' },
       size: { type: 'string', description: 'e.g. "medium" (optional)' },
       color: { type: 'string', description: 'e.g. "black" (optional)' },
+      max_price: { type: 'number', description: 'optional maximum customer budget in rupees' },
+      requested_qty: {
+        type: 'number',
+        description: 'optional positive whole quantity the customer wants',
+      },
+      required_features: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'features not represented by structured fields, e.g. waterproof or cotton',
+      },
     },
-    required: ['name'],
   },
-  execute: ({ name, size, color }) => {
-    if (typeof name !== 'string' || name.trim() === '') {
-      return { ok: false, error: 'Please say which product you mean.' };
+  execute: ({ name, category, size, color, max_price, requested_qty, required_features }) => {
+    if ((typeof name !== 'string' || name.trim() === '') &&
+        (typeof category !== 'string' || category.trim() === '')) {
+      return { ok: false, error: 'Please provide a product name or category.' };
     }
+    if (name !== undefined && typeof name !== 'string') return { ok: false, error: 'Product name must be plain text.' };
+    if (category !== undefined && typeof category !== 'string') return { ok: false, error: 'Category must be plain text.' };
     if (size !== undefined && typeof size !== 'string') {
       return { ok: false, error: 'Size must be plain text, like "medium".' };
     }
     if (color !== undefined && typeof color !== 'string') {
       return { ok: false, error: 'Color must be plain text, like "black".' };
     }
+    if (requested_qty !== undefined && (!Number.isInteger(requested_qty) || requested_qty <= 0)) {
+      return { ok: false, error: 'requested_qty must be a positive whole number.' };
+    }
+    if (max_price !== undefined &&
+        (typeof max_price !== 'number' || !Number.isFinite(max_price) || max_price < 0)) {
+      return { ok: false, error: 'max_price must be a non-negative rupee amount.' };
+    }
+    let maxPriceMinor: number | undefined;
+    if (max_price !== undefined) {
+      try {
+        maxPriceMinor = Math.round(max_price * 100);
+        if (!Number.isSafeInteger(maxPriceMinor) || Math.abs(max_price * 100 - maxPriceMinor) > 1e-8) {
+          return { ok: false, error: 'max_price may contain at most two decimal places.' };
+        }
+      } catch {
+        return { ok: false, error: 'max_price is invalid.' };
+      }
+    }
+    const features = normalizeRequiredFeatures(required_features);
+    if (!Array.isArray(features)) return { ok: false, error: features.error };
+    if (features.length > 0) {
+      return {
+        ok: true,
+        found: false,
+        needs_owner_confirmation: true,
+        unsupported_attributes: features,
+        instruction:
+          'These attributes are not present in the approved product schema. Do not answer yes or no; notify the owner and report the real handoff state.',
+      };
+    }
 
     const escapeLike = (value: string) => value.toLowerCase().replace(/[\\%_]/g, '\\$&');
-    const namePattern = `%${escapeLike(name.trim())}%`;
-    let sql = `select id, sku, name, category, size, color, price_minor, stock
-      from products
-      where active = 1 and (
+    const filters: string[] = ['active = 1'];
+    const params: unknown[] = [];
+    if (typeof name === 'string' && name.trim()) {
+      const rawName = name.trim().toLowerCase();
+      const singularName = rawName.replace(/s$/, '');
+      const namePatterns = [...new Set([rawName, singularName])].map((value) => `%${escapeLike(value)}%`);
+      filters.push(`(${namePatterns.map(() => `(
         lower(name) like ? escape '\\'
         or exists (
           select 1 from json_each(products.aliases_json)
           where lower(cast(json_each.value as text)) like ? escape '\\'
         )
-      )`;
-    const params: unknown[] = [namePattern, namePattern];
+      )`).join(' or ')})`);
+      for (const pattern of namePatterns) params.push(pattern, pattern);
+    }
+    if (typeof category === 'string' && category.trim()) {
+      const rawCategory = category.trim().toLowerCase();
+      const singularCategory = rawCategory.replace(/s$/, '');
+      filters.push('lower(category) in (?, ?)');
+      params.push(rawCategory, singularCategory);
+    }
+    let sql = `select id, sku, name, category, size, color, price_minor, stock
+      from products
+      where ${filters.join(' and ')}`;
     if (size) {
       sql += ' and lower(size) = ?';
       params.push(normalizeSize(size));
@@ -65,10 +188,52 @@ export const checkStock: ToolDef = {
       sql += ' and lower(color) = ?';
       params.push(color.trim().toLowerCase());
     }
-    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown> & { price_minor: number }>;
+    if (maxPriceMinor !== undefined) {
+      sql += ' and price_minor <= ?';
+      params.push(maxPriceMinor);
+    }
+    sql += ' order by price_minor, name, id limit 20';
+    const rows = db.prepare(sql).all(...params) as Array<
+      Record<string, unknown> & {
+        name: string;
+        sku: string | null;
+        category: string | null;
+        price_minor: number;
+        stock: number;
+      }
+    >;
+    for (const row of rows) {
+      const safe = customerSafeProductRecord(row);
+      if (!safe.ok) {
+        return {
+          ok: false,
+          configuration_error: true,
+          error: 'A matching product is not approved for customer display. Ask the owner to correct the catalog record.',
+        };
+      }
+    }
     return rows.length > 0
-      ? rows.map(({ price_minor, ...row }) => ({ ...row, price: minorToRupees(price_minor, 'product price') }))
-      : { found: false, message: 'no matching product' };
+      ? {
+          ok: true,
+          found: true,
+          scope: 'current_active_catalog',
+          products: rows.map(({ price_minor, stock, id, name, category, size, color }) => ({
+            product_id: id,
+            name,
+            category,
+            size,
+            color,
+            price: minorToRupees(price_minor, 'product price'),
+            ...publicInventoryFields(stock, requested_qty),
+          })),
+        }
+      : {
+          ok: true,
+          found: false,
+          scope: 'current_active_catalog',
+          message: 'No matching product was found in the current active catalog for these filters.',
+          instruction: 'Do not claim Ahmed never sells this item; report only that it was not found in the current catalog.',
+        };
   },
 };
 
@@ -113,9 +278,6 @@ export interface ServerPricedOrderItem {
   /** Exact price snapshot in Pakistani paisas, loaded by the server. */
   price_minor: number;
 }
-
-export const PAYMENT_METHODS = ['cod', 'bank_transfer', 'easypaisa', 'jazzcash'] as const;
-export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
 export interface FulfillmentDetails {
   recipientName: string;
@@ -296,7 +458,12 @@ export const recordOrder: ToolDef = {
           sourceEventKey: ctx.idempotencyKey,
           evidence: 'Customer confirmed the order contents before placement.',
         });
-        return { ok: true, order_id: orderId, total: check.total };
+        return {
+          ok: true,
+          order_id: orderId,
+          order_reference: getOrderPublicReference(orderId),
+          total: check.total,
+        };
       });
     } catch {
       return { ok: false, error: 'Could not record the order — please try again.' };
@@ -306,6 +473,9 @@ export const recordOrder: ToolDef = {
 
 function cleanRequiredText(value: unknown, label: string, min: number, max: number): string | { error: string } {
   if (typeof value !== 'string') return { error: `${label} must be plain text.` };
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value)) {
+    return { error: `${label} contains unsupported control characters.` };
+  }
   const clean = value.trim().replace(/\s+/g, ' ');
   if (clean.length < min || clean.length > max) {
     return { error: `${label} must contain ${min}-${max} characters.` };
@@ -316,6 +486,9 @@ function cleanRequiredText(value: unknown, label: string, min: number, max: numb
 function cleanOptionalText(value: unknown, label: string, max: number): string | null | { error: string } {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string') return { error: `${label} must be plain text.` };
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(value)) {
+    return { error: `${label} contains unsupported control characters.` };
+  }
   const clean = value.trim().replace(/\s+/g, ' ');
   if (clean.length > max) return { error: `${label} must be ${max} characters or fewer.` };
   return clean || null;
@@ -325,29 +498,26 @@ function normalizeContactPhone(value: unknown): string | { error: string } {
   if (typeof value !== 'string') return { error: 'Contact number must be plain text.' };
   const trimmed = value.trim();
   const digits = trimmed.replace(/\D/g, '');
-  if (digits.length < 10 || digits.length > 15) {
-    return { error: 'Contact number must contain 10-15 digits.' };
+  if (!/^03\d{9}$/.test(digits) && !/^923\d{9}$/.test(digits)) {
+    return {
+      error:
+        'Contact number must be a valid Pakistani mobile number: 03XXXXXXXXX or +923XXXXXXXXX.',
+    };
   }
   return trimmed.startsWith('+') ? `+${digits}` : digits;
 }
 
 function normalizePaymentMethod(value: unknown): PaymentMethod | { error: string } {
-  if (typeof value !== 'string') {
-    return { error: 'Payment method must be COD, bank transfer, Easypaisa, or JazzCash.' };
+  const method = parsePaymentMethod(value);
+  if (!method) return { error: 'Payment method must be COD, bank transfer, Easypaisa, or JazzCash.' };
+  if (!getPaymentInstructions(method).ok) {
+    return {
+      error:
+        `${method} is not currently available because owner-approved payment details are not configured. ` +
+        `Available methods: ${getAvailablePaymentMethods().join(', ')}.`,
+    };
   }
-  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, '_');
-  const aliases: Record<string, PaymentMethod> = {
-    cod: 'cod',
-    cash_on_delivery: 'cod',
-    cash: 'cod',
-    bank: 'bank_transfer',
-    bank_transfer: 'bank_transfer',
-    easypaisa: 'easypaisa',
-    easy_paisa: 'easypaisa',
-    jazzcash: 'jazzcash',
-    jazz_cash: 'jazzcash',
-  };
-  return aliases[normalized] ?? { error: 'Payment method must be COD, bank transfer, Easypaisa, or JazzCash.' };
+  return method;
 }
 
 function validateFulfillment(input: any): FulfillmentDetails | { error: string } {
@@ -406,7 +576,7 @@ function checkDraftStock(items: ServerPricedOrderItem[]): string | null {
     if (!product) return `Product ${item.product_id} is no longer available.`;
     if (product.stock < item.qty) {
       const variant = [product.color, product.size, product.name].filter(Boolean).join(' ');
-      return `Not enough stock for ${variant}: requested ${item.qty}, available ${product.stock}.`;
+      return `The requested quantity (${item.qty}) cannot currently be fulfilled for ${variant}.`;
     }
   }
   return null;
@@ -415,6 +585,30 @@ function checkDraftStock(items: ServerPricedOrderItem[]): string | null {
 function draftResult(row: OrderDraftRow) {
   const items = JSON.parse(row.items_json) as ServerPricedOrderItem[];
   const productRows = db.prepare('select id, name, size, color from products where id = ?');
+  const displayItems = items.map((item) => {
+    const product = productRows.get(item.product_id) as
+      | { id: number; name: string; size: string | null; color: string | null }
+      | undefined;
+    return {
+      name: product?.name ?? `Product ${item.product_id}`,
+      size: product?.size ?? null,
+      color: product?.color ?? null,
+      qty: item.qty,
+      unitPriceMinor: item.price_minor,
+    };
+  });
+  const serverSummary = buildDeterministicOrderSummary({
+    items: displayItems,
+    subtotalMinor: row.total_minor,
+    deliveryMinor: row.shipping_minor,
+    recipientName: row.recipient_name,
+    maskedContactPhone: maskPhoneForDisplay(row.contact_phone),
+    deliveryAddress: row.delivery_address,
+    city: row.city,
+    postalCode: row.postal_code,
+    deliveryInstructions: row.delivery_instructions,
+    paymentMethod: row.payment_method,
+  });
   return {
     ok: true,
     draft_id: row.id,
@@ -428,15 +622,18 @@ function draftResult(row: OrderDraftRow) {
     delivery_charge: minorToRupees(row.shipping_minor, 'draft shipping'),
     total: minorToRupees(row.total_minor + row.shipping_minor, 'draft total'),
     recipient_name: row.recipient_name,
-    contact_phone: row.contact_phone,
+    contact_phone_masked: maskPhoneForDisplay(row.contact_phone),
     delivery_address: row.delivery_address,
     city: row.city,
     postal_code: row.postal_code,
     delivery_instructions: row.delivery_instructions,
     payment_method: row.payment_method,
+    server_summary: serverSummary,
+    summary_generated_by: 'server',
     needs_explicit_confirmation: row.status === 'awaiting_confirmation',
     instruction: row.status === 'awaiting_confirmation'
-      ? 'Show this complete summary and ask the customer to confirm. Do not say the order is booked yet.'
+      ? 'The application sends server_summary automatically. Do not copy, rewrite, calculate, translate, ' +
+        'or send an additional order summary. Wait for a later explicit confirmation message.'
       : undefined,
   };
 }
@@ -453,7 +650,11 @@ export function isExplicitOrderConfirmation(text: unknown): boolean {
   if (typeof text !== 'string') return false;
   const normalized = text.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
   if (!normalized || /\b(no|nope|not|dont|don t|nahi|nahin|mat|cancel|change|wait|ruk|stop)\b/.test(normalized)) return false;
-  const exact = new Set(['yes', 'y', 'haan', 'han', 'ha', 'ji', 'ok', 'okay', 'confirm', 'confirmed', 'done']);
+  // Generic affirmations are not transaction-specific. The preceding model
+  // reply may contain another question, so "yes"/"okay"/"haan"/"done" must
+  // never create an order by themselves. Require language that explicitly
+  // names confirmation, booking, placement, or the order itself.
+  const exact = new Set(['confirm', 'confirmed', 'confirm order', 'order confirm', 'book order']);
   if (exact.has(normalized)) return true;
   return (
     /^(?:yes |haan |han |ha |ji )?confirm(?: order)?(?: bhai| bro| please| pls| ji)*$/.test(normalized) ||
@@ -468,7 +669,9 @@ export const prepareOrder: ToolDef = {
   name: 'prepare_order',
   description:
     'Validate the complete delivery details, live stock, and server-controlled prices, then save a draft. ' +
-    'This does NOT create or book an order. Show the returned summary and wait for a later customer message.',
+    'This does NOT create or book an order. The payment method must exactly match the method explicitly named ' +
+    'in the current customer message; never substitute another method. The application sends the deterministic ' +
+    'server summary automatically; never compose or send one yourself.',
   input_schema: {
     type: 'object',
     properties: {
@@ -492,6 +695,39 @@ export const prepareOrder: ToolDef = {
   },
   execute: (input, ctx) => {
     try {
+      // The model is not an authority for payment choice. On a real customer
+      // turn, bind the draft to exactly what the customer typed. Requiring the
+      // method in the current message gives the server unambiguous evidence
+      // without trusting model memory or silently reusing an older order's
+      // choice. Direct/internal callers without inboundText keep the existing
+      // validation contract.
+      if (ctx.inboundText !== undefined) {
+        const selection = detectExplicitPaymentMethodSelection(ctx.inboundText);
+        if (selection.status === 'ambiguous') {
+          return {
+            ok: false,
+            error:
+              'The customer mentioned more than one payment method. Ask them to choose exactly one method in a new message; do not choose for them.',
+          };
+        }
+        if (selection.status === 'none') {
+          return {
+            ok: false,
+            error:
+              'The customer must explicitly name exactly one payment method in the current message before an order draft can be prepared.',
+          };
+        }
+        const submittedMethod = parsePaymentMethod(input?.payment_method);
+        if (submittedMethod && submittedMethod !== selection.method) {
+          return {
+            ok: false,
+            error:
+              `The customer selected ${paymentMethodLabel(selection.method)}, but the submitted draft used ` +
+              `${paymentMethodLabel(submittedMethod)}. Payment methods may never be substituted. ` +
+              'Use the customer-selected method, or explain that it is unavailable and ask the customer to choose another method in a new message.',
+          };
+        }
+      }
       const fulfillment = validateFulfillment(input);
       if ('error' in fulfillment) return { ok: false, error: fulfillment.error };
       const aggregated = aggregateDraftItems(input?.items);
@@ -558,7 +794,14 @@ export function confirmPendingOrderDraft(ctx: ToolContext): Record<string, unkno
       if (confirmedEventKey) {
         const prior = db.prepare('select * from order_drafts where confirmed_event_key = ?').get(confirmedEventKey) as OrderDraftRow | undefined;
         if (prior?.order_id) {
-          return { ok: true, order_id: prior.order_id, draft_id: prior.id, status: 'confirmed', already_confirmed: true };
+          return {
+            ok: true,
+            order_id: prior.order_id,
+            order_reference: getOrderPublicReference(prior.order_id),
+            draft_id: prior.id,
+            status: 'confirmed',
+            already_confirmed: true,
+          };
         }
       }
       const draft = getPendingOrderDraft(ctx.customerId);
@@ -614,6 +857,7 @@ export function confirmPendingOrderDraft(ctx: ToolContext): Record<string, unkno
         ok: true,
         draft_id: draft.id,
         order_id: orderId,
+        order_reference: getOrderPublicReference(orderId),
         status: 'confirmed',
         total: minorToRupees(current.totalMinor, 'confirmed order total'),
         stock_reserved: true,
@@ -627,10 +871,16 @@ export function confirmPendingOrderDraft(ctx: ToolContext): Record<string, unkno
 export const confirmOrder: ToolDef = {
   name: 'confirm_order',
   description:
-    'Confirm the current customer\'s existing prepared order. Call only on a later message where the customer explicitly confirms. ' +
+    'Confirm the current customer\'s existing prepared order. Call only on a later message where the customer explicitly mentions ' +
+    'confirming, booking, or placing the order; a bare yes, okay, haan, ji, or done is not sufficient. ' +
     'The server verifies the exact inbound text, current catalog price, and stock before creating and reserving the order.',
   input_schema: { type: 'object', properties: {} },
-  execute: (_input, ctx) => confirmPendingOrderDraft(ctx),
+  execute: (_input, ctx) => {
+    const result = confirmPendingOrderDraft(ctx);
+    if (result.ok !== true) return result;
+    const { order_id: _internalOrderId, draft_id: _internalDraftId, ...customerSafe } = result;
+    return customerSafe;
+  },
 };
 
 // Wide schema for the model (status is just `string` — the JSON-schema
@@ -643,24 +893,21 @@ export const confirmOrder: ToolDef = {
 export const updateOrderStatus: ToolDef = {
   name: 'update_order_status',
   description:
-    'Allow a customer to confirm their own placed order or cancel it before shipping. ' +
+    'Allow a customer to confirm or cancel an order belonging to their current WhatsApp identity, using its public reference. ' +
     'Customers cannot mark an order paid, shipped, or delivered.',
   input_schema: {
     type: 'object',
     properties: {
-      order_id: { type: 'number', description: 'the order id' },
+      order_reference: { type: 'string', description: 'the public order reference, beginning ORD-' },
       status: {
         type: 'string',
         enum: ['confirmed', 'cancelled'],
         description: 'the new status',
       },
     },
-    required: ['order_id', 'status'],
+    required: ['order_reference', 'status'],
   },
-  execute: ({ order_id, status }, ctx) => {
-    if (!Number.isInteger(order_id) || order_id <= 0) {
-      return { ok: false, error: 'order_id must be a positive whole number.' };
-    }
+  execute: ({ order_reference, status }, ctx) => {
     if (status !== 'confirmed' && status !== 'cancelled') {
       return {
         ok: false,
@@ -668,17 +915,11 @@ export const updateOrderStatus: ToolDef = {
       };
     }
 
-    const order = db.prepare('select customer_id from orders where id = ?').get(order_id) as
-      | { customer_id: number }
-      | undefined;
-    if (!order) {
-      return { ok: false, error: `Order ${order_id} does not exist.` };
-    }
-    if (order.customer_id !== ctx.customerId) {
-      return { ok: false, error: `Order ${order_id} does not belong to this customer.` };
-    }
+    const resolved = resolveOwnedOrderReference(ctx.customerId, order_reference);
+    if (!resolved.ok) return { ok: false, error: resolved.error };
+    const orderId = resolved.order.id;
 
-    const result = transitionOrderStatus(order_id, status as OrderStatus, {
+    const result = transitionOrderStatus(orderId, status as OrderStatus, {
       actorType: 'customer',
       actorCustomerId: ctx.customerId,
       source: ctx.idempotencyKey ? 'whatsapp_customer_tool' : 'direct_customer_tool',
@@ -688,7 +929,12 @@ export const updateOrderStatus: ToolDef = {
     if (!result.ok) {
       return { ok: false, error: result.error };
     }
-    return { ok: true, order_id: result.order_id, from: result.from, to: result.to };
+    return {
+      ok: true,
+      order_reference: resolved.order.public_ref.toUpperCase(),
+      from: result.from,
+      to: result.to,
+    };
   },
 };
 
@@ -719,7 +965,7 @@ export const searchCatalog: ToolDef = {
   name: 'search_catalog',
   description:
     "Search Ahmed's catalog/FAQ document for general questions — what he sells, return policy, " +
-    'delivery info, etc. This does NOT check live stock or exact prices — use check_stock for ' +
+    'delivery info, etc. This does NOT check live availability or exact prices — use check_stock for ' +
     "that. If this returns found:false, do NOT guess an answer — tell the customer you'll " +
     'confirm and get back to them.',
   input_schema: {
@@ -733,8 +979,16 @@ export const searchCatalog: ToolDef = {
     if (typeof query !== 'string' || query.trim() === '') {
       return { ok: false, error: 'Please say what you want to look up in the catalog.' };
     }
-    const sections = loadCatalogSections();
-    const match = findBestMatch(sections, query);
+    const approved = loadApprovedCatalogSections();
+    if (!approved.ok) {
+      return {
+        found: false,
+        configuration_error: true,
+        instruction:
+          'The business-policy catalog is not owner-approved or has changed since approval. Do not answer from memory; notify the owner.',
+      };
+    }
+    const match = findBestMatch(approved.sections, query);
     if (!match) {
       return {
         found: false,
@@ -743,7 +997,11 @@ export const searchCatalog: ToolDef = {
           'confirm and get back to them.',
       };
     }
-    return { found: true, title: match.title, content: match.body };
+    return {
+      found: true,
+      title: match.title.slice(0, 120),
+      content: match.body.slice(0, 3_000),
+    };
   },
 };
 
@@ -754,8 +1012,9 @@ export const searchCatalog: ToolDef = {
 // through createNotifyOwnerTool's injected callback; it does not replace or
 // weaken this original record.
 export function recordHandoff(customerId: number, reason: string): number {
-  const result = db.prepare('insert into handoff_ledger (customer_id, reason) values (?, ?)').run(customerId, reason);
-  log.warn('NEEDS AHMED', { customerId, reason });
+  const safeReason = sanitizeMemoryText(reason).slice(0, 2000);
+  const result = db.prepare('insert into handoff_ledger (customer_id, reason) values (?, ?)').run(customerId, safeReason);
+  log.warn('NEEDS AHMED', { customerId, reasonLength: safeReason.length });
   return Number(result.lastInsertRowid);
 }
 
@@ -786,7 +1045,7 @@ export function createNotifyOwnerTool(deliverAlert?: HandoffAlertDelivery): Tool
         return { ok: false, error: 'Please describe what Ahmed needs to look at.' };
       }
       try {
-        const cleanReason = reason.trim();
+        const cleanReason = sanitizeMemoryText(reason.trim()).slice(0, 2000);
         const handoffId = recordHandoff(ctx.customerId, cleanReason);
         if (!deliverAlert) return { ok: true, handoff_id: handoffId };
 
@@ -797,7 +1056,13 @@ export function createNotifyOwnerTool(deliverAlert?: HandoffAlertDelivery): Tool
         });
         return delivery.ok
           ? { ok: true, handoff_id: handoffId, alert_status: delivery.status, alert_id: delivery.alertId }
-          : { ok: false, handoff_id: handoffId, error: delivery.error };
+          : {
+              ok: false,
+              handoff_id: handoffId,
+              alert_status: delivery.status,
+              alert_id: delivery.alertId,
+              error: delivery.error,
+            };
       } catch {
         return { ok: false, error: 'Could not record the handoff — please try again.' };
       }
@@ -820,11 +1085,15 @@ export const baseTools: ToolDef[] = [
   checkStock,
   getCustomerBalance,
   getCustomerNote,
+  getMyOrderStatus,
   prepareOrder,
   confirmOrder,
   updateOrderStatus,
   claimPayment,
+  requestRefund,
+  getMyRefundStatus,
   notifyOwner,
+  paymentOptions,
   searchCatalog,
 ];
 
@@ -881,10 +1150,12 @@ export const pendingFollowupsTool: ToolDef = {
 };
 
 export const ownerTools: ToolDef[] = [
+  inventoryOverviewTool,
   salesToday,
   unpaidCustomersTool,
   topSellingProductTool,
   pendingFollowupsTool,
   pendingPaymentClaims,
-  resolvePaymentClaim,
+  pendingRefundRequests,
+  resolveRefundRequest,
 ];

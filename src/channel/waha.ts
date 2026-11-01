@@ -3,7 +3,14 @@
 // or WhatsApp chatId format — server.ts talks to it only through the
 // ChannelAdapter interface, and agent.ts/tools.ts don't import this file at
 // all.
-import type { ChannelAdapter, InboundMessage } from './types';
+import {
+  ChannelSendError,
+  type ChannelAdapter,
+  type ChannelHealth,
+  type ChannelImageMessage,
+  type ChannelSendReceipt,
+  type InboundMessage,
+} from './types';
 
 const WAHA_BASE_URL = process.env.WAHA_BASE_URL ?? 'http://localhost:3001';
 const WAHA_SESSION = process.env.WAHA_SESSION ?? 'default';
@@ -52,14 +59,74 @@ export class WahaAdapter implements ChannelAdapter {
     return fetch(`${this.baseUrl}${path}`, { ...init, headers });
   }
 
-  async sendText(phone: string, text: string): Promise<void> {
-    const response = await this.fetch('/api/sendText', {
-      method: 'POST',
-      body: JSON.stringify({ session: this.session, chatId: chatIdFor(phone), text }),
+  async sendText(phone: string, text: string): Promise<ChannelSendReceipt> {
+    return this.send('/api/sendText', {
+      session: this.session,
+      chatId: chatIdFor(phone),
+      text,
     });
+  }
+
+  async sendImage(phone: string, image: ChannelImageMessage): Promise<ChannelSendReceipt> {
+    return this.send('/api/sendImage', {
+      session: this.session,
+      chatId: chatIdFor(phone),
+      file: {
+        mimetype: image.mimetype,
+        filename: image.filename,
+        data: image.data,
+      },
+      caption: image.caption,
+    });
+  }
+
+  private async send(path: string, body: Record<string, unknown>): Promise<ChannelSendReceipt> {
+    let response: Response;
+    try {
+      response = await this.fetch(path, {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      throw new ChannelSendError(
+        error instanceof Error ? error.message : 'WAHA send failed before a response.',
+        true,
+      );
+    }
+    const responseText = await response.text();
     if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`WAHA send failed (${response.status}): ${detail.slice(0, 300)}`);
+      throw new ChannelSendError(
+        `WAHA send rejected (${response.status}): ${responseText.slice(0, 300)}`,
+        false,
+      );
+    }
+    let payload: any = null;
+    try {
+      payload = responseText ? JSON.parse(responseText) : null;
+    } catch {
+      // A successful HTTP response still proves provider acceptance even when
+      // an older/custom WAHA build returns a non-JSON body.
+    }
+    const providerMessageId = [
+      payload?.id,
+      payload?.key?.id,
+      payload?._data?.id?._serialized,
+    ].find((value) => typeof value === 'string' && value.trim() !== '');
+    return providerMessageId ? { providerMessageId } : {};
+  }
+
+  async healthCheck(): Promise<ChannelHealth> {
+    try {
+      const response = await this.fetch(`/api/sessions/${encodeURIComponent(this.session)}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) return { ok: false, status: `http_${response.status}` };
+      const payload = await response.json() as { status?: unknown };
+      const status = typeof payload.status === 'string' ? payload.status : 'UNKNOWN';
+      return { ok: status === 'WORKING', status };
+    } catch {
+      return { ok: false, status: 'unreachable' };
     }
   }
 

@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 
-import { PACING_DEFAULTS } from '../src/guardrails/pacing/defaults';
+import {
+  PACING_DEFAULTS,
+  parsePacingWindowEndHour,
+} from '../src/guardrails/pacing/defaults';
 import { decideSharedPacing } from '../src/guardrails/pacing/configured';
 import {
+  janelaDeEnvioAberta,
   numberAgeDaysInTz,
   parseActivationDateInTz,
   warmupCapFor,
@@ -23,6 +27,27 @@ assert.equal(parseActivationDateInTz('', timezone), null);
 assert.equal(parseActivationDateInTz('2026-02-30', timezone), null);
 assert.equal(parseActivationDateInTz('09/04/2026', timezone), null);
 assert.equal(parseActivationDateInTz('2026-09-04', 'Not/A_Timezone'), null);
+
+assert.equal(parsePacingWindowEndHour(undefined), 22);
+assert.equal(parsePacingWindowEndHour(''), 22);
+assert.equal(parsePacingWindowEndHour('25'), 22);
+assert.equal(parsePacingWindowEndHour('7'), 22);
+assert.equal(parsePacingWindowEndHour('1'), 1);
+assert.equal(parsePacingWindowEndHour('24'), 24);
+
+const overnightKnobs = { ...PACING_DEFAULTS, windowEndHour: 1 };
+assert.equal(
+  janelaDeEnvioAberta(new Date('2026-10-02T18:30:00.000Z'), overnightKnobs),
+  true,
+); // 23:30 Karachi
+assert.equal(
+  janelaDeEnvioAberta(new Date('2026-10-02T19:30:00.000Z'), overnightKnobs),
+  true,
+); // 00:30 Karachi
+assert.equal(
+  janelaDeEnvioAberta(new Date('2026-10-02T20:00:00.000Z'), overnightKnobs),
+  false,
+); // 01:00 Karachi, exclusive close
 
 const conservative = decideSharedPacing(
   now,
