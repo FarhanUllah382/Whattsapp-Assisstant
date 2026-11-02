@@ -104,3 +104,62 @@ test('a turn whose every reply is blocked still reaches the customer, every time
   ).get(customer.id) as { n: number };
   assert.equal(outbound.n, 3);
 });
+
+test('exact server status texts are never vetoed as handoff claims', async () => {
+  const { checkHandoffClaimReply } = await import('../src/handoff-claims');
+  const {
+    REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
+    REFUND_REJECTED_MESSAGE,
+  } = await import('../src/sensitive-action-wording');
+  for (const body of [
+    PAYMENT_CLAIM_PENDING_MESSAGE,
+    REFUND_REQUEST_PENDING_MESSAGE,
+    REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
+    REFUND_REJECTED_MESSAGE,
+  ]) {
+    assert.deepEqual(checkHandoffClaimReply(body), { ok: true }, body);
+  }
+  // A free-form handoff claim is still blocked.
+  assert.equal(checkHandoffClaimReply('Your request has been recorded and sent to Ahmed.').ok, false);
+});
+
+test('after a payment claim, a blocked reply still delivers the exact payment status (live 2026-11-02)', async () => {
+  const originalFetch = globalThis.fetch;
+  const originalWindow = { start: PACING_DEFAULTS.windowStartHour, end: PACING_DEFAULTS.windowEndHour };
+  PACING_DEFAULTS.windowStartHour = 0;
+  PACING_DEFAULTS.windowEndHour = 24;
+  let loopCalls = 0;
+  globalThis.fetch = (async (_url: unknown, init?: { body?: string }) => {
+    const request = JSON.parse(String(init?.body ?? '{}'));
+    let parts: unknown[];
+    if (Array.isArray(request.tools) && request.tools.length > 0) {
+      loopCalls += 1;
+      parts = loopCalls === 1
+        ? [{ functionCall: { name: 'claim_payment', args: { amount: 800, method: 'COD' } } }]
+        : [{ functionCall: { name: 'send_message', args: { body: 'Maine aapka payment Ahmed ko bhej diya hai, woh check karenge.' } } }];
+    } else {
+      parts = [{ text: '{}' }];
+    }
+    return new Response(JSON.stringify({
+      candidates: [{ content: { parts } }],
+      usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5, totalTokenCount: 15 },
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+
+  const phone = `9231${String(Date.now()).slice(-8)}`;
+  const sends: string[] = [];
+  try {
+    await runTurn(
+      phone,
+      'I had paid 800 on cash on delivery',
+      async (body) => { sends.push(body); return { providerMessageId: 'p-claim' }; },
+      `claim-fallback-${phone}`,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    PACING_DEFAULTS.windowStartHour = originalWindow.start;
+    PACING_DEFAULTS.windowEndHour = originalWindow.end;
+  }
+  assert.equal(sends.length, 1, `expected exactly one reply, got ${sends.length}`);
+  assert.ok(sends[0].includes(PAYMENT_CLAIM_PENDING_MESSAGE), sends[0]);
+});

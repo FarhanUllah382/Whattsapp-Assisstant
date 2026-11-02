@@ -1,4 +1,21 @@
 import { detectHumanPromise } from './guardrails/human-promise';
+import {
+  PAYMENT_CLAIM_PENDING_MESSAGE,
+  REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
+  REFUND_REJECTED_MESSAGE,
+  REFUND_REQUEST_PENDING_MESSAGE,
+} from './sensitive-action-wording';
+
+// Exact server-authored status texts. The sensitive-action backstop REQUIRES
+// these verbatim after a claim or refund action, so this backstop must not
+// veto them ("recorded ... owner verification" reads like a handoff claim).
+// Live test 2026-11-02: both backstops disagreed and the customer got nothing.
+const SERVER_STATUS_MESSAGES: ReadonlySet<string> = new Set([
+  PAYMENT_CLAIM_PENDING_MESSAGE,
+  REFUND_REQUEST_PENDING_MESSAGE,
+  REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
+  REFUND_REJECTED_MESSAGE,
+]);
 import type { ToolContext, ToolDef } from './types';
 
 export type HandoffAlertStatus = 'none' | 'pending' | 'sent';
@@ -63,6 +80,7 @@ export function checkHandoffClaimReply(
   authorizedBody?: string,
 ): { ok: true } | { ok: false; error: string } {
   if (authorizedBody !== undefined && body === authorizedBody) return { ok: true };
+  if (SERVER_STATUS_MESSAGES.has(body.trim())) return { ok: true };
   if (MEDIA_TRANSFER_CLAIM.test(body)) {
     return {
       ok: false,
