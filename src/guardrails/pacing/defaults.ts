@@ -68,10 +68,21 @@ export function parsePacingWindowEndHour(value: string | undefined): number {
   return Number.isInteger(hour) && (isOvernightEnd || isSameDayEnd) ? hour : 22;
 }
 
+/**
+ * Opening hour of the sending window (inclusive, shop timezone). Default 7.
+ * Testing: PACING_WINDOW_START_HOUR=0 with PACING_WINDOW_END_HOUR=24 keeps the
+ * window open all day. Missing or invalid values safely use 7.
+ */
+export function parsePacingWindowStartHour(value: string | undefined): number {
+  if (value === undefined || !/^\d+$/.test(value.trim())) return 7;
+  const hour = Number(value);
+  return Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : 7;
+}
+
 export const PACING_DEFAULTS: PacingKnobs = {
   throttleMs: 1200, // 1 msg / 1,2s
   jitterMaxMs: 800,
-  windowStartHour: 7, // janela 7h-22h
+  windowStartHour: parsePacingWindowStartHour(process.env.PACING_WINDOW_START_HOUR), // janela 7h-22h by default
   windowEndHour: parsePacingWindowEndHour(process.env.PACING_WINDOW_END_HOUR),
   allowSunday: true,
   // Ahmed's shop is in Pakistan — confirmed 2026-09-05. Still overridable

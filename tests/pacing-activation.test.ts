@@ -81,3 +81,15 @@ assert.match(stageCap.reason, /100\/dia/);
 process.stdout.write(
   '  ✔ Karachi activation parsing, fail-closed fallback, 100/day stage, and shared throttling\n',
 );
+
+// Sending window start hour is configurable; 0 with end 24 means always open (testing).
+{
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { parsePacingWindowStartHour } = require('../src/guardrails/pacing/defaults') as typeof import('../src/guardrails/pacing/defaults');
+  assert.equal(parsePacingWindowStartHour(undefined), 7);
+  assert.equal(parsePacingWindowStartHour('0'), 0);
+  assert.equal(parsePacingWindowStartHour('9'), 9);
+  for (const bad of ['24', '-1', 'abc', '7.5', '']) assert.equal(parsePacingWindowStartHour(bad), 7, bad);
+  assert.equal(parsePacingWindowEndHour('24'), 24);
+  console.log('PASS: pacing window start hour parsing');
+}
