@@ -79,10 +79,14 @@ tmp/
 temp/
 .claude/
 .gemini/
+node_modules/
+dist/
+*.db
+*.db-*
+.env
+.portfolio-runtime/
 
-# ==========================================
-# Local review evidence & personal outputs (may contain customer data)
-# ==========================================
-output/
-outputs/
-.codex-*/
+# Observability secrets (ops_key, grafana_admin_password) — never commit
+observability/secrets/
+# node_modules may be a symlink in worktrees
+/node_modules

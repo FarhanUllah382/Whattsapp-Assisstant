@@ -1,5 +1,7 @@
 import { db } from './db';
 import { createLogger } from './obs/logger';
+import { recordInboundMessageMetric, recordJobEventMetric } from './obs/metrics';
+import { openJobTrace } from './obs/trace';
 import { sanitizeMemoryText } from './privacy';
 
 const log = createLogger();
@@ -64,6 +66,17 @@ export function readInboundJobConfig(env: NodeJS.ProcessEnv = process.env): Inbo
   };
 }
 
+export const WHATSAPP_DOWN_DEFER_SECONDS_DEFAULT = 60;
+
+/**
+ * How long a job waits before re-checking when WhatsApp is down
+ * (WHATSAPP_DOWN_DEFER_SECONDS, 5–3600, default 60). Invalid values use the
+ * default — never zero (a hot loop) and never unbounded.
+ */
+export function readWhatsappDownDeferSeconds(env: NodeJS.ProcessEnv = process.env): number {
+  return boundedInteger(env.WHATSAPP_DOWN_DEFER_SECONDS, WHATSAPP_DOWN_DEFER_SECONDS_DEFAULT, 5, 3_600);
+}
+
 export interface InboundJob {
   id: number;
   eventKey: string;
@@ -106,7 +119,7 @@ export function enqueueInboundJob(input: {
   const now = input.now ?? new Date();
   const nowSql = now.toISOString().slice(0, 19).replace('T', ' ');
 
-  return db.transaction((): EnqueueInboundJobResult => {
+  const enqueued = db.transaction((): EnqueueInboundJobResult => {
     const existing = db.prepare(
       'select id, status from inbound_jobs where event_key = ?',
     ).get(input.eventKey) as { id: number; status: string } | undefined;
@@ -164,6 +177,11 @@ export function enqueueInboundJob(input: {
       limit: config.maxPendingJobs,
     };
   }).immediate();
+  if (enqueued.queued && enqueued.status !== 'already_queued') {
+    recordInboundMessageMetric(input.owner ? 'owner' : 'customer');
+    recordJobEventMetric('queued');
+  }
+  return enqueued;
 }
 
 export function recoverInboundJobs(now: Date = new Date()): number {
@@ -304,6 +322,35 @@ export function failOrRetryInboundJob(
   return 'failed';
 }
 
+export const MAX_MID_TURN_CHANNEL_DEFERRALS = 10;
+
+/**
+ * Bounds how often one job may be deferred because a send hit
+ * channel_unavailable mid-turn (verifier finding, 2026-11-02). Such a
+ * deferral keeps the attempt, so without a bound a misclassified error would
+ * rerun the whole turn every minute forever. A job is deferred only while the
+ * session is really not WORKING and at most `max` times; otherwise the caller
+ * fails the attempt normally (retry with backoff, then failed).
+ * In-memory per process: a restart resets the count, which is still bounded.
+ */
+export class MidTurnChannelDeferrals {
+  private readonly counts = new Map<number, number>();
+
+  constructor(private readonly max: number = MAX_MID_TURN_CHANNEL_DEFERRALS) {}
+
+  decide(jobId: number, session: { working: boolean }): 'defer' | 'fail' {
+    if (session.working) return 'fail';
+    const used = this.counts.get(jobId) ?? 0;
+    if (used >= this.max) return 'fail';
+    this.counts.set(jobId, used + 1);
+    return 'defer';
+  }
+
+  clear(jobId: number): void {
+    this.counts.delete(jobId);
+  }
+}
+
 export class InboundJobDeferredError extends Error {
   constructor(
     message: string,
@@ -314,6 +361,18 @@ export class InboundJobDeferredError extends Error {
   }
 }
 
+/**
+ * Checked before a claimed job may use AI. When the channel is not positively
+ * working the job is put back (outcome `deferred`) without consuming an
+ * attempt, so no model call, AI budget or failed send is spent on a message
+ * that cannot be answered. A throwing check counts as not working.
+ */
+export interface InboundJobChannelGate {
+  check(): Promise<{ working: boolean; status: string; error?: string }>;
+  deferMs: number;
+  onDeferred?(job: InboundJob, status: { working: boolean; status: string }): void;
+}
+
 export class InboundJobWorkerPool {
   private active = 0;
   private timer: NodeJS.Timeout | undefined;
@@ -321,6 +380,7 @@ export class InboundJobWorkerPool {
   constructor(
     private readonly config: InboundJobConfig,
     private readonly processJob: (job: InboundJob) => Promise<void>,
+    private readonly channelGate?: InboundJobChannelGate,
   ) {}
 
   start(): void {
@@ -348,21 +408,64 @@ export class InboundJobWorkerPool {
     }
   }
 
-  private async run(job: InboundJob): Promise<void> {
+  /** Returns true when the job was deferred because the channel is down. */
+  private async deferIfChannelDown(job: InboundJob): Promise<boolean> {
+    const gate = this.channelGate;
+    if (!gate) return false;
+    let status: { working: boolean; status: string; error?: string };
     try {
-      await this.processJob(job);
+      status = await gate.check();
+    } catch (error) {
+      status = { working: false, status: 'UNKNOWN', error: safeError(error) };
+    }
+    if (status.working) return false;
+    deferInboundJob(
+      job,
+      `deferred: whatsapp_session_not_working (${status.status})`,
+      gate.deferMs,
+      true,
+    );
+    try {
+      gate.onDeferred?.(job, status);
+    } catch {
+      // Bookkeeping only; the job is already safely deferred.
+    }
+    log.warn('durable inbound job deferred', {
+      jobId: job.id,
+      turnKind: job.turnKind,
+      outcome: 'deferred',
+      reason: 'whatsapp_session_not_working',
+      sessionStatus: status.status,
+      statusCheckError: status.error,
+      delayMs: gate.deferMs,
+    });
+    return true;
+  }
+
+  private async run(job: InboundJob): Promise<void> {
+    const trace = openJobTrace(job);
+    try {
+      if (await this.deferIfChannelDown(job)) {
+        trace.finish('deferred');
+        return;
+      }
+      await trace.run(() => this.processJob(job));
       completeInboundJob(job);
+      trace.finish('completed');
       log.info('durable inbound job completed', { jobId: job.id, attempt: job.attemptCount });
     } catch (error) {
       if (error instanceof InboundJobDeferredError) {
         deferInboundJob(job, error, error.delayMs, true);
+        trace.finish('deferred');
         log.warn('durable inbound job deferred', {
           jobId: job.id,
+          outcome: 'deferred',
           delayMs: error.delayMs,
           reason: sanitizeMemoryText(error.message),
         });
       } else {
         const status = failOrRetryInboundJob(job, error, this.config);
+        trace.finish(status === 'failed' ? 'failed' : 'retry', error);
         log.error('durable inbound job attempt failed', {
           jobId: job.id,
           attempt: job.attemptCount,

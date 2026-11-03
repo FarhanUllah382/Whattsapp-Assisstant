@@ -39,15 +39,50 @@ export interface ChannelHealth {
   status: string;
 }
 
+/**
+ * Provider session state as reported by the gateway (WAHA: WORKING, FAILED,
+ * STARTING, SCAN_QR_CODE, STOPPED). `UNKNOWN` means the status check itself
+ * failed or timed out — callers must treat that as "not working" (fail safe).
+ */
+export interface ChannelSessionStatus {
+  status: string;
+  /** True only for a positively confirmed working session. */
+  working: boolean;
+  checkedAt: Date;
+  /** Sanitized reason when the status check itself failed. */
+  error?: string;
+}
+
+/**
+ * - `channel_unavailable`: the gateway refused because the WhatsApp session is
+ *   not working (WAHA 422 "Session status is not as expected") or the gateway
+ *   could not be reached at all (connection refused). Nothing was handed to
+ *   WhatsApp, so the send may be retried safely once the session is back.
+ * - `provider_rejected`: any other definitive rejection.
+ * - `delivery_unknown`: timeout / network error after the request may have
+ *   left — never auto-resent.
+ */
+export type ChannelSendErrorCode = 'channel_unavailable' | 'provider_rejected' | 'delivery_unknown';
+
 export class ChannelSendError extends Error {
+  readonly code: ChannelSendErrorCode;
+
   constructor(
     message: string,
     /** False only when the provider definitively rejected the request before acceptance. */
     readonly deliveryUncertain: boolean,
+    code?: ChannelSendErrorCode,
   ) {
     super(message);
     this.name = 'ChannelSendError';
+    this.code = deliveryUncertain
+      ? 'delivery_unknown'
+      : code ?? 'provider_rejected';
   }
+}
+
+export function isChannelUnavailableError(error: unknown): boolean {
+  return error instanceof ChannelSendError && error.code === 'channel_unavailable';
 }
 
 export interface ChannelAdapter {
@@ -60,6 +95,13 @@ export interface ChannelAdapter {
   sendImage(phone: string, image: ChannelImageMessage): Promise<ChannelSendReceipt>;
   /** Minimal provider/session readiness without exposing account details. */
   healthCheck(): Promise<ChannelHealth>;
+  /**
+   * Cached (≤ 10 s), timeout-guarded session status used to pause AI work
+   * while WhatsApp is down. Never throws: a failed check reports UNKNOWN.
+   * Optional so lightweight test doubles need not implement it; callers fall
+   * back to healthCheck().
+   */
+  getSessionStatus?(): Promise<ChannelSessionStatus>;
   /**
    * Turns one raw inbound webhook payload into {phone, text}, or null if
    * this event isn't a customer text message worth reacting to (a status

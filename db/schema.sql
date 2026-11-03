@@ -650,3 +650,44 @@ create table if not exists owner_alert_events (
   alert_id integer not null references owner_alerts(id),
   created_at text not null default (datetime('now'))
 );
+
+-- Observability (docs/OBSERVABILITY.md): one row per processed message and its
+-- ordered steps. PRIVACY: these tables never hold message bodies, phone
+-- numbers, names, addresses or payment destinations — only ids, tool names,
+-- stable guard check ids, error codes, lengths and hashes. Rows are
+-- diagnostic, not business history: they are pruned after
+-- TRACE_RETENTION_DAYS (default 14). No foreign keys on purpose, so a trace
+-- write can never fail because of (or block) a business row.
+create table if not exists turn_traces (
+  id integer primary key autoincrement,
+  job_id integer,
+  customer_id integer,
+  turn_kind text not null check (turn_kind in ('customer', 'owner', 'unknown')),
+  started_at text not null,
+  finished_at text,
+  outcome text check (outcome is null or outcome in ('replied', 'fallback', 'no_reply', 'error', 'deferred')),
+  model_calls integer not null default 0,
+  prompt_tokens integer not null default 0,
+  output_tokens integer not null default 0,
+  total_ms integer
+);
+
+create index if not exists turn_traces_started_at on turn_traces(started_at);
+create index if not exists turn_traces_outcome on turn_traces(outcome, started_at);
+
+create table if not exists turn_trace_events (
+  id integer primary key autoincrement,
+  trace_id integer not null,
+  seq integer not null,
+  at text not null,
+  kind text not null check (kind in ('job', 'model_call', 'tool_call', 'guard_block', 'send', 'fallback', 'error')),
+  name text,
+  duration_ms integer,
+  prompt_tokens integer,
+  output_tokens integer,
+  ok integer check (ok is null or ok in (0, 1)),
+  code text,
+  detail_json text
+);
+
+create index if not exists turn_trace_events_trace on turn_trace_events(trace_id, seq);

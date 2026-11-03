@@ -65,7 +65,13 @@ test('ship requires an exact prepare and a later exact confirm; one owner event 
     assert.equal(prepared?.mutation, 'none');
     assert.match(prepared!.response, new RegExp(`CONFIRM SHIP ORDER ${ref}`));
     assert.match(prepared!.response, /nothing has changed yet/i);
-    assert.equal(prepared!.response.includes(String(orderId) + ' '), false);
+    // The internal numeric id must not leak. Judge it with the public ref
+    // removed and as a standalone number: a random hex ref ending in the id's
+    // digits ("ORD-…A1 · status") used to make this a ~1-in-16 flake.
+    assert.doesNotMatch(
+      prepared!.response.split(ref).join('<REF>'),
+      new RegExp(`(?<![\\d.,])${orderId}(?![\\d,]|\\.\\d|\\s+items?\\b)`),
+    );
     assert.deepEqual(snapshot(orderId), before);
 
     const vague = await cmd(owner, 'yes confirm', 'vague');

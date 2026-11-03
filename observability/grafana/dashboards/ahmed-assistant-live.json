@@ -1,0 +1,1509 @@
+{
+  "uid": "ahmed-assistant-live",
+  "title": "Ahmed Assistant — Live",
+  "description": "Health, traffic, speed, cost, failures and per-message traces. See docs/OBSERVABILITY.md.",
+  "tags": [
+    "ahmed-assistant"
+  ],
+  "timezone": "browser",
+  "editable": false,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "textbox",
+        "name": "trace_id",
+        "label": "Trace id",
+        "description": "Click a Trace id in the table, or type one.",
+        "query": "1",
+        "current": {
+          "text": "1",
+          "value": "1"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Health",
+      "id": 2,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "WhatsApp session",
+      "description": "1 = WAHA session WORKING, 0 = not working. Refreshed on every scrape (at most every 10 s).",
+      "id": 3,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 0,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "wa_whatsapp_session_up",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "noValue": "unknown"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "App scraped",
+      "description": "1 = Prometheus can read /metrics (app running, ops_key correct).",
+      "id": 4,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 3,
+        "x": 4,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "up{job=\"ahmed-assistant\"}",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "NO",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "YES",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Queue",
+      "description": "Durable inbound jobs right now: pending (waiting), processing (being answered), failed (gave up).",
+      "id": 5,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 7,
+        "x": 7,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "wa_queue_jobs{status=~\"pending|processing|failed\"}",
+          "legendFormat": "{{status}}",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 10
+              },
+              {
+                "color": "red",
+                "value": 50
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "AI budget used today",
+      "description": "Highest of (calls used / daily call limit) and (tokens used / daily token limit). New AI work stops at 100%.",
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 14,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "wa_ai_budget_used_ratio * 100",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showThresholdMarkers": true
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Owner alerts pending",
+      "description": "Alerts to Ahmed that are recorded but not yet delivered.",
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 19,
+        "y": 1
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "wa_owner_alerts_pending",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Traffic",
+      "id": 8,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages per hour",
+      "description": "Inbound messages accepted into the queue, per hour, by customer / owner.",
+      "id": 9,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum by (turn_kind) (increase(wa_inbound_messages_total[1h]))",
+          "legendFormat": "{{turn_kind}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Turns by outcome (per 15 min)",
+      "description": "replied = normal reply; fallback = guards blocked every reply, fixed text sent; no_reply = customer got nothing; error = the turn failed; deferred = postponed (AI budget or WhatsApp down).",
+      "id": 10,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 8,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum by (outcome) (increase(wa_turns_total[15m]))",
+          "legendFormat": "{{outcome}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Fallback rate (30 min)",
+      "description": "Share of finished (not deferred) turns in the last 30 minutes that ended in the fallback reply. Alert above 20%.",
+      "id": 11,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 7
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum(increase(wa_turns_total{outcome=\"fallback\"}[30m])) / clamp_min(sum(increase(wa_turns_total{outcome!=\"deferred\"}[30m])), 1)",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.1
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Speed",
+      "id": 12,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn time p50 / p95",
+      "description": "Time from job start to finish for one message (model calls + tools + sends + pacing waits).",
+      "id": 13,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(wa_turn_duration_seconds_bucket[15m])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(wa_turn_duration_seconds_bucket[15m])))",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Model call time p95",
+      "description": "95th percentile latency of one Gemini call.",
+      "id": 14,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(wa_model_call_duration_seconds_bucket[15m])))",
+          "legendFormat": "p95",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(wa_model_call_duration_seconds_bucket[15m])))",
+          "legendFormat": "p50",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Send time p50 / p95",
+      "description": "WAHA sendText latency (excludes pacing waits).",
+      "id": 15,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(wa_send_duration_seconds_bucket[15m])))",
+          "legendFormat": "p50",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(wa_send_duration_seconds_bucket[15m])))",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Cost",
+      "id": 16,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens per hour",
+      "description": "Gemini tokens per hour: prompt (what we send) and output (what the model writes).",
+      "id": 17,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 7,
+        "x": 0,
+        "y": 25
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum by (type) (increase(wa_model_tokens_total[1h]))",
+          "legendFormat": "{{type}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Model calls per turn",
+      "description": "Average and p95 Gemini calls per finished turn (target after Fix 5: at most 3).",
+      "id": 18,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 7,
+        "y": 25
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum(rate(wa_model_calls_per_turn_sum[1h])) / sum(rate(wa_model_calls_per_turn_count[1h]))",
+          "legendFormat": "average",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(wa_model_calls_per_turn_bucket[1h])))",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Prompt tokens per turn",
+      "description": "Average and p95 prompt tokens per finished turn (target after Fix 5: at most 12k).",
+      "id": 19,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 13,
+        "y": 25
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum(rate(wa_prompt_tokens_per_turn_sum[1h])) / sum(rate(wa_prompt_tokens_per_turn_count[1h]))",
+          "legendFormat": "average",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(wa_prompt_tokens_per_turn_bucket[1h])))",
+          "legendFormat": "p95",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Estimated cost today",
+      "description": "Only shown when GEMINI_PRICE_INPUT_PER_MTOK and GEMINI_PRICE_OUTPUT_PER_MTOK are set in .env. Today = since local midnight in the browser time zone.",
+      "id": 20,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 5,
+        "x": 19,
+        "y": 25
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum(increase(wa_estimated_cost_usd_total[$__range]))",
+          "legendFormat": "",
+          "range": false,
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 4,
+          "noValue": "prices not set",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "orientation": "auto"
+      },
+      "timeFrom": "now/d",
+      "hideTimeOverride": false
+    },
+    {
+      "type": "row",
+      "title": "Failures",
+      "id": 21,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 33
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Guard blocks by check (per hour)",
+      "description": "send_message vetoes by stable check id (inventory_disclosure, order_summary, handoff_claim, spinning, pacing, ...). A spike in one check usually means the prompt and that guard disagree.",
+      "id": 22,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 34
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum by (check) (increase(wa_guard_blocks_total[1h]))",
+          "legendFormat": "{{check}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Failed or uncertain sends (per hour)",
+      "description": "Sends that did not end 'sent': failed = provider refused; uncertain = outcome unknown (never resent automatically).",
+      "id": 23,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 34
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum by (recipient_kind, status) (increase(wa_sends_total{status!=\"sent\"}[1h]))",
+          "legendFormat": "{{recipient_kind}} {{status}}",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Model errors (per hour)",
+      "description": "Gemini calls that did not succeed, by status (timeout, http_429, budget_exceeded, ...). Also trace write failures.",
+      "id": 24,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "ahmed-prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 34
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "sum by (status) (increase(wa_model_calls_total{status!=\"ok\"}[1h]))",
+          "legendFormat": "{{status}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "ahmed-prometheus"
+          },
+          "expr": "increase(wa_trace_write_failures_total[1h])",
+          "legendFormat": "trace write failures",
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "lineWidth": 2,
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Message traces",
+      "id": 25,
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 42
+      },
+      "panels": []
+    },
+    {
+      "type": "table",
+      "title": "Last 50 message traces",
+      "id": 26,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "ahmed-traces"
+      },
+      "description": "One row per processed message. Click a Trace id to load its steps in the panel on the right. No message text or phone numbers are stored.",
+      "gridPos": {
+        "h": 12,
+        "w": 13,
+        "x": 0,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "ahmed-traces"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://host.docker.internal:3000/operations/traces?limit=50",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "id",
+              "text": "Trace",
+              "type": "number"
+            },
+            {
+              "selector": "started_at",
+              "text": "Started",
+              "type": "timestamp"
+            },
+            {
+              "selector": "turn_kind",
+              "text": "Kind",
+              "type": "string"
+            },
+            {
+              "selector": "outcome",
+              "text": "Outcome",
+              "type": "string"
+            },
+            {
+              "selector": "model_calls",
+              "text": "Model calls",
+              "type": "number"
+            },
+            {
+              "selector": "prompt_tokens",
+              "text": "Prompt tokens",
+              "type": "number"
+            },
+            {
+              "selector": "output_tokens",
+              "text": "Output tokens",
+              "type": "number"
+            },
+            {
+              "selector": "total_ms",
+              "text": "Total ms",
+              "type": "number"
+            },
+            {
+              "selector": "job_id",
+              "text": "Job",
+              "type": "number"
+            },
+            {
+              "selector": "customer_id",
+              "text": "Customer #",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "sortBy": [
+          {
+            "displayName": "Trace",
+            "desc": true
+          }
+        ]
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Trace"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Show steps of trace ${__value.raw}",
+                    "url": "/d/ahmed-assistant-live/ahmed-assistant-live?var-trace_id=${__value.raw}&${__url_time_range}"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Outcome"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "replied": {
+                        "color": "green",
+                        "index": 0
+                      },
+                      "fallback": {
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "no_reply": {
+                        "color": "red",
+                        "index": 2
+                      },
+                      "error": {
+                        "color": "red",
+                        "index": 3
+                      },
+                      "deferred": {
+                        "color": "blue",
+                        "index": 4
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "table",
+      "title": "Steps of trace ${trace_id}",
+      "id": 27,
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "ahmed-traces"
+      },
+      "description": "Events of the selected trace in order: job lifecycle, model_call, tool_call, guard_block (code = check id), send (code = ledger status), fallback, error.",
+      "gridPos": {
+        "h": 12,
+        "w": 11,
+        "x": 13,
+        "y": 43
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "ahmed-traces"
+          },
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://host.docker.internal:3000/operations/traces/${trace_id}",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "events",
+          "columns": [
+            {
+              "selector": "seq",
+              "text": "#",
+              "type": "number"
+            },
+            {
+              "selector": "at",
+              "text": "At",
+              "type": "timestamp"
+            },
+            {
+              "selector": "kind",
+              "text": "Kind",
+              "type": "string"
+            },
+            {
+              "selector": "name",
+              "text": "Name",
+              "type": "string"
+            },
+            {
+              "selector": "ok",
+              "text": "OK",
+              "type": "number"
+            },
+            {
+              "selector": "code",
+              "text": "Code",
+              "type": "string"
+            },
+            {
+              "selector": "duration_ms",
+              "text": "ms",
+              "type": "number"
+            },
+            {
+              "selector": "prompt_tokens",
+              "text": "Prompt tokens",
+              "type": "number"
+            },
+            {
+              "selector": "output_tokens",
+              "text": "Output tokens",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Kind"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "guard_block": {
+                        "color": "orange",
+                        "index": 0
+                      },
+                      "error": {
+                        "color": "red",
+                        "index": 1
+                      },
+                      "fallback": {
+                        "color": "orange",
+                        "index": 2
+                      },
+                      "send": {
+                        "color": "green",
+                        "index": 3
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

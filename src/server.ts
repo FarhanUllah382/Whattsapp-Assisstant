@@ -26,6 +26,11 @@ import {
   sendConsentConfirmation,
   sendTemporaryBusyReply,
 } from './agent';
+import { makePacedOwnerAlertSend } from './agent/owner-send';
+import { getOrCreateCustomer } from './agent/shared';
+import { deliverOwnerAlert } from './alerts';
+import { ChannelSessionMonitor, type OutageSummary } from './channel/session-monitor';
+import { isChannelUnavailableError, type ChannelSessionStatus } from './channel/types';
 import { wahaAdapter } from './channel/waha';
 import { createVerifiedBackup, readBackupConfig } from './database-backup';
 import {
@@ -37,7 +42,9 @@ import {
   recordConsentCommand,
   type ConsentEvent,
 } from './consent';
+import { installObservability } from './obs/http';
 import { createLogger } from './obs/logger';
+import { setWhatsappDownSeconds, setWhatsappSessionUp } from './obs/metrics';
 import {
   livenessPayload,
   operationsAccessAllowed,
@@ -55,7 +62,9 @@ import {
   enqueueInboundJob,
   InboundJobDeferredError,
   InboundJobWorkerPool,
+  MidTurnChannelDeferrals,
   readInboundJobConfig,
+  readWhatsappDownDeferSeconds,
   type InboundJob,
 } from './inbound-jobs';
 import { verifyWahaWebhook } from './webhook-auth';
@@ -81,6 +90,54 @@ const backupConfig = readBackupConfig();
 const sendOwnerAlert = configuredOwnerPhone
   ? (body: string) => channel.sendText(configuredOwnerPhone, body)
   : undefined;
+const whatsappDownDeferMs = readWhatsappDownDeferSeconds() * 1_000;
+
+// FIX6: pause AI work while the WhatsApp session is not WORKING. The adapter
+// caches the status for 10 s; a failing status call counts as down.
+async function readChannelSessionStatus(): Promise<ChannelSessionStatus> {
+  if (channel.getSessionStatus) return channel.getSessionStatus();
+  const health = await channel.healthCheck();
+  return { status: health.status, working: health.ok, checkedAt: new Date() };
+}
+
+async function raiseWhatsappRecoveryAlert(summary: OutageSummary): Promise<void> {
+  if (!configuredOwnerPhone || !sendOwnerAlert) return;
+  const send = makePacedOwnerAlertSend(sendOwnerAlert);
+  if (!send) return;
+  const owner = getOrCreateCustomer(configuredOwnerPhone.replace(/\D/g, ''));
+  const result = await deliverOwnerAlert({
+    kind: 'whatsapp_outage',
+    eventKey: `whatsapp-outage:${summary.downSince.toISOString()}`,
+    customerId: owner.id,
+    reason: summary.message,
+    send,
+  });
+  log.info('whatsapp recovery owner alert checked', {
+    ok: result.ok,
+    status: result.status,
+    reason: result.reason,
+    heldMessages: summary.heldMessages,
+  });
+}
+
+const sessionMonitor = new ChannelSessionMonitor({
+  source: readChannelSessionStatus,
+  // The monitor calls this once per outage, after its own one-time
+  // error-level log line; the WhatsAppDownLong alert reads the gauge below.
+  onLongOutage: (downSince) => {
+    log.error('whatsapp long outage: owner action needed (WhatsAppDownLong alert fires after 300 s)', {
+      downSince: downSince.toISOString(),
+    });
+  },
+  onDownSeconds: (seconds) => setWhatsappDownSeconds(seconds),
+  onRecovered: (summary) => {
+    void raiseWhatsappRecoveryAlert(summary).catch((error) => {
+      log.error('whatsapp recovery owner alert failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+  },
+});
 
 // Consent commands and their acknowledgements are serialized so a later
 // START cannot overtake an in-flight STOP acknowledgement (or vice versa).
@@ -151,15 +208,26 @@ async function trySendTemporaryBusyReply(input: {
   }
 }
 
+const midTurnChannelDeferrals = new MidTurnChannelDeferrals();
+
 async function processDurableInboundJob(job: InboundJob): Promise<void> {
   let customerReplyDelivered = false;
+  let channelUnavailableDuringTurn = false;
+  const watchChannel = async <T>(operation: () => Promise<T>): Promise<T> => {
+    try {
+      return await operation();
+    } catch (error) {
+      if (isChannelUnavailableError(error)) channelUnavailableDuringTurn = true;
+      throw error;
+    }
+  };
   const sendToJobPhone = async (body: string) => {
-    const receipt = await channel.sendText(job.phone, body);
+    const receipt = await watchChannel(() => channel.sendText(job.phone, body));
     customerReplyDelivered = true;
     return receipt;
   };
   const sendImageToJobPhone = async (image: Parameters<typeof channel.sendImage>[1]) => {
-    const receipt = await channel.sendImage(job.phone, image);
+    const receipt = await watchChannel(() => channel.sendImage(job.phone, image));
     customerReplyDelivered = true;
     return receipt;
   };
@@ -174,7 +242,7 @@ async function processDurableInboundJob(job: InboundJob): Promise<void> {
       await runOwnerTurn(
         job.phone,
         job.body,
-        (body) => channel.sendText(job.phone, body),
+        sendToJobPhone,
         undefined,
         job.eventKey,
       );
@@ -188,8 +256,29 @@ async function processDurableInboundJob(job: InboundJob): Promise<void> {
         sendImageToJobPhone,
       );
     }
+    if (channelUnavailableDuringTurn && !customerReplyDelivered) {
+      // The session dropped mid-turn: the reply never reached WhatsApp and is
+      // recorded as failed/channel_unavailable (retryable). Hold the job
+      // instead of completing it silently; it reruns once WhatsApp is back.
+      // Bounded (verifier 2026-11-02): if the session is WORKING right now, or
+      // this job was already deferred MAX_MID_TURN_CHANNEL_DEFERRALS times,
+      // the attempt is consumed instead, so it can never loop forever.
+      const session = await sessionMonitor.check();
+      if (midTurnChannelDeferrals.decide(job.id, session) === 'defer') {
+        sessionMonitor.recordHeld(job.id);
+        throw new InboundJobDeferredError(
+          'deferred: whatsapp_session_not_working during send',
+          whatsappDownDeferMs,
+        );
+      }
+      throw new Error(
+        `channel_unavailable during send while the session reports ${session.status}; consuming an attempt`,
+      );
+    }
+    midTurnChannelDeferrals.clear(job.id);
     log.info('durable inbound job processed', { jobId: job.id, turnKind: job.turnKind });
   } catch (error) {
+    if (error instanceof InboundJobDeferredError) throw error;
     if (error instanceof AiBudgetExceededError) {
       if (job.turnKind === 'customer' && !customerReplyDelivered) {
         await trySendTemporaryBusyReply({
@@ -216,7 +305,11 @@ async function processDurableInboundJob(job: InboundJob): Promise<void> {
   }
 }
 
-const inboundJobWorker = new InboundJobWorkerPool(inboundJobConfig, processDurableInboundJob);
+const inboundJobWorker = new InboundJobWorkerPool(inboundJobConfig, processDurableInboundJob, {
+  check: () => sessionMonitor.check(),
+  deferMs: whatsappDownDeferMs,
+  onDeferred: (job) => sessionMonitor.recordHeld(job.id),
+});
 
 app.get('/health', (_req, res) => {
   res.status(200).json(livenessPayload());
@@ -224,7 +317,20 @@ app.get('/health', (_req, res) => {
 
 app.get('/ready', async (_req, res) => {
   const readiness = await readinessPayload(channel, inboundJobWorker.snapshot());
-  res.status(readiness.ready ? 200 : 503).json(readiness.payload);
+  const session = sessionMonitor.snapshot();
+  const whatsappDown = session.downSince !== undefined;
+  setWhatsappSessionUp(readiness.payload.whatsapp === 'WORKING' && !whatsappDown);
+  const ready = readiness.ready && !whatsappDown;
+  const payload: Record<string, unknown> = { ...readiness.payload, status: ready ? 'ready' : 'not_ready' };
+  if (whatsappDown) {
+    payload.reason = session.reason;
+    payload.whatsapp_down_since = session.downSince;
+    payload.whatsapp_down_seconds = session.downForSeconds;
+    payload.held_messages = session.heldMessages;
+  } else if (!ready) {
+    payload.reason = payload.database !== 'ok' ? 'database_unavailable' : 'whatsapp_session_not_working';
+  }
+  res.status(ready ? 200 : 503).json(payload);
 });
 
 app.get('/operations/metrics', (req, res) => {
@@ -234,6 +340,10 @@ app.get('/operations/metrics', (req, res) => {
   }
   res.status(200).json(readOperationalMetrics(inboundJobWorker.snapshot()));
 });
+
+// Observability: GET /metrics (Prometheus) and GET /operations/traces[/:id],
+// bearer OPERATIONS_API_KEY, plus daily trace retention. docs/OBSERVABILITY.md.
+installObservability(app, { sessionProbe: () => channel.healthCheck() });
 
 app.post('/webhook/whatsapp', (req, res, next) => {
   const auth = verifyWahaWebhook({
@@ -432,6 +542,15 @@ app.listen(PORT, () => {
     retryRunning = true;
     void (async () => {
       try {
+        const session = await sessionMonitor.check();
+        if (!session.working) {
+          // Do not burn owner-alert / consent attempts against a dead session.
+          log.info('pending delivery retry skipped', {
+            reason: 'whatsapp_session_not_working',
+            sessionStatus: session.status,
+          });
+          return;
+        }
         await retryConsentConfirmations();
         if (sendOwnerAlert) await retryOwnerAlerts(sendOwnerAlert);
       } catch (err) {
@@ -445,4 +564,7 @@ app.listen(PORT, () => {
   };
   retry();
   setInterval(retry, 60_000).unref();
+  // Keep outage tracking (and the recovery alert) current even when no jobs
+  // are waiting; the adapter cache bounds this to one WAHA call per 10 s.
+  setInterval(() => { void sessionMonitor.check(); }, 15_000).unref();
 });

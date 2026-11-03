@@ -9,12 +9,20 @@ import { getOrderPublicReference, resolveOwnedOrderReference } from '../order-ac
 import { transitionOrderStatus, type OrderStatus } from '../orders';
 import {
   detectExplicitPaymentMethodSelection,
+  getAvailablePaymentMethods,
   parsePaymentMethod,
   paymentMethodLabel,
-  PAYMENT_METHODS,
 } from '../payment-instructions';
 import type { ToolContext, ToolDef } from '../types';
-import { draftResult, getPendingOrderDraft, isExplicitOrderConfirmation, type OrderDraftRow } from './order-drafts';
+import {
+  draftResult,
+  EXPIRED_ORDER_DRAFT_ERROR,
+  getExpiredOrderDraft,
+  getPendingOrderDraft,
+  isExplicitOrderConfirmation,
+  orderDraftExpiresAt,
+  type OrderDraftRow,
+} from './order-drafts';
 import {
   aggregateDraftItems,
   checkDraftStock,
@@ -31,7 +39,17 @@ export const prepareOrder: ToolDef = {
     'This does NOT create or book an order. The payment method must exactly match the method explicitly named ' +
     'in the current customer message; never substitute another method. The application sends the deterministic ' +
     'server summary automatically; never compose or send one yourself.',
-  input_schema: {
+  // A getter: the payment_method enum is rebuilt from the configured methods
+  // (COD always; others only with their PAYMENT_* settings) every time the
+  // schema is sent to the model, like send_payment_instructions.
+  get input_schema() {
+    return prepareOrderInputSchema();
+  },
+  execute: (input, ctx) => prepareOrderExecute(input, ctx),
+};
+
+function prepareOrderInputSchema(): ToolDef['input_schema'] {
+  return {
     type: 'object',
     properties: {
       items: {
@@ -48,11 +66,14 @@ export const prepareOrder: ToolDef = {
       city: { type: 'string' },
       postal_code: { type: 'string', description: 'optional' },
       delivery_instructions: { type: 'string', description: 'optional landmark or instructions' },
-      payment_method: { type: 'string', enum: PAYMENT_METHODS },
+      payment_method: { type: 'string', enum: getAvailablePaymentMethods() },
     },
     required: ['items', 'recipient_name', 'contact_phone', 'delivery_address', 'city', 'payment_method'],
-  },
-  execute: (input, ctx) => {
+  };
+}
+
+function prepareOrderExecute(input: any, ctx: ToolContext): unknown {
+  {
     try {
       // The model is not an authority for payment choice. On a real customer
       // turn, bind the draft to exactly what the customer typed. Requiring the
@@ -131,8 +152,8 @@ export const prepareOrder: ToolDef = {
     } catch {
       return { ok: false, error: 'Could not prepare the order safely — please try again.' };
     }
-  },
-};
+  }
+}
 
 export function confirmPendingOrderDraft(ctx: ToolContext): Record<string, unknown> {
   if (!ctx.idempotencyKey) {
@@ -164,7 +185,10 @@ export function confirmPendingOrderDraft(ctx: ToolContext): Record<string, unkno
         }
       }
       const draft = getPendingOrderDraft(ctx.customerId);
-      if (!draft) return { ok: false, error: 'There is no prepared order waiting for this customer to confirm.' };
+      if (!draft) {
+        if (getExpiredOrderDraft(ctx.customerId)) return { ok: false, error: EXPIRED_ORDER_DRAFT_ERROR };
+        return { ok: false, error: 'There is no prepared order waiting for this customer to confirm.' };
+      }
       if (draft.prepared_event_key === `${ctx.idempotencyKey}:prepare_order`) {
         return {
           ok: false,
@@ -241,6 +265,62 @@ export const confirmOrder: ToolDef = {
     return customerSafe;
   },
 };
+
+/** Sends one exact server-generated summary text; supplied by the agent's guarded send path. */
+export type SendServerOrderSummary = (
+  body: string,
+  draftId: number,
+  ctx: ToolContext,
+) => Promise<{ ok?: boolean; error?: string; status?: string }>;
+
+/**
+ * show_pending_order (FIX2, live 2026-11-01 loop): re-sends the EXACT stored
+ * server summary of the customer's pending draft through the authorized
+ * order-summary send path, so the model never has to retype it. It takes no
+ * input: the draft is always the current sender's own latest pending one.
+ */
+export function createShowPendingOrderTool(sendSummary: SendServerOrderSummary): ToolDef {
+  return {
+    name: 'show_pending_order',
+    description:
+      'Re-send the exact server-generated summary of this customer\'s prepared (not yet booked) order. ' +
+      'Use it when the customer asks to see, check or repeat their pending order. It sends the message itself; ' +
+      'never type, copy or rewrite an order summary in send_message. It does not confirm or book anything.',
+    input_schema: { type: 'object', properties: {} },
+    execute: async (_input, ctx) => {
+      try {
+        const draft = getPendingOrderDraft(ctx.customerId);
+        if (!draft) {
+          return getExpiredOrderDraft(ctx.customerId)
+            ? { ok: false, error: EXPIRED_ORDER_DRAFT_ERROR }
+            : {
+                ok: false,
+                error:
+                  'There is no prepared order waiting for confirmation. Collect the missing order details and call prepare_order.',
+              };
+        }
+        const summary = draftResult(draft);
+        const sent = await sendSummary(summary.server_summary, draft.id, ctx);
+        if (!sent.ok) {
+          return { ok: false, error: sent.error ?? 'The order summary could not be sent right now.' };
+        }
+        return {
+          ok: true,
+          sent: true,
+          status: 'awaiting_confirmation',
+          booked: false,
+          item_count: summary.items.length,
+          expires_at: orderDraftExpiresAt(draft),
+          note:
+            'The exact server summary was sent. Do not send another summary. The order is NOT booked until a later ' +
+            'customer message explicitly confirms it and confirm_order succeeds.',
+        };
+      } catch {
+        return { ok: false, error: 'Could not load the prepared order safely — please try again.' };
+      }
+    },
+  };
+}
 
 // Wide schema for the model (status is just `string` — the JSON-schema
 // `enum` below is a hint, not the gate), strict validation server-side via

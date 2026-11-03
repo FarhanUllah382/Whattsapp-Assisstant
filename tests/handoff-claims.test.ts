@@ -65,11 +65,17 @@ test('status tool refuses before notify_owner and sends exact pending and sent s
   assert.match(before.error ?? '', /notify_owner first/i);
   assert.equal(sent.length, 0);
 
+  // The language follows the customer's latest message (FIX4); English here.
+  const english = { customerId: 1, inboundText: 'Can you please ask the owner about this?' };
   facts = { recorded: true, alertStatus: 'pending' };
-  assert.deepEqual(await tool.execute({}, { customerId: 1 }), { ok: true });
+  assert.deepEqual(await tool.execute({}, english), { ok: true });
   assert.equal(sent[0], buildHandoffStatusMessage(facts));
 
   facts = { recorded: true, alertStatus: 'sent' };
-  assert.deepEqual(await tool.execute({}, { customerId: 1 }), { ok: true });
+  assert.deepEqual(await tool.execute({}, english), { ok: true });
   assert.equal(sent[1], buildHandoffStatusMessage(facts));
+
+  // No customer text to judge: the bilingual (English + Roman Urdu) form.
+  assert.deepEqual(await tool.execute({}, { customerId: 1 }), { ok: true });
+  assert.equal(sent[2], buildHandoffStatusMessage(facts, 'mixed'));
 });

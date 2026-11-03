@@ -17,11 +17,14 @@
     "test:security": "tsx scripts/run-isolated-tests.ts --security",
     "test:e2e": "tsx scripts/run-isolated-tests.ts scripts/test-v2-flow.ts",
     "typecheck": "tsc --noEmit",
+    "obs:up": "docker compose -f observability/docker-compose.yml up -d",
+    "obs:down": "docker compose -f observability/docker-compose.yml down",
     "seed": "tsx scripts/seed-catalog.ts",
     "demo:seed": "tsx scripts/seed-portfolio-demo.ts",
     "demo:build": "npm run demo:seed && tsx scripts/build-portfolio-demo.ts",
     "demo:start": "tsx .portfolio-runtime/server.ts",
-    "demo:verify": "tsx scripts/verify-portfolio-demo.ts"
+    "demo:verify": "tsx scripts/verify-portfolio-demo.ts",
+    "cost:measure": "tsx scripts/run-isolated-tests.ts tests/turn-cost-harness.ts"
   },
   "dependencies": {
     "better-sqlite3": "12.10.0",

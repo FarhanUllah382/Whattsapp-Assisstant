@@ -57,6 +57,14 @@ export const allTestTargets: readonly TestTarget[] = [
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/payment-claims.test.ts',
+    securityAreas: [
+      'payment claim necessity and duplicate prevention',
+      'unconfigured payment method disclosure',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/payment-resolution.test.ts',
     securityAreas: ['reference-bound deterministic payment resolution and reversal'],
     includeInSecurityRegression: true,
@@ -147,6 +155,11 @@ export const allTestTargets: readonly TestTarget[] = [
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/whatsapp-down.test.ts',
+    securityAreas: ['WhatsApp session outage deferral and owner-alert retry cap'],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/llm-reliability.test.ts',
     securityAreas: [
       'provider timeouts and API key confidentiality',
@@ -163,13 +176,69 @@ export const allTestTargets: readonly TestTarget[] = [
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/wording-language.test.ts',
+    securityAreas: [
+      'owner handoff truthfulness',
+      'customer language and outbound formatting',
+      'discount policy before handoff',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/operations.test.ts',
     securityAreas: ['health monitoring and verified recovery backups'],
     includeInSecurityRegression: true,
   },
   {
+    file: 'tests/observability.test.ts',
+    securityAreas: [
+      'observability metrics access fails closed',
+      'trace and metric PII exclusion',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
     file: 'tests/live-verify.test.ts',
     securityAreas: ['read-only live acceptance verification and evidence redaction'],
+    includeInSecurityRegression: true,
+  },
+  {
+    file: 'tests/order-drafts.test.ts',
+    securityAreas: [
+      'order draft expiry and supersede lifecycle',
+      'deterministic order summary integrity',
+      'explicit order confirmation',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
+    file: 'tests/turn-cost.test.ts',
+    securityAreas: [
+      'model call and prompt token budget per customer turn',
+      'order and payment safety net retained under cost gating',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
+    file: 'tests/verifier-fixes.test.ts',
+    securityAreas: [
+      'planned handoff survives a holding reply',
+      'complaint handoff not mistaken for a discount question',
+      'payment claim duplicate and COD safety-net rules',
+      'outbound text normalisation (emoji, zero-width)',
+      'bounded channel-outage deferral and low-cardinality metrics',
+    ],
+    includeInSecurityRegression: true,
+  },
+  {
+    file: 'tests/fix-round-2.test.ts',
+    securityAreas: [
+      'holding-only replies vetoed so the one visible reply is complete',
+      'discount intent vs complaint handoff',
+      'one payment told several ways makes one pending claim',
+      'invisible format characters cannot dodge reply guards',
+      'pacing-held replies alert as no_reply',
+    ],
     includeInSecurityRegression: true,
   },
 ];

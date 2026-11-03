@@ -9,6 +9,7 @@ import {
   type ChannelHealth,
   type ChannelImageMessage,
   type ChannelSendReceipt,
+  type ChannelSessionStatus,
   type InboundMessage,
 } from './types';
 
@@ -43,6 +44,29 @@ function isTimeout(error: unknown): boolean {
   return error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
 }
 
+/** Node's fetch reports a refused TCP connect as TypeError('fetch failed') with a cause code. */
+function isConnectionRefused(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: unknown } } | undefined)?.cause;
+  return cause?.code === 'ECONNREFUSED';
+}
+
+/**
+ * WAHA answers 422 "Session status is not as expected" when the WhatsApp
+ * session is FAILED / STARTING / SCAN_QR_CODE / STOPPED. The request never
+ * reached WhatsApp, so it is a retryable channel outage, not a rejection of
+ * this message.
+ */
+function isSessionUnavailableResponse(status: number, body: string): boolean {
+  // Only WAHA's own session-state message. Any other 422 that merely mentions
+  // "session" (bad chatId, bad payload) is a real rejection: classifying it as
+  // an outage would rerun the whole turn every minute forever (verifier
+  // finding, 2026-11-02).
+  return status === 422 && /session\s+status\s+is\s+not\s+as\s+expected/i.test(body);
+}
+
+export const WAHA_SESSION_STATUS_CACHE_MS = 10_000;
+export const WAHA_SESSION_STATUS_TIMEOUT_MS = 3_000;
+
 function phoneFromChatId(chatId: string): string {
   return chatId.split('@')[0].replace(/\D/g, '');
 }
@@ -53,6 +77,8 @@ export interface WahaAdapterConfig {
   apiKey?: string;
   /** Outbound send timeout; invalid values fall back to WAHA_SEND_TIMEOUT_MS / the default. */
   sendTimeoutMs?: number;
+  /** Clock for the session-status cache (tests). */
+  now?: () => number;
 }
 
 /**
@@ -65,8 +91,12 @@ export class WahaAdapter implements ChannelAdapter {
   private readonly session: string;
   private readonly apiKey?: string;
   private readonly sendTimeoutMs: number;
+  private readonly now: () => number;
+  private sessionStatusCache: { value: ChannelSessionStatus; expiresAt: number } | undefined;
+  private sessionStatusInFlight: Promise<ChannelSessionStatus> | undefined;
 
   constructor(config?: WahaAdapterConfig) {
+    this.now = config?.now ?? Date.now;
     this.baseUrl = config?.baseUrl ?? WAHA_BASE_URL;
     this.session = config?.session ?? WAHA_SESSION;
     this.apiKey = config?.apiKey ?? WAHA_API_KEY;
@@ -122,6 +152,11 @@ export class WahaAdapter implements ChannelAdapter {
         signal: AbortSignal.timeout(this.sendTimeoutMs),
       });
     } catch (error) {
+      if (!isTimeout(error) && isConnectionRefused(error)) {
+        // No TCP connection was established, so nothing reached WAHA.
+        this.invalidateSessionStatus();
+        throw new ChannelSendError('WAHA gateway refused the connection.', false, 'channel_unavailable');
+      }
       throw new ChannelSendError(
         isTimeout(error)
           ? `WAHA send timed out after ${this.sendTimeoutMs}ms; delivery outcome unknown.`
@@ -147,6 +182,14 @@ export class WahaAdapter implements ChannelAdapter {
       );
     }
     if (!response.ok) {
+      if (isSessionUnavailableResponse(response.status, responseText)) {
+        this.invalidateSessionStatus();
+        throw new ChannelSendError(
+          `WAHA session unavailable (${response.status}): ${responseText.slice(0, 300)}`,
+          false,
+          'channel_unavailable',
+        );
+      }
       throw new ChannelSendError(
         `WAHA send rejected (${response.status}): ${responseText.slice(0, 300)}`,
         false,
@@ -179,6 +222,54 @@ export class WahaAdapter implements ChannelAdapter {
       return { ok: status === 'WORKING', status };
     } catch {
       return { ok: false, status: 'unreachable' };
+    }
+  }
+
+  /** Forces the next getSessionStatus() to ask WAHA again. */
+  invalidateSessionStatus(): void {
+    this.sessionStatusCache = undefined;
+  }
+
+  /**
+   * GET /api/sessions/{session}, cached for 10 s and bounded by a 3 s
+   * timeout. Never throws: an HTTP error, timeout or bad body reports
+   * UNKNOWN (not working), which callers treat as "WhatsApp is down".
+   */
+  async getSessionStatus(): Promise<ChannelSessionStatus> {
+    const cached = this.sessionStatusCache;
+    if (cached && this.now() < cached.expiresAt) return cached.value;
+    if (this.sessionStatusInFlight) return this.sessionStatusInFlight;
+    this.sessionStatusInFlight = this.fetchSessionStatus()
+      .then((value) => {
+        this.sessionStatusCache = { value, expiresAt: this.now() + WAHA_SESSION_STATUS_CACHE_MS };
+        return value;
+      })
+      .finally(() => {
+        this.sessionStatusInFlight = undefined;
+      });
+    return this.sessionStatusInFlight;
+  }
+
+  private async fetchSessionStatus(): Promise<ChannelSessionStatus> {
+    const checkedAt = new Date(this.now());
+    try {
+      const response = await this.fetch(`/api/sessions/${encodeURIComponent(this.session)}`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(WAHA_SESSION_STATUS_TIMEOUT_MS),
+      });
+      if (!response.ok) {
+        return { status: 'UNKNOWN', working: false, checkedAt, error: `http_${response.status}` };
+      }
+      const payload = await response.json() as { status?: unknown };
+      const status = typeof payload?.status === 'string' ? payload.status : 'UNKNOWN';
+      return { status, working: status === 'WORKING', checkedAt };
+    } catch (error) {
+      return {
+        status: 'UNKNOWN',
+        working: false,
+        checkedAt,
+        error: isTimeout(error) ? 'timeout' : 'unreachable',
+      };
     }
   }
 

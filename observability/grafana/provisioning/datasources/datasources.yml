@@ -1,0 +1,25 @@
+# Provisioned data sources. The bearer token for the traces API is read from
+# the mounted secret file at start-up ($__file{...}); it is never stored here.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: ahmed-prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+
+  - name: Assistant traces
+    uid: ahmed-traces
+    type: yesoreyeram-infinity-datasource
+    access: proxy
+    editable: false
+    jsonData:
+      auth_method: bearerToken
+      allowedHosts:
+        - http://host.docker.internal:3000
+    secureJsonData:
+      bearerToken: $__file{/run/secrets/ops_key}

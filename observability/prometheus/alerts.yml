@@ -1,0 +1,73 @@
+# Alert rules, evaluated by Prometheus and listed in Grafana > Alerting >
+# Alert rules (data source "Prometheus"). No Alertmanager is configured, so
+# they show as firing in the UI and do not send messages.
+# See docs/OBSERVABILITY.md.
+groups:
+  - name: ahmed-assistant
+    rules:
+      - alert: AssistantMetricsDown
+        expr: up{job="ahmed-assistant"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape the assistant (app stopped, wrong ops_key, or port 3000 unreachable)."
+
+      - alert: WhatsAppDown
+        expr: wa_whatsapp_session_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The WAHA session has not been WORKING for more than 2 minutes."
+
+      - alert: AiBudgetAbove80Percent
+        expr: wa_ai_budget_used_ratio > 0.8
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 80% of today's AI budget is used ({{ $value | humanizePercentage }})."
+
+      # Only unintended silences: opted-out customers are counted as
+      # outcome="silenced" and never fire this alert. Pacing-held replies are
+      # dropped (never resent), so they are no_reply and DO fire it.
+      - alert: TurnWithNoReply
+        expr: sum(increase(wa_turns_total{outcome="no_reply"}[10m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "A message ended with no reply (outcome no_reply) in the last 10 minutes. Open the Message traces table."
+
+      - alert: WhatsAppDownLong
+        expr: max(wa_whatsapp_down_seconds) > 300
+        labels:
+          severity: critical
+        annotations:
+          summary: "WhatsApp has been down for {{ $value }} s (more than 5 minutes). Inbound messages are held; relink the WAHA session."
+
+      - alert: FallbackRateAbove20Percent
+        expr: |
+          sum(increase(wa_turns_total{outcome="fallback"}[30m]))
+            /
+          sum(increase(wa_turns_total{outcome!="deferred"}[30m]))
+            > 0.2
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 20% of turns in the last 30 minutes ended in the fallback reply."
+
+      - alert: QueueAbove50
+        expr: wa_queue_jobs{status="pending"} > 50
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 50 inbound jobs are waiting in the durable queue."
+
+      - alert: TraceWritesFailing
+        expr: increase(wa_trace_write_failures_total[15m]) > 0
+        labels:
+          severity: info
+        annotations:
+          summary: "Trace rows could not be written (turns still run). Check the database."

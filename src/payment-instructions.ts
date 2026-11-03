@@ -193,25 +193,118 @@ export function createSendPaymentInstructionsTool(
   sendAuthorized: AuthorizedSender,
   env: PaymentEnvironment = process.env,
 ): ToolDef {
+  // The model only ever sees methods that are configured right now (COD always).
+  const available = getAvailablePaymentMethods(env);
   return {
     name: 'send_payment_instructions',
     description:
       'Send exact owner-approved payment instructions through the protected WhatsApp send path. ' +
-      'Use this whenever a customer asks where or how to pay. Never copy account details into send_message.',
+      'Use this whenever a customer asks where or how to pay. Never copy account details into send_message. ' +
+      `Currently available: ${available.map((method) => METHOD_LABELS[method]).join(', ')} only.`,
     input_schema: {
       type: 'object',
-      properties: { method: { type: 'string', enum: PAYMENT_METHODS } },
+      properties: { method: { type: 'string', enum: [...available] } },
       required: ['method'],
     },
     execute: async ({ method }, ctx) => {
       const parsed = parsePaymentMethod(method);
       if (!parsed) {
-        return { ok: false, error: 'Payment method must be COD, bank transfer, Easypaisa, or JazzCash.' };
+        return {
+          ok: false,
+          error: `Payment method must be one of the available methods: ${available.join(', ')}.`,
+        };
       }
       const instructions = getPaymentInstructions(parsed, env);
       if (!instructions.ok) return instructions;
       return sendAuthorized(instructions.body, ctx);
     },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Unconfigured-method send guard (check id `unconfigured_payment_method`).
+//
+// A reply may NAME an unconfigured method only to say it is unavailable, or
+// when it refers to the customer's own claimed payment ("your JazzCash
+// payment claim is pending"). Any other mention presents it as an option and
+// is vetoed. The decision is made per clause, so "We accept COD and JazzCash,
+// but not card" is still blocked for JazzCash. Card is never configurable.
+
+type GuardedMethod = Exclude<PaymentMethod, 'cod'> | 'card';
+
+const GUARDED_METHOD_PATTERNS: Record<GuardedMethod, RegExp> = {
+  jazzcash: /\bjazz\s*cash\b/i,
+  easypaisa: /\beasy\s*paisa\b/i,
+  bank_transfer:
+    /\b(?:bank\s*(?:transfer|deposit|account)|online\s+(?:bank\s+)?transfer|wire\s+transfer|iban|raast)\b/i,
+  card:
+    /\b(?:(?:credit|debit|atm|visa|master\s*card)\s*cards?|card\s+payments?|(?:by|with|via|through|using)\s+(?:a\s+|your\s+)?card|visa|master\s*card)\b/i,
+};
+
+const GUARDED_METHOD_LABELS: Record<GuardedMethod, string> = {
+  jazzcash: 'JazzCash',
+  easypaisa: 'Easypaisa',
+  bank_transfer: 'bank transfer / IBAN',
+  card: 'card',
+};
+
+const CLAUSE_SPLIT = /[.;!?\n]+|,|\s+(?:but|however|lekin|magar|although)\s+/i;
+// Phrases that contain a negation word but do not negate availability.
+const FALSE_NEGATIONS =
+  /\b(?:don'?t|do\s+not)\s+forget\b|\bnot\s+only\b|\bno\s+problem\b|\bnot\s+sure\b|\bwhy\s+not\b/gi;
+const UNAVAILABLE_CUE =
+  /\b(?:not|never|isn'?t|aren'?t|don'?t|doesn'?t|can'?t|cannot|won'?t|unavailable|no\s+longer|nahi|nahin|nai)\b/i;
+// "your JazzCash payment claim is pending" talks about the customer's own
+// claimed payment; it is not an offer, unless it also tells them to send/pay.
+const OWN_CLAIM_CUE =
+  /\b(?:your|aap(?:ki|ka|ke)|ap(?:ki|ka|ke))\s+(?:\w+\s+){0,2}?(?:jazz\s*cash|easy\s*paisa|bank\s*transfer)\b.*\b(?:claim|recorded|pending)\b/i;
+const OFFER_CUE = /\b(?:send|bhej\w*|pay\s+(?:via|through|with|by|using|on)|transfer\s+to|accept\w*|options?)\b/i;
+
+export type UnconfiguredPaymentMethodCheck =
+  | { ok: true }
+  | { ok: false; error: string; check: 'unconfigured_payment_method' };
+
+export function isPaymentMethodConfigured(method: PaymentMethod, env: PaymentEnvironment = process.env): boolean {
+  return getPaymentInstructions(method, env).ok;
+}
+
+/**
+ * Veto a reply that presents a non-configured payment method (or card, which
+ * is never configurable) as available. `inboundText` is accepted for symmetry
+ * with the other guards; the decision depends on the reply's own wording so a
+ * customer naming JazzCash cannot unlock it.
+ */
+export function checkUnconfiguredPaymentMethodReply(
+  body: string,
+  env: PaymentEnvironment = process.env,
+  _inboundText?: string,
+): UnconfiguredPaymentMethodCheck {
+  const unconfigured = (Object.keys(GUARDED_METHOD_PATTERNS) as GuardedMethod[]).filter(
+    (method) => method === 'card' || !isPaymentMethodConfigured(method, env),
+  );
+  if (unconfigured.length === 0) return { ok: true };
+
+  const offending = new Set<GuardedMethod>();
+  for (const rawClause of body.split(CLAUSE_SPLIT)) {
+    const clause = rawClause?.trim();
+    if (!clause) continue;
+    const mentioned = unconfigured.filter((method) => GUARDED_METHOD_PATTERNS[method].test(clause));
+    if (mentioned.length === 0) continue;
+    if (UNAVAILABLE_CUE.test(clause.replace(FALSE_NEGATIONS, ' '))) continue;
+    if (OWN_CLAIM_CUE.test(clause) && !OFFER_CUE.test(clause)) continue;
+    for (const method of mentioned) offending.add(method);
+  }
+  if (offending.size === 0) return { ok: true };
+
+  const available = getAvailablePaymentMethods(env).map((method) => METHOD_LABELS[method]).join(', ');
+  return {
+    ok: false,
+    check: 'unconfigured_payment_method',
+    error:
+      `This reply presents ${[...offending].map((m) => GUARDED_METHOD_LABELS[m]).join(', ')} as a payment option, ` +
+      'but that method is not configured for this shop. ' +
+      `Only these methods are available: ${available}. ` +
+      'Rewrite the reply to offer only an available method; you may say plainly that the other method is not available.',
   };
 }
 

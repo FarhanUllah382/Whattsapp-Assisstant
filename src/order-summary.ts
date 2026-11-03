@@ -76,9 +76,22 @@ export function buildDeterministicOrderSummary(input: DeterministicOrderSummaryI
   return lines.filter((line): line is string => line !== null).join('\n');
 }
 
-function looksLikeOrderSummary(body: string): boolean {
+// Summary-shaped text only (FIX2, live 2026-11-02): an amount plus the word
+// "order" is NOT a summary — "cheapest item is Black Hoodie Rs 800 … order?"
+// was vetoed three times and the customer got the fallback. A reply is
+// treated as an order summary when it names one ("order summary"), when it
+// carries an amount plus at least three summary fields, or when it carries an
+// amount and asks the customer to confirm/book (a mini-summary standing in
+// for the server one).
+export function looksLikeOrderSummary(body: string): boolean {
   const normalized = body.toLowerCase();
-  const hasAmount = /\b(?:rs\.?|pkr|rupees?)\s*\d/i.test(body);
+  const hasAmount =
+    /\b(?:rs\.?|pkr|rupees?)\s*\d/i.test(body) || /\d[\d,]*(?:\.\d+)?\s*(?:rs\b|pkr\b|rupees?\b|\/-)/i.test(body);
+  if (/\border\s+summary\b/.test(normalized)) return true;
+  if (!hasAmount) return false;
+  if (/\breply\s+["'“]?confirm\b|\bconfirm\s+(?:the\s+|this\s+|your\s+)?order\s+to\s+book\b|\bto\s+book\s+(?:it|this|the order)\b/.test(normalized)) {
+    return true;
+  }
   const markers = [
     /\bsubtotal\b/,
     /\btotal\b/,
@@ -88,7 +101,7 @@ function looksLikeOrderSummary(body: string): boolean {
     /\bdelivery\b/,
     /\bqty\b|\bquantity\b/,
   ].filter((pattern) => pattern.test(normalized)).length;
-  return /\border\s+summary\b/.test(normalized) || (hasAmount && (/\border\b/.test(normalized) || markers >= 3));
+  return markers >= 3;
 }
 
 /** Reject AI-written/reworded summaries while a server draft is awaiting confirmation. */

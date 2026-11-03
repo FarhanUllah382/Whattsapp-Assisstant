@@ -6,11 +6,11 @@ import type { DeliverOwnerAlertResult, OwnerAlertKind } from '../alerts';
 import { db } from '../db';
 import { callModel, type ModelMessage } from '../llm';
 import { createLogger } from '../obs/logger';
-import { createPaymentClaim } from '../payments';
+import { createPaymentClaim, PaymentClaimNotNeededError } from '../payments';
 import { sanitizeMemoryText } from '../privacy';
 import { confirmPendingOrderDraft, getPendingOrderDraft, isExplicitOrderConfirmation } from '../tools';
 import type { Customer, ToolContext } from '../types';
-import { SYSTEM_PROMPT } from './prompts';
+import { CLOSE_SYSTEM_PROMPT } from './prompts';
 
 const log = createLogger();
 
@@ -26,11 +26,101 @@ export interface CloseCustomerTurnInput {
   checkpoint: { summary: string } | undefined;
   messages: ModelMessage[];
   toolsCalledThisTurn: Set<string>;
+  /** A customer-visible reply was delivered by the LOOP (not the fallback). */
+  replied?: boolean;
   incomingText: string;
   inboundEventKey: string | undefined;
   toolContext: ToolContext;
   deliverConfiguredAlert: DeliverConfiguredAlert | undefined;
   recordAndAlertHandoff: (kind: OwnerAlertKind, reason: string) => Promise<void>;
+}
+
+// ── FIX5 (cost): when the CLOSE model call may be skipped ────────────────
+//
+// The CLOSE call re-sends the whole turn to the model only to (a) refresh the
+// checkpoint summary, (b) extract durable notes and (c) report an
+// unlogged order/payment. It is skipped only when ALL of these hold, so
+// (c) can never be lost for a turn that could contain an order or payment:
+//   1. a checkpoint already exists (a new customer always gets one);
+//   2. the LOOP delivered a reply itself (no fallback / reply failure);
+//   3. every tool called this turn is a read-only lookup or the plain reply
+//      (an allowlist: any other or future tool forces the call);
+//   4. the inbound text has no order / payment / address / name / phone /
+//      preference / complaint signal (CLOSE_SIGNAL_PATTERNS);
+//   5. fewer than CHECKPOINT_EVERY_N_TURNS inbound messages arrived since the
+//      checkpoint was last written, so the summary is refreshed at least every
+//      N turns — and N stays below the turn's raw history window, so the
+//      skipped turns are still in front of the model when it next runs.
+// The deterministic explicit-confirmation recovery below never needed the
+// model and runs on every turn regardless.
+
+const CLOSE_SKIPPABLE_TOOLS: ReadonlySet<string> = new Set([
+  'send_message',
+  'check_stock',
+  'search_catalog',
+  'show_product_images',
+  'get_customer_note',
+]);
+
+// Case-insensitive; deliberately broad (a false positive only costs one call).
+export const CLOSE_SIGNAL_PATTERNS: readonly RegExp[] = [
+  // orders / buying intent / cancellation / delivery
+  /\b(order|orders|book|booking|confirm|buy|purchase|khareed\w*|chahiye|chahye|chaiye|chahie|lena|lelo|le\s+lo|bhej\w*|send\s+me|deliver\w*|cancel\w*|ship\w*|qty|quantity)\b/i,
+  // payments / money owed / proof
+  /\b(pay|paid|payment\w*|paisa|paise|pese|rupay\w*|rupee\w*|rs\.?|pkr|amount|transfer\w*|jazz\s*cash|jazzcash|easy\s*paisa|easypaisa|bank|iban|account|a\/c|cod|cash|screenshot|receipt|transaction|trx|tid|owe|udhaar|udhar|baqaya|balance|refund\w*|wapas)\b/i,
+  // name / contact / address
+  /\b(name|naam|address|addr|ghar|house|flat|street|gali|mohalla|sector|block|phase|colony|town|city|shehar|postal|zip|landmark|phone|mobile|number|contact|whatsapp|email)\b/i,
+  /(\+?92|\b0)3\d{2}[\s-]?\d{7}\b/,
+  /\d{7,}/,
+  /@/,
+  // durable preferences / promises / complaints
+  /\b(prefer\w*|pasand|remember|yaad|always|hamesha|usually|aksar|mera\s+size|my\s+size|promise|wada|waada|complain\w*|shikayat|wrong|damaged|kharab|late)\b/i,
+  // handoff / complaint signals (verifier 2026-11-02): missing or damaged
+  // items and asking for Ahmed must always reach the CLOSE safety net
+  /\b(missing|kam\s+(?:hai|hain|tha|thi|the|aya|aaya|ayi|aayi|mila|mili)|kum\s+hai|nahi\s+(?:mila|mili|aya|aaya|ayi|aayi)|damage\w*|broken|toota|tuta|phata|wrong\s+item|ghalat|galat|defective|replace\w*|owner|ahmed|malik|manager)\b/i,
+];
+
+export function hasCloseSignal(text: string): boolean {
+  return CLOSE_SIGNAL_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+export const CHECKPOINT_EVERY_N_TURNS_DEFAULT = 4;
+
+/** Fail-safe parse: 1..10 (1 = run CLOSE on every turn, the pre-FIX5 behaviour). */
+export function readCheckpointEveryNTurns(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CHECKPOINT_EVERY_N_TURNS?.trim() ?? '';
+  if (!/^\d+$/.test(raw)) return CHECKPOINT_EVERY_N_TURNS_DEFAULT;
+  const value = Number(raw);
+  return value >= 1 && value <= 10 ? value : CHECKPOINT_EVERY_N_TURNS_DEFAULT;
+}
+
+export interface CloseModelDecision {
+  run: boolean;
+  reason: string;
+}
+
+export function decideCloseModelCall(input: {
+  customerId: number;
+  hasCheckpoint: boolean;
+  replied: boolean;
+  toolsCalledThisTurn: ReadonlySet<string>;
+  incomingText: string;
+}): CloseModelDecision {
+  if (!input.hasCheckpoint) return { run: true, reason: 'no_checkpoint' };
+  if (!input.replied) return { run: true, reason: 'no_reply' };
+  for (const tool of input.toolsCalledThisTurn) {
+    if (!CLOSE_SKIPPABLE_TOOLS.has(tool)) return { run: true, reason: `tool:${tool}` };
+  }
+  if (hasCloseSignal(input.incomingText)) return { run: true, reason: 'inbound_signal' };
+  const every = readCheckpointEveryNTurns();
+  if (every <= 1) return { run: true, reason: 'every_turn' };
+  const row = db.prepare(`
+    select count(*) as n from messages
+     where customer_id = ? and direction = 'inbound'
+       and created_at > coalesce((select updated_at from checkpoints where customer_id = ?), '')
+  `).get(input.customerId, input.customerId) as { n: number };
+  if (row.n >= every) return { run: true, reason: 'periodic' };
+  return { run: false, reason: 'skipped' };
 }
 
 export async function closeCustomerTurn(input: CloseCustomerTurnInput): Promise<void> {
@@ -42,6 +132,65 @@ export async function closeCustomerTurn(input: CloseCustomerTurnInput): Promise<
     incomingText,
     inboundEventKey,
     toolContext,
+    deliverConfiguredAlert,
+    recordAndAlertHandoff,
+  } = input;
+
+  const decision = decideCloseModelCall({
+    customerId: customer.id,
+    hasCheckpoint: checkpoint !== undefined,
+    replied: input.replied ?? false,
+    toolsCalledThisTurn,
+    incomingText,
+  });
+  if (decision.run) {
+    await closeWithModel(input);
+  } else {
+    log.info('close summary call skipped for a read-only turn', { customerId: customer.id });
+    await runDeterministicSafetyNet(input);
+  }
+}
+
+/** The explicit-confirmation recovery, which never depends on the model. */
+async function runDeterministicSafetyNet(input: CloseCustomerTurnInput): Promise<boolean> {
+  const { customer, toolsCalledThisTurn, incomingText, toolContext, recordAndAlertHandoff } = input;
+  let recoveredConfirmation = false;
+  try {
+    if (
+      !toolsCalledThisTurn.has('confirm_order') &&
+      isExplicitOrderConfirmation(incomingText) &&
+      getPendingOrderDraft(customer.id)
+    ) {
+      const recovered = confirmPendingOrderDraft(toolContext) as { ok?: boolean; order_id?: number; error?: string };
+      recoveredConfirmation = recovered.ok === true;
+      if (recoveredConfirmation) {
+        log.info('safety-net confirmed prepared order from explicit inbound text', {
+          customerId: customer.id,
+          orderId: recovered.order_id,
+        });
+      } else {
+        await recordAndAlertHandoff(
+          'unlogged_order',
+          `Explicit order confirmation could not be applied safely: ${recovered.error ?? 'unknown reason'}`,
+        );
+      }
+    }
+  } catch (err) {
+    log.error('safety-net order/payment extraction failed', {
+      customerId: customer.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return recoveredConfirmation;
+}
+
+async function closeWithModel(input: CloseCustomerTurnInput): Promise<void> {
+  const {
+    customer,
+    checkpoint,
+    messages,
+    toolsCalledThisTurn,
+    inboundEventKey,
     deliverConfiguredAlert,
     recordAndAlertHandoff,
   } = input;
@@ -81,7 +230,7 @@ export async function closeCustomerTurn(input: CloseCustomerTurnInput): Promise<
       '"unlogged_order": null, "unlogged_payment": null}\n' +
       'Use an empty array for new_notes when there is nothing new.',
   });
-  const closing = await callModel(SYSTEM_PROMPT, messages, []); // no tools — just want text
+  const closing = await callModel(CLOSE_SYSTEM_PROMPT, messages, []); // no tools — just want text
   const closingBlock = closing.content.find((b: any) => b.type === 'text');
   const closingText = closingBlock?.text?.trim() ?? '';
 
@@ -149,28 +298,8 @@ export async function closeCustomerTurn(input: CloseCustomerTurnInput): Promise<
   // parser of the real inbound text can recover a missed confirm_order call,
   // and only against an already-prepared draft. Everything else is handed
   // off rather than bypassing delivery details or explicit confirmation.
+  const recoveredConfirmation = await runDeterministicSafetyNet(input);
   try {
-    let recoveredConfirmation = false;
-    if (
-      !toolsCalledThisTurn.has('confirm_order') &&
-      isExplicitOrderConfirmation(incomingText) &&
-      getPendingOrderDraft(customer.id)
-    ) {
-      const recovered = confirmPendingOrderDraft(toolContext) as { ok?: boolean; order_id?: number; error?: string };
-      recoveredConfirmation = recovered.ok === true;
-      if (recoveredConfirmation) {
-        log.info('safety-net confirmed prepared order from explicit inbound text', {
-          customerId: customer.id,
-          orderId: recovered.order_id,
-        });
-      } else {
-        await recordAndAlertHandoff(
-          'unlogged_order',
-          `Explicit order confirmation could not be applied safely: ${recovered.error ?? 'unknown reason'}`,
-        );
-      }
-    }
-
     if (
       !recoveredConfirmation &&
       !toolsCalledThisTurn.has('prepare_order') &&
@@ -188,11 +317,22 @@ export async function closeCustomerTurn(input: CloseCustomerTurnInput): Promise<
     if (!toolsCalledThisTurn.has('claim_payment') && unloggedPayment) {
       const amount = unloggedPayment.amount;
       if (unloggedPayment.confident === true && typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
-        const claim = createPaymentClaim({
-          customerId: customer.id,
-          amount,
-          eventKey: inboundEventKey ? `${inboundEventKey}:payment_claim` : undefined,
-        });
+        let claim: ReturnType<typeof createPaymentClaim>;
+        try {
+          claim = createPaymentClaim({
+            customerId: customer.id,
+            amount,
+            eventKey: inboundEventKey ? `${inboundEventKey}:payment_claim` : undefined,
+            // Same undelivered-COD rule as claim_payment (verifier 2026-11-02).
+            inferMethodFromOrders: true,
+          });
+        } catch (error) {
+          if (!(error instanceof PaymentClaimNotNeededError)) throw error;
+          log.info('safety-net payment claim not recorded: only undelivered COD orders', {
+            customerId: customer.id,
+          });
+          return;
+        }
         if (deliverConfiguredAlert) {
           const delivery = await deliverConfiguredAlert(
             'payment_claim',

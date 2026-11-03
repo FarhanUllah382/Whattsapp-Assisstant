@@ -13,6 +13,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { finishAiModelCall, reserveAiModelCall } from './ai-budget';
+import { traceModelCall } from './obs/trace';
 import type { ToolDef } from './types';
 
 // Provider swapped to Gemini for local WAHA end-to-end testing (2026-09-02) —
@@ -135,7 +136,14 @@ export async function callModel(
     throw new Error('GEMINI_API_KEY not set — export it before running the server.');
   }
 
-  const reservation = reserveAiModelCall({ model: config.model });
+  const startedMs = Date.now();
+  let reservation: ReturnType<typeof reserveAiModelCall>;
+  try {
+    reservation = reserveAiModelCall({ model: config.model });
+  } catch (error) {
+    traceModelCall({ ok: false, status: 'budget_exceeded', durationMs: 0, providerCall: false });
+    throw error;
+  }
 
   const body: Record<string, unknown> = {
     system_instruction: { parts: [{ text: system }] },
@@ -157,6 +165,7 @@ export async function callModel(
   }
 
   let finished = false;
+  let failureStatus = 'request_error';
   try {
     // The key travels only in the x-goog-api-key header — never in the URL,
     // where proxies, access logs and error messages could capture it. The
@@ -172,6 +181,7 @@ export async function callModel(
     );
 
     if (!response.ok) {
+      failureStatus = `http_${response.status}`;
       const text = await response.text();
       throw new Error(`LLM call failed (${response.status}): ${redactKey(text, apiKey).slice(0, 300)}`);
     }
@@ -186,6 +196,14 @@ export async function callModel(
       totalTokens: usage.totalTokenCount,
     });
     finished = true;
+    traceModelCall({
+      ok: true,
+      status: 'ok',
+      durationMs: Date.now() - startedMs,
+      promptTokens: usage.promptTokenCount,
+      outputTokens: usage.candidatesTokenCount,
+      providerCall: true,
+    });
     const parts: any[] = data.candidates?.[0]?.content?.parts ?? [];
 
     const content = parts.map((p, i) => {
@@ -208,7 +226,15 @@ export async function callModel(
   } catch (error) {
     // Timeouts, network errors and non-OK responses all close the reserved
     // call as a failure, exactly once — the allowance is still consumed.
-    if (!finished) finishAiModelCall({ id: reservation.id, status: 'failed' });
+    if (!finished) {
+      finishAiModelCall({ id: reservation.id, status: 'failed' });
+      traceModelCall({
+        ok: false,
+        status: isAbortTimeout(error) ? 'timeout' : failureStatus,
+        durationMs: Date.now() - startedMs,
+        providerCall: true,
+      });
+    }
     if (isAbortTimeout(error)) {
       throw new Error(
         `LLM call timed out after ${config.timeoutMs}ms — the provider did not answer in time; ` +

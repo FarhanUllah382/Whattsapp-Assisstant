@@ -1,22 +1,14 @@
+import { detectCustomerLanguage, localizedText, type CustomerLanguage } from './customer-language';
 import { detectHumanPromise } from './guardrails/human-promise';
-import {
-  PAYMENT_CLAIM_PENDING_MESSAGE,
-  REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
-  REFUND_REJECTED_MESSAGE,
-  REFUND_REQUEST_PENDING_MESSAGE,
-} from './sensitive-action-wording';
-
-// Exact server-authored status texts. The sensitive-action backstop REQUIRES
-// these verbatim after a claim or refund action, so this backstop must not
-// veto them ("recorded ... owner verification" reads like a handoff claim).
-// Live test 2026-11-02: both backstops disagreed and the customer got nothing.
-const SERVER_STATUS_MESSAGES: ReadonlySet<string> = new Set([
-  PAYMENT_CLAIM_PENDING_MESSAGE,
-  REFUND_REQUEST_PENDING_MESSAGE,
-  REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
-  REFUND_REJECTED_MESSAGE,
-]);
+import { isServerStatusMessage } from './sensitive-action-wording';
 import type { ToolContext, ToolDef } from './types';
+
+// Exact server-authored status texts (payment pending, refund states — in
+// English, Roman Urdu and the bilingual form; see isServerStatusMessage). The
+// sensitive-action backstop REQUIRES these verbatim after a claim or refund
+// action, so this backstop must not veto them ("recorded ... owner
+// verification" reads like a handoff claim). Live test 2026-11-02: both
+// backstops disagreed and the customer got nothing.
 
 export type HandoffAlertStatus = 'none' | 'pending' | 'sent';
 
@@ -50,24 +42,46 @@ const HANDOFF_FACT_CLAIM = new RegExp(
   'i',
 );
 
-export function buildHandoffStatusMessage(facts: HandoffFacts): string | null {
-  if (!facts.recorded) return null;
-  if (facts.alertStatus === 'sent') {
-    return (
+// Same facts in each language: recorded, alert state, and that nobody can
+// confirm Ahmed has seen it. No promise that he will reply or call.
+const HANDOFF_STATUS_TEXTS: Readonly<Record<HandoffAlertStatus, { en: string; roman_ur: string }>> = {
+  sent: {
+    en:
       "Your request has been recorded, and an alert was sent to Ahmed's WhatsApp. " +
-      'I cannot confirm that he has viewed it yet.'
-    );
-  }
-  if (facts.alertStatus === 'pending') {
-    return (
+      'I cannot confirm that he has viewed it yet.',
+    roman_ur:
+      'Aapki request record ho gayi hai, aur Ahmed ke WhatsApp par alert chala gaya hai. ' +
+      'Main abhi yeh confirm nahi kar sakta ke unhon ne isay dekh liya hai.',
+  },
+  pending: {
+    en:
       'Your request has been recorded for Ahmed, but the WhatsApp alert is still pending delivery. ' +
-      'I cannot confirm that he has viewed it.'
-    );
-  }
-  return (
-    'Your request has been recorded for Ahmed. ' +
-    'I cannot confirm that a WhatsApp alert was delivered or viewed.'
-  );
+      'I cannot confirm that he has viewed it.',
+    roman_ur:
+      'Aapki request Ahmed ke liye record ho gayi hai, lekin WhatsApp alert abhi deliver hona baqi hai. ' +
+      'Main confirm nahi kar sakta ke unhon ne isay dekh liya hai.',
+  },
+  none: {
+    en:
+      'Your request has been recorded for Ahmed. ' +
+      'I cannot confirm that a WhatsApp alert was delivered or viewed.',
+    roman_ur:
+      'Aapki request Ahmed ke liye record ho gayi hai. ' +
+      'Main confirm nahi kar sakta ke WhatsApp alert deliver hua ya dekha gaya.',
+  },
+};
+
+/**
+ * The exact handoff status for the current-turn facts, in the customer's
+ * language ('mixed' = English then Roman Urdu; English is the default so
+ * existing callers keep the exact old text).
+ */
+export function buildHandoffStatusMessage(
+  facts: HandoffFacts,
+  language: CustomerLanguage = 'en',
+): string | null {
+  if (!facts.recorded) return null;
+  return localizedText(HANDOFF_STATUS_TEXTS[facts.alertStatus], language);
 }
 
 /**
@@ -80,7 +94,7 @@ export function checkHandoffClaimReply(
   authorizedBody?: string,
 ): { ok: true } | { ok: false; error: string } {
   if (authorizedBody !== undefined && body === authorizedBody) return { ok: true };
-  if (SERVER_STATUS_MESSAGES.has(body.trim())) return { ok: true };
+  if (isServerStatusMessage(body)) return { ok: true };
   if (MEDIA_TRANSFER_CLAIM.test(body)) {
     return {
       ok: false,
@@ -119,7 +133,7 @@ export function createSendHandoffStatusTool(
     input_schema: { type: 'object', properties: {} },
     execute: async (_input, ctx) => {
       const facts = getFacts();
-      const body = buildHandoffStatusMessage(facts);
+      const body = buildHandoffStatusMessage(facts, detectCustomerLanguage(ctx.inboundText));
       if (!body) {
         return { ok: false, error: 'No owner handoff was recorded in this turn. Call notify_owner first.' };
       }

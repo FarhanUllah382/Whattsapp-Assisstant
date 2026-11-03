@@ -54,7 +54,8 @@ export type OwnerAlertKind =
   | 'unlogged_order'
   | 'unlogged_payment'
   | 'payment_claim'
-  | 'refund_request';
+  | 'refund_request'
+  | 'whatsapp_outage';
 
 interface OwnerAlertRow {
   id: number;
@@ -80,8 +81,42 @@ export interface DeliverOwnerAlertResult {
   ok: boolean;
   status: 'sent' | 'already_sent' | 'pending';
   alertId: number;
-  reason?: 'rate_limited' | 'delivery_failed';
+  reason?: 'rate_limited' | 'delivery_failed' | 'retry_backoff';
   error?: string;
+}
+
+/**
+ * Automatic retry policy for pending owner alerts (FIX6). The server's retry
+ * loop ticks every 60 s; without a policy each tick re-sent every pending
+ * alert, so a WhatsApp outage drove ledger rows to 16–17 attempts. Now each
+ * alert waits 1, 2, 4, 8 … (max 60) minutes between automatic retries and
+ * stops after `maxAutomaticRetries`; it stays pending (never deleted) and is
+ * delivered by the next occurrence of the same kind or after a restart.
+ * State is in memory on purpose: a restart grants a fresh, still-bounded
+ * series, and no schema change is needed.
+ */
+export const OWNER_ALERT_RETRY_POLICY = {
+  baseDelayMinutes: 1,
+  maxDelayMinutes: 60,
+  maxAutomaticRetries: 6,
+} as const;
+
+const alertRetryState = new Map<number, { failures: number; nextAttemptAt: number }>();
+
+function recordAlertRetryFailure(alertId: number, now: Date): void {
+  const failures = (alertRetryState.get(alertId)?.failures ?? 0) + 1;
+  const delayMinutes = Math.min(
+    OWNER_ALERT_RETRY_POLICY.baseDelayMinutes * 2 ** (failures - 1),
+    OWNER_ALERT_RETRY_POLICY.maxDelayMinutes,
+  );
+  alertRetryState.set(alertId, { failures, nextAttemptAt: now.getTime() + delayMinutes * 60_000 });
+}
+
+function alertRetryBlocked(alertId: number, now: Date): 'backoff' | 'capped' | undefined {
+  const state = alertRetryState.get(alertId);
+  if (!state) return undefined;
+  if (state.failures >= OWNER_ALERT_RETRY_POLICY.maxAutomaticRetries) return 'capped';
+  return now.getTime() < state.nextAttemptAt ? 'backoff' : undefined;
 }
 
 let alertDeliveryTail: Promise<unknown> = Promise.resolve();
@@ -137,6 +172,9 @@ function queueAlert(input: Omit<DeliverOwnerAlertInput, 'send'>): OwnerAlertRow 
 }
 
 function formatAlert(alert: OwnerAlertRow): string {
+  if (alert.kind === 'whatsapp_outage') {
+    return ['Ahmed — assistant alert', alert.latest_reason].join('\n');
+  }
   const count = alert.occurrence_count > 1 ? `\nOccurrences grouped: ${alert.occurrence_count}` : '';
   return [
     'Ahmed — assistant alert',
@@ -187,6 +225,7 @@ async function sendPendingAlert(
        set status = 'sent', sent_at = ?, updated_at = ?
        where id = ? and status = 'pending'`,
     ).run(sentAt, sentAt, alert.id);
+    alertRetryState.delete(alert.id);
     log.info('owner alert delivered', { alertId: alert.id, kind: alert.kind });
     return { ok: true, status: 'sent', alertId: alert.id };
   } catch (err) {
@@ -243,7 +282,32 @@ export async function retryPendingOwnerAlerts(
       .all() as OwnerAlertRow[];
     const results: DeliverOwnerAlertResult[] = [];
     for (const alert of pending) {
-      results.push(await sendPendingAlert(alert, send, floodConfig, now));
+      const blocked = alertRetryBlocked(alert.id, now);
+      if (blocked) {
+        if (blocked === 'capped' && alertRetryState.get(alert.id)?.failures === OWNER_ALERT_RETRY_POLICY.maxAutomaticRetries) {
+          // Log the cap once, then mark it so the log does not repeat.
+          alertRetryState.set(alert.id, {
+            failures: OWNER_ALERT_RETRY_POLICY.maxAutomaticRetries + 1,
+            nextAttemptAt: Number.POSITIVE_INFINITY,
+          });
+          log.error('owner alert automatic retries exhausted; kept pending', {
+            alertId: alert.id,
+            kind: alert.kind,
+            maxAutomaticRetries: OWNER_ALERT_RETRY_POLICY.maxAutomaticRetries,
+          });
+        }
+        results.push({
+          ok: false,
+          status: 'pending',
+          alertId: alert.id,
+          reason: 'retry_backoff',
+          error: 'Owner alert retry is backing off after earlier delivery failures.',
+        });
+        continue;
+      }
+      const result = await sendPendingAlert(alert, send, floodConfig, now);
+      if (!result.ok && result.reason === 'delivery_failed') recordAlertRetryFailure(alert.id, now);
+      results.push(result);
     }
     return results;
   });

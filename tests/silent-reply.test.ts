@@ -49,8 +49,9 @@ test('a real exact stock count is still blocked', () => {
 });
 
 test('fallback uses the exact server status text after a claim or refund action', () => {
-  assert.equal(chooseFallbackReply({ paymentClaimPending: true }), PAYMENT_CLAIM_PENDING_MESSAGE);
-  assert.equal(chooseFallbackReply({ refundStatus: 'requested' }), REFUND_REQUEST_PENDING_MESSAGE);
+  const english = 'I want to know about my payment and refund please';
+  assert.equal(chooseFallbackReply({ paymentClaimPending: true }, english), PAYMENT_CLAIM_PENDING_MESSAGE);
+  assert.equal(chooseFallbackReply({ refundStatus: 'requested' }, english), REFUND_REQUEST_PENDING_MESSAGE);
   const generic = chooseFallbackReply({});
   assert.match(generic, /Maazrat/);
   assert.doesNotMatch(generic, /\d/);
@@ -92,10 +93,11 @@ test('a turn whose every reply is blocked still reaches the customer, every time
     PACING_DEFAULTS.windowEndHour = originalWindow.end;
   }
 
-  // One reply per turn, even though the same fallback text repeats.
+  // One reply per turn, even though the same fallback text repeats. The
+  // customer wrote English, so the fallback is English (FIX4 language rule).
   assert.equal(sends.length, 3, `expected 3 replies, got ${sends.length}`);
   for (const body of sends) {
-    assert.match(body, /Maazrat/);
+    assert.match(body, /Sorry, I couldn't answer that properly/);
     assert.doesNotMatch(body, /7 pieces/);
   }
   const customer = db.prepare('select id from customers where phone = ?').get(phone) as { id: number };

@@ -48,6 +48,11 @@ Re-verified on 2026-11-01 (Node 22 container, fresh `npm ci`):
 tests / 31 security areas, production DB fingerprint unchanged),
 `npm run test:e2e` ✅.
 
+**2026-11-02:** live-test fixes 1–6 plus observability (Prometheus/Grafana,
+per-message traces) are built and locally verified — see the tracker §0
+entry dated 2026-11-02 and `docs/OBSERVABILITY.md`. Live verification of
+fixes 2–6 and the dashboard is the next step, one fix at a time.
+
 **Next concrete action (from the tracker):** restore the real signed WAHA
 path and execute HARD-01's live acceptance checklist exactly as written —
 before adding new behaviour.

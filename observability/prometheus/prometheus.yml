@@ -1,0 +1,21 @@
+# Prometheus config for Ahmed's WhatsApp Assistant. See docs/OBSERVABILITY.md.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  - job_name: ahmed-assistant
+    metrics_path: /metrics
+    scheme: http
+    scrape_interval: 15s
+    scrape_timeout: 10s
+    # The app runs on the host (npm run dev / npm start, port 3000).
+    static_configs:
+      - targets: ["host.docker.internal:3000"]
+    # Bearer OPERATIONS_API_KEY, read from the gitignored secret file.
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/secrets/ops_key

@@ -1,5 +1,6 @@
 import { db } from './db';
 import { ChannelSendError } from './channel/types';
+import { traceSendFinished, traceSendStarted } from './obs/trace';
 import type { ToolDef } from './types';
 
 export type OutboundRecipientKind = 'customer' | 'owner';
@@ -45,12 +46,33 @@ export function beginOutboundAttempt(input: {
   const now = input.now ?? new Date();
   return db.transaction(() => {
     const sameEvent = db.prepare(`
-      select id, status, created_at, updated_at
+      select id, status, created_at, updated_at, last_error_code
         from send_ledger
        where recipient_kind = ? and event_key = ?
        limit 1
-    `).get(input.recipientKind, input.eventKey) as StoredAttempt | undefined;
+    `).get(input.recipientKind, input.eventKey) as
+      | (StoredAttempt & { last_error_code: string | null })
+      | undefined;
     if (sameEvent && sameEvent.id !== input.id) {
+      if (sameEvent.status === 'failed' && sameEvent.last_error_code === 'channel_unavailable') {
+        // The earlier attempt never reached WhatsApp (session down / gateway
+        // refused), so it was not the event's visible reply. A rerun after
+        // the session returns may phrase the reply differently; take over the
+        // event's single ledger row (unique per recipient+event) so the
+        // one-reply-per-event rule still holds for every later attempt.
+        db.prepare(`
+          update send_ledger
+             set id = ?, body_hash = ?, status = 'pending', attempt_count = attempt_count + 1,
+                 provider_message_id = null, last_error_code = null, updated_at = ?
+           where id = ? and status = 'failed' and last_error_code = 'channel_unavailable'
+        `).run(
+          input.id,
+          input.bodyHash,
+          now.toISOString().slice(0, 23).replace('T', ' '),
+          sameEvent.id,
+        );
+        return 'send' as const;
+      }
       // One inbound event may produce at most one visible reply. A model that
       // rephrases after an uncertain outcome cannot escape idempotency by
       // changing the body hash.
@@ -73,6 +95,7 @@ export function beginOutboundAttempt(input: {
         now.toISOString().slice(0, 23).replace('T', ' '),
         now.toISOString().slice(0, 23).replace('T', ' '),
       );
+      traceSendStarted(input.id, input.recipientKind);
       return 'send' as const;
     }
     if (existing.status === 'pending' || existing.status === 'uncertain') {
@@ -97,6 +120,7 @@ export function beginOutboundAttempt(input: {
              provider_message_id = null, last_error_code = null, updated_at = ?
        where id = ?
     `).run(now.toISOString().slice(0, 23).replace('T', ' '), input.id);
+    traceSendStarted(input.id, input.recipientKind);
     return 'send' as const;
   }).immediate();
 }
@@ -108,16 +132,30 @@ export function markOutboundSent(id: string, providerMessageId?: string): void {
            updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
      where id = ?
   `).run(providerMessageId ?? null, id);
+  traceSendFinished(id, 'sent');
 }
 
+/**
+ * Records a failed send. Only a definitive ChannelSendError is 'failed'
+ * (retryable); everything else — timeouts, resets, unknown errors — stays
+ * 'uncertain' and is never resent automatically. A channel_unavailable
+ * failure (WAHA 422 session not working / gateway refused) is recorded with
+ * that code so it can be retried once the session is back.
+ */
 export function markOutboundFailure(id: string, error: unknown): OutboundAttemptStatus {
   const definitive = error instanceof ChannelSendError && !error.deliveryUncertain;
   const status: OutboundAttemptStatus = definitive ? 'failed' : 'uncertain';
+  const code = !definitive
+    ? 'delivery_outcome_unknown'
+    : (error as ChannelSendError).code === 'channel_unavailable'
+      ? 'channel_unavailable'
+      : 'provider_rejected';
   db.prepare(`
     update send_ledger
        set status = ?, last_error_code = ?, updated_at = strftime('%Y-%m-%d %H:%M:%f', 'now')
      where id = ? and status = 'pending'
-  `).run(status, definitive ? 'provider_rejected' : 'delivery_outcome_unknown', id);
+  `).run(status, code, id);
+  traceSendFinished(id, status);
   return status;
 }
 

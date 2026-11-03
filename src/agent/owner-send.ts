@@ -9,6 +9,7 @@ import { db } from '../db';
 import { PACING_DEFAULTS } from '../guardrails/pacing/defaults';
 import { decideSharedPacing } from '../guardrails/pacing/configured';
 import { createLogger } from '../obs/logger';
+import { guardBlocked } from './send-guards';
 import { AHMED_OWNER_PHONE } from '../owner';
 import {
   beginOutboundAttempt,
@@ -64,7 +65,7 @@ export function makeOwnerSendTool(
         return { ok: false, error: 'Message text must be a non-empty string.' };
       }
       const disclosureCheck = checkInternalDisclosureReply(body);
-      if (!disclosureCheck.ok) return disclosureCheck;
+      if (!disclosureCheck.ok) return guardBlocked('internal_disclosure', disclosureCheck, body);
       const sendId = createHash('sha256').update(`owner:${turnKey}:${body}`).digest('hex');
       const bodyHash = createHash('sha256').update(body).digest('hex');
       const eventKeyHash = createHash('sha256').update(`owner:${turnKey}`).digest('hex');
@@ -83,7 +84,7 @@ export function makeOwnerSendTool(
             getPacingState(PACING_DEFAULTS.timezone, now),
           );
           if (!pacingDecision.allow) {
-            return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
+            return guardBlocked('pacing', { ok: false, error: `Not sending right now — ${pacingDecision.reason}` }, body);
           }
           if (pacingDecision.waitMs > 0) {
             await sleep(pacingDecision.waitMs);

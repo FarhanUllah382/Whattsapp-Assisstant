@@ -1,0 +1,11 @@
+apiVersion: 1
+providers:
+  - name: ahmed-assistant
+    orgId: 1
+    folder: Ahmed Assistant
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/dashboards

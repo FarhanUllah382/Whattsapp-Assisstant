@@ -3,12 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { db } from './db';
 import { resolveOwnedOrderReference } from './order-access';
 import { sanitizeMemoryText } from './privacy';
-import {
-  REFUND_APPROVED_PENDING_EXECUTION_MESSAGE,
-  REFUND_REJECTED_MESSAGE,
-  REFUND_REQUEST_PENDING_MESSAGE,
-  refundStatusInstruction,
-} from './sensitive-action-wording';
+import { isServerStatusMessage, refundStatusInstruction } from './sensitive-action-wording';
 import type { ToolContext, ToolDef } from './types';
 
 const REFUND_REFERENCE_PATTERN = /^RFD-[0-9A-F]{20}$/;
@@ -313,13 +308,8 @@ const REFUND_COMPLETION_CLAIM =
   /\brefund\b.{0,40}\b(?:processed|completed|sent|issued|transferred|credited|done|ho\s*gaya|kar\s*diya)\b/i;
 
 export function checkRefundCompletionClaim(body: string): { ok: true } | { ok: false; error: string } {
-  if (
-    body === REFUND_REQUEST_PENDING_MESSAGE ||
-    body === REFUND_APPROVED_PENDING_EXECUTION_MESSAGE ||
-    body === REFUND_REJECTED_MESSAGE
-  ) {
-    return { ok: true };
-  }
+  // Exact server status texts in every supported language (incl. bilingual).
+  if (isServerStatusMessage(body)) return { ok: true };
   if (!REFUND_COMPLETION_CLAIM.test(body)) return { ok: true };
   return {
     ok: false,

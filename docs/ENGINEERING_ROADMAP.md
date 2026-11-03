@@ -37,6 +37,47 @@ result of this exception, not a sign something was skipped by mistake.
 
 ## 0. Where things actually stand right now
 
+- **Live-test fix round + observability (2026-11-02) — `BUILT + LOCALLY
+  VERIFIED`; LIVE VERIFICATION PENDING for every item below.** Built from
+  the 2026-11-01/02 live WhatsApp tests, in parallel workstreams
+  (`docs/MASTER_PROMPT_PARALLEL.md`), merged with the full suite green after
+  each merge, then reviewed by an independent verifier whose 7 confirmed
+  findings were fixed test-first (`tests/verifier-fixes.test.ts`).
+  - Fix 1 (no silent no-replies; inventory false positives) and the
+    payment-status/handoff-check conflict: live re-test 2026-11-02 —
+    11/11 messages answered, no counts leaked → **LIVE VERIFIED**.
+  - Fix 2 (`tests/order-drafts.test.ts`): drafts expire after
+    `ORDER_DRAFT_TTL_HOURS` (computed, no schema change); summary check only
+    matches summary-shaped text; new `show_pending_order`; the exact server
+    summary is no longer vetoed by the "booked" claim check (root cause of
+    the 2026-11-01 order loop).
+  - Fix 3 (`tests/payment-claims.test.ts`): no claims on undelivered COD
+    orders; duplicate claims (same order/amount/method) return the existing
+    claim; unconfigured payment methods hidden from the model and vetoed in
+    replies (`unconfigured_payment_method`).
+  - Fix 4 (`tests/wording-language.test.ts`): Roman Urdu human-promise
+    patterns; fixed server texts in the customer's language; outgoing
+    `\n`/emoji/zero-width normalisation before all guards; plain discount
+    questions get the policy answer before any handoff.
+  - Fix 5 (`tests/turn-cost.test.ts`, `npm run cost:measure`): stubbed
+    measurement 3–7 → 1–2 model calls and ~13–35k → ~4–9k estimated prompt
+    tokens for ordinary messages (history 12, filtered tool schemas, CLOSE
+    gated by `CHECKPOINT_EVERY_N_TURNS`). Live numbers to be read from the
+    dashboard.
+  - Fix 6 (`tests/whatsapp-down.test.ts`): jobs are held (no AI, no
+    attempt used) while the WAHA session is not `WORKING`; only WAHA's
+    "Session status is not as expected" 422 is `channel_unavailable`
+    (bounded retries); timeouts stay `uncertain`; owner-alert retries
+    capped with backoff; recovery alert to Ahmed.
+  - Observability (`tests/observability.test.ts`, `docs/OBSERVABILITY.md`):
+    `turn_traces` / `turn_trace_events` (no PII), `GET /metrics`
+    (Prometheus, bearer `OPERATIONS_API_KEY`), `/operations/traces`,
+    `observability/` Prometheus + Grafana stack (`npm run obs:up`) with the
+    "Ahmed Assistant — Live" dashboard and alert rules.
+  - Still open from the live tests: the COD shipping decision (see
+    CLAUDE.md §10); restore `PACING_WINDOW_START_HOUR=7` /
+    `PACING_WINDOW_END_HOUR=22` before real customers.
+
 - **Current implementation status (re-verified 2026-09-15):** Version 1 is
   complete with its carried-forward gaps still described precisely in its
   final-status section; Version 2 is complete after a real WhatsApp pass

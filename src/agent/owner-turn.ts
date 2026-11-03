@@ -33,6 +33,7 @@ import { createHash } from 'node:crypto';
 import { db } from '../db';
 import { callModel, type ModelMessage } from '../llm';
 import { createLogger } from '../obs/logger';
+import { traceCustomer, traceToolCall, traceTurnOutcome, withTurnTrace } from '../obs/trace';
 import { outboundDeliveryIssuesTool } from '../outbound-delivery';
 import { handleOwnerFulfilmentCommand } from '../fulfilment-commands'; // FULFILMENT-COMMANDS
 import { handleOwnerPaymentCommand } from '../payment-resolution';
@@ -57,7 +58,19 @@ export async function runOwnerTurn(
   modelCaller: typeof callModel = callModel,
   inboundEventKey?: string,
 ): Promise<void> {
+  return withTurnTrace({ turnKind: 'owner' }, () =>
+    runOwnerTurnTraced(phone, incomingText, sendToOwner, modelCaller, inboundEventKey));
+}
+
+async function runOwnerTurnTraced(
+  phone: string,
+  incomingText: string,
+  sendToOwner: SendTextOperation,
+  modelCaller: typeof callModel,
+  inboundEventKey: string | undefined,
+): Promise<void> {
   const owner = getOrCreateCustomer(phone);
+  traceCustomer(owner.id);
   const recentOwnerMessages = (db.prepare(`
     select direction, body, created_at
       from messages
@@ -76,6 +89,7 @@ export async function runOwnerTurn(
   if (fulfilmentCommand) {
     const sent = await makeOwnerSendTool(sendToOwner, ownerTurnKey, Boolean(inboundEventKey))
       .execute({ body: fulfilmentCommand.response }, { customerId: owner.id, idempotencyKey: inboundEventKey }) as { ok?: boolean; error?: string };
+    traceTurnOutcome(sent.ok ? 'replied' : 'no_reply');
     if (!sent.ok) log.error('deterministic owner fulfilment response failed to send', { customerId: owner.id, mutation: fulfilmentCommand.mutation, error: sent.error });
     return;
   }
@@ -94,6 +108,7 @@ export async function runOwnerTurn(
       { body: paymentCommand.response ?? 'Nothing was changed.' },
       { customerId: owner.id, idempotencyKey: inboundEventKey },
     ) as { ok?: boolean; error?: string };
+    traceTurnOutcome(result.ok ? 'replied' : 'no_reply');
     if (!result.ok) {
       log.error('deterministic owner payment response failed to send', {
         customerId: owner.id,
@@ -136,7 +151,7 @@ export async function runOwnerTurn(
       if (call.name === 'send_message') sendMessageWasCalled = true;
       const tool = tools.find((t) => t.name === call.name);
       const output = tool
-        ? await tool.execute(call.input, { customerId: owner.id })
+        ? await traceToolCall(call.name, () => tool.execute(call.input, { customerId: owner.id }))
         : { error: `unknown tool ${call.name}` };
       if (call.name === 'send_message' && (output as { ok?: boolean })?.ok) {
         sendMessageSucceeded = true;
@@ -163,6 +178,7 @@ export async function runOwnerTurn(
     const body = lastAssistantText || "Sorry, I couldn't prepare that report right now. Please try again.";
     const sendMessageTool = tools.find((t) => t.name === 'send_message')!;
     const fallbackResult = await sendMessageTool.execute({ body }, { customerId: owner.id });
+    sendMessageSucceeded = Boolean((fallbackResult as { ok?: boolean })?.ok);
     if (!(fallbackResult as { ok?: boolean })?.ok) {
       log.error('owner fallback reply failed to send', {
         phone,
@@ -172,5 +188,6 @@ export async function runOwnerTurn(
     }
   }
 
+  traceTurnOutcome(sendMessageSucceeded ? 'replied' : 'no_reply');
   log.info('owner turn completed', { phone });
 }

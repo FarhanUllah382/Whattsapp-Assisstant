@@ -13,6 +13,12 @@ import {
 import type { Customer } from '../types';
 
 export const MAX_TOOL_STEPS = 6; // hard ceiling so a confused AI can't loop forever
+// FIX5 (cost reduction, 2026-11-02): raw messages loaded into a customer
+// turn's context (the checkpoint summary carries anything older), and how
+// many failed customer sends a turn tolerates before it stops re-calling the
+// model and uses the fixed fallback (first try + two re-calls).
+export const HISTORY_MESSAGE_LIMIT = 12;
+export const MAX_FAILED_SEND_ATTEMPTS = 3;
 
 // How long a "sent" ledger entry blocks a repeat send. Long enough to cover
 // a crash-and-retry (a provider redelivering a webhook happens in seconds),

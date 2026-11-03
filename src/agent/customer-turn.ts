@@ -6,18 +6,21 @@ import { deliverOwnerAlert, type OwnerAlertKind } from '../alerts';
 import { createSendHandoffStatusTool, type HandoffFacts } from '../handoff-claims';
 import { callModel, type ModelMessage } from '../llm';
 import { createLogger } from '../obs/logger';
+import { traceCustomer, traceFallback, traceToolCall, traceTurnOutcome, withTurnTrace } from '../obs/trace';
 import { createClaimPaymentTool } from '../payments';
 import { createSendPaymentInstructionsTool } from '../payment-instructions';
-import { maskPhoneForDisplay, sanitizeMemoryText } from '../privacy';
+import { sanitizeMemoryText } from '../privacy';
 import { createRequestRefundTool } from '../refunds';
+import { detectCustomerLanguage } from '../customer-language';
 import {
   captureSensitiveActionFacts,
-  PAYMENT_CLAIM_PENDING_MESSAGE,
-  refundCustomerStatusMessage,
+  fixedFallbackReply,
   type SensitiveActionFacts,
 } from '../sensitive-action-wording';
 import { serializeUntrustedData, wrapToolResult } from '../untrusted-data';
 import { baseTools, createNotifyOwnerTool, getPendingOrderDraft, recordHandoff } from '../tools';
+import { orderDraftExpiresAt } from '../tools/order-drafts';
+import { createShowPendingOrderTool } from '../tools/orders';
 import { db } from '../db';
 import type { ToolContext, ToolDef } from '../types';
 import { makeShowProductImagesTool } from './customer-sends';
@@ -26,6 +29,8 @@ import { SYSTEM_PROMPT } from './prompts';
 import { makeSendMessageTool } from './send-guards';
 import {
   getOrCreateCustomer,
+  HISTORY_MESSAGE_LIMIT,
+  MAX_FAILED_SEND_ATTEMPTS,
   MAX_TOOL_STEPS,
   recordInboundMessageOnce,
   type SendImageOperation,
@@ -35,25 +40,17 @@ import { closeCustomerTurn } from './turn-close';
 
 const log = createLogger();
 
-// Guaranteed last-resort reply — see the "silent no-reply" note on the LOOP
-// below. Deliberately generic and short enough that it can't itself trip the
-// discount or human-promise guardrails.
-// Bilingual because most customers write Roman Urdu. Contains no promise about
-// a person (human-promise / handoff-claim guards) and no number.
-const FALLBACK_REPLY_TEXT =
-  "Sorry, I couldn't answer that properly just now. Please send your question again in a slightly different way.\n\n" +
-  'Maazrat, abhi is ka sahi jawab nahi de saka. Meherbani karke apna sawal thore mukhtalif alfaaz mein dobara bhej dein.';
-
 /**
- * Picks the last-resort reply. When this turn already recorded a payment claim
- * or a refund action, the wording backstop accepts only the exact server
- * status text, so the fallback must be that text — otherwise the customer gets
- * nothing at all (live test 2026-11-01, payment claim #7).
+ * Picks the last-resort reply — see the "silent no-reply" note on the LOOP
+ * below. The fixed texts live in sensitive-action-wording.ts (no promise about
+ * a person, no number). When this turn already recorded a payment claim or a
+ * refund action, the wording backstop accepts only the exact server status
+ * text, so the fallback must be that text — otherwise the customer gets
+ * nothing at all (live test 2026-11-01, payment claim #7). The language
+ * follows the customer's latest message; bilingual when unsure.
  */
-export function chooseFallbackReply(facts: Readonly<SensitiveActionFacts>): string {
-  if (facts.paymentClaimPending) return PAYMENT_CLAIM_PENDING_MESSAGE;
-  if (facts.refundStatus) return refundCustomerStatusMessage(facts.refundStatus);
-  return FALLBACK_REPLY_TEXT;
+export function chooseFallbackReply(facts: Readonly<SensitiveActionFacts>, inboundText?: string): string {
+  return fixedFallbackReply(facts, detectCustomerLanguage(inboundText));
 }
 
 /**
@@ -70,16 +67,33 @@ export async function runTurn(
   sendToOwner?: SendTextOperation,
   sendImageToCustomer?: SendImageOperation,
 ): Promise<void> {
+  return withTurnTrace({ turnKind: 'customer' }, () =>
+    runCustomerTurn(phone, incomingText, sendToCustomer, inboundEventKey, sendToOwner, sendImageToCustomer));
+}
+
+async function runCustomerTurn(
+  phone: string,
+  incomingText: string,
+  sendToCustomer: SendTextOperation,
+  inboundEventKey?: string,
+  sendToOwner?: SendTextOperation,
+  sendImageToCustomer?: SendImageOperation,
+): Promise<void> {
   const customer = getOrCreateCustomer(phone);
+  traceCustomer(customer.id);
 
   // ── 1. OPEN — save the inbound message, load context ──────────────────
   recordInboundMessageOnce(customer.id, incomingText, inboundEventKey);
 
+  // FIX5 (cost): the last HISTORY_MESSAGE_LIMIT raw messages plus the
+  // checkpoint summary, instead of 20 raw messages. The limit stays larger
+  // than the turns a skipped CLOSE can leave out of the summary (see
+  // turn-close.ts), so nothing falls out of both.
   const recentMessages = db
     .prepare(
-      'select direction, body from messages where customer_id = ? order by id desc limit 20',
+      'select direction, body from messages where customer_id = ? order by id desc limit ?',
     )
-    .all(customer.id) as { direction: string; body: string }[];
+    .all(customer.id, HISTORY_MESSAGE_LIMIT) as { direction: string; body: string }[];
   recentMessages.reverse(); // oldest first, for a natural transcript
 
   const checkpoint = db
@@ -104,17 +118,21 @@ export async function runTurn(
       pendingItems = '[invalid stored order items]';
     }
   }
+  // No PII here (FIX2): delivery contact, address and city stay in the draft
+  // row and are only ever shown to the customer via the exact server summary
+  // (show_pending_order), never handed to the model.
   const pendingDraftData = pendingDraft
     ? {
         status: 'awaiting_explicit_confirmation',
         booked: false,
         draft_id: pendingDraft.id,
+        item_count: Array.isArray(pendingItems) ? pendingItems.length : 0,
         items: pendingItems,
         server_total_rupees: pendingDraft.total_minor / 100,
         delivery_charge_rupees: 0,
-        contact_phone_masked: maskPhoneForDisplay(pendingDraft.contact_phone),
-        city: pendingDraft.city,
         payment_method: pendingDraft.payment_method,
+        expires_at: orderDraftExpiresAt(pendingDraft),
+        resend_with: 'show_pending_order',
       }
     : { status: 'none' };
 
@@ -133,7 +151,8 @@ export async function runTurn(
     }),
     serializeUntrustedData('prepared_order', pendingDraftData),
     pendingDraft
-      ? 'Trusted application rule: confirm_order may be called only if the current customer_request explicitly confirms the prepared summary.'
+      ? 'Trusted application rule: confirm_order may be called only if the current customer_request explicitly confirms the prepared summary. ' +
+        'To show the pending summary again, call show_pending_order; never write an order summary in send_message.'
       : 'Trusted application fact: no order draft is awaiting confirmation.',
     serializeUntrustedData('recent_messages', contextMessages),
     serializeUntrustedData('customer_request', { text: incomingText }, 'customer_request'),
@@ -206,7 +225,34 @@ export async function runTurn(
         ctx,
       ),
   );
+  // Re-sends the stored server summary through the authorized order-summary
+  // path. Same send key as prepare_order's automatic summary, so preparing and
+  // showing in one turn never sends twice. Spinning is skipped: the body is
+  // this customer's own exact server text, re-sent only on request.
+  const showPendingOrderTool = createShowPendingOrderTool(async (body, draftId, ctx) =>
+    await makeSendMessageTool(sendToCustomer, `${turnKey}:order-summary:${draftId}`, {
+      authorizedOrderSummaryBody: body,
+      sensitiveActionFacts,
+      permanentIdempotency: Boolean(inboundEventKey),
+      skipSpinning: true,
+    }).execute({ body }, ctx) as { ok?: boolean; error?: string; status?: string },
+  );
   const authorizedMediaProductIds = new Set<number>();
+  // FIX5 (cost): tool schemas are re-sent on every model call, so tools that
+  // can only fail in this customer's current state are left out. Each one
+  // would return teaching text and change nothing: confirm_order and
+  // show_pending_order need a pending draft, get_customer_note needs a note,
+  // update_order_status needs an existing order. They are only hidden from
+  // the schema list: a call to one still executes the real tool (and gets its
+  // own teaching text), so behaviour and every guard are unchanged.
+  const hasOrders = Boolean(
+    db.prepare('select 1 from orders where customer_id = ? limit 1').get(customer.id),
+  );
+  const unavailableTools = new Set<string>([
+    ...(pendingDraft ? [] : ['confirm_order', 'show_pending_order']),
+    ...(notes.length > 0 ? [] : ['get_customer_note']),
+    ...(hasOrders ? [] : ['update_order_status']),
+  ]);
   const tools = [
     ...baseTools.filter(
       (tool) =>
@@ -219,6 +265,7 @@ export async function runTurn(
     refundRequestTool,
     paymentInstructionsTool,
     handoffStatusTool,
+    showPendingOrderTool,
     makeShowProductImagesTool(
       sendImageToCustomer,
       turnKey,
@@ -230,6 +277,7 @@ export async function runTurn(
       permanentIdempotency: Boolean(inboundEventKey),
     }),
   ];
+  const advertisedTools = tools.filter((tool) => !unavailableTools.has(tool.name));
   const toolContext: ToolContext = {
     customerId: customer.id,
     idempotencyKey: inboundEventKey,
@@ -262,9 +310,22 @@ export async function runTurn(
   let mediaReplyCompleted = false;
   let orderSummaryReplyAttempted = false;
   let lastSendMessageError: string | undefined;
+  // FIX5 (cost): once a customer-visible reply was delivered this step, the
+  // turn is over — one inbound event may produce only one visible reply
+  // (send_ledger), so a later send would be dropped as already_sent anyway.
+  // Tool calls made in the SAME model response as the reply still all run
+  // (e.g. [send_message, notify_owner]) before the loop stops. A holding-only
+  // message ("Ek minute, main dekhta hoon") is vetoed by the
+  // `holding_message` send guard instead, so the model retries in this turn
+  // with its tools first (fix round 2, 2026-11-02).
+  // FIX5 (cost): after MAX_FAILED_SEND_ATTEMPTS vetoed/failed sends (the
+  // first try plus two re-calls with the guard's teaching text), go straight
+  // to the fixed fallback instead of re-calling the model. The guards that
+  // vetoed are unchanged.
+  let failedSendAttempts = 0;
 
   for (let step = 0; step < MAX_TOOL_STEPS; step++) {
-    const result = await callModel(SYSTEM_PROMPT, messages, tools);
+    const result = await callModel(SYSTEM_PROMPT, messages, advertisedTools);
     messages.push({ role: 'assistant', content: result.content });
 
     const textBlocks = result.content.filter((b: any) => b.type === 'text');
@@ -276,11 +337,12 @@ export async function runTurn(
     if (toolCalls.length === 0) break; // model produced only text (ignored) — nothing left to do
 
     const toolResults = [];
+    let replyDeliveredThisStep = false;
     for (const call of toolCalls) {
       toolsCalledThisTurn.add(call.name);
       const tool = tools.find((t) => t.name === call.name);
       const output = tool
-        ? await tool.execute(call.input, toolContext)
+        ? await traceToolCall(call.name, () => tool.execute(call.input, toolContext))
         : { error: `unknown tool ${call.name}` };
       if (call.name === 'prepare_order') {
         const prepared = output as {
@@ -332,14 +394,20 @@ export async function runTurn(
         call.name === 'send_message' ||
         call.name === 'send_payment_instructions' ||
         call.name === 'send_handoff_status' ||
-        call.name === 'show_product_images'
+        call.name === 'show_product_images' ||
+        call.name === 'show_pending_order'
       ) {
         const sendOutput = output as { ok?: boolean; error?: string };
         if (sendOutput?.ok) {
           sendMessageSucceeded = true;
+          replyDeliveredThisStep = true;
           if (call.name === 'show_product_images') mediaReplyCompleted = true;
-        } else if (sendOutput?.error) {
-          lastSendMessageError = sendOutput.error; // keep the LAST attempt's reason
+          // The exact server summary is the whole reply: stop the loop so the
+          // model cannot follow it with its own rewritten copy (live 2026-11-01).
+          if (call.name === 'show_pending_order') orderSummaryReplyAttempted = true;
+        } else {
+          failedSendAttempts += 1;
+          if (sendOutput?.error) lastSendMessageError = sendOutput.error; // keep the LAST attempt's reason
         }
       }
       toolResults.push({
@@ -351,6 +419,8 @@ export async function runTurn(
     messages.push({ role: 'user', content: toolResults });
 
     if (mediaReplyCompleted || orderSummaryReplyAttempted) break;
+    if (replyDeliveredThisStep) break;
+    if (failedSendAttempts >= MAX_FAILED_SEND_ATTEMPTS) break;
     if (result.stop_reason !== 'tool_use') break;
   }
 
@@ -364,12 +434,14 @@ export async function runTurn(
   // the call, so both shapes of "customer gets nothing" are caught. This is
   // permanent observability plus a guaranteed fallback, not a one-off debug
   // print — it fires every time either condition occurs.
+  if (sendMessageSucceeded) traceTurnOutcome('replied');
   if (!sendMessageSucceeded) {
     const wasCalled =
       toolsCalledThisTurn.has('send_message') ||
       toolsCalledThisTurn.has('send_payment_instructions') ||
       toolsCalledThisTurn.has('send_handoff_status') ||
       toolsCalledThisTurn.has('send_order_summary') ||
+      toolsCalledThisTurn.has('show_pending_order') ||
       toolsCalledThisTurn.has('show_product_images');
     // Pacing vetoes (outside window / daily cap / warm-up cap) are time- or
     // volume-based, not body-text-based — re-attempting the SAME send a
@@ -384,7 +456,10 @@ export async function runTurn(
     // them, so it's still worth attempting.
     const isPacingVeto = lastSendMessageError?.startsWith('Not sending right now —') ?? false;
     const isOptOutVeto = lastSendMessageError?.startsWith('Customer opted out —') ?? false;
+    traceTurnOutcome('no_reply'); // upgraded to 'fallback' below if the fallback reply is delivered
     if (wasCalled && isOptOutVeto) {
+      // Intentional silence: the customer sent STOP. Not an alertable no_reply.
+      traceTurnOutcome('silenced');
       log.info('customer reply suppressed because consent is opted out', {
         customerId: customer.id,
         toolsCalled: [...toolsCalledThisTurn],
@@ -392,6 +467,10 @@ export async function runTurn(
       return;
     }
     const skipFallbackSend = wasCalled && isPacingVeto;
+    // Pacing-held (outside the send window / daily cap): the reply is NOT
+    // queued or resent later — it is dropped, and only the reply_failure
+    // handoff below tells Ahmed. So it stays `no_reply` (alertable via
+    // TurnWithNoReply); only opt-out is `silenced` (fix round 2).
 
     log.warn('turn ended without a successful send_message', {
       phone,
@@ -413,9 +492,11 @@ export async function runTurn(
         skipSpinning: true,
       });
       const fallbackResult = await fallbackSendTool.execute(
-        { body: chooseFallbackReply(sensitiveActionFacts) },
+        { body: chooseFallbackReply(sensitiveActionFacts, incomingText) },
         toolContext,
       );
+      traceFallback(Boolean((fallbackResult as { ok?: boolean })?.ok));
+      traceTurnOutcome((fallbackResult as { ok?: boolean })?.ok ? 'fallback' : 'no_reply');
       if (!(fallbackResult as { ok?: boolean })?.ok) {
         log.error('fallback reply itself failed to send', {
           phone,
@@ -440,6 +521,7 @@ export async function runTurn(
     checkpoint,
     messages,
     toolsCalledThisTurn,
+    replied: sendMessageSucceeded,
     incomingText,
     inboundEventKey,
     toolContext,

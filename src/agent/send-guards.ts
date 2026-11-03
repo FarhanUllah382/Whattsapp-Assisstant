@@ -16,6 +16,8 @@ import { decideSpinning, hashNormalized, normalizeCopy, type RecentCopy } from '
 import { checkInventoryDisclosureReply } from '../inventory-visibility';
 import { checkSupportUpsellReply } from '../business-grounding';
 import { createLogger } from '../obs/logger';
+import { isHoldingOnlyMessage, normalizeOutgoingBody } from '../outbound-format';
+import { traceGuardBlock } from '../obs/trace';
 import { checkDeterministicOrderSummaryReply } from '../order-summary';
 import {
   beginOutboundAttempt,
@@ -23,7 +25,7 @@ import {
   markOutboundFailure,
   markOutboundSent,
 } from '../outbound-delivery';
-import { checkPaymentInstructionReply } from '../payment-instructions';
+import { checkPaymentInstructionReply, checkUnconfiguredPaymentMethodReply } from '../payment-instructions';
 import { checkRefundCompletionClaim } from '../refunds';
 import { checkSensitiveActionReply, type SensitiveActionFacts } from '../sensitive-action-wording';
 import { checkInternalDisclosureReply } from '../untrusted-data';
@@ -39,6 +41,43 @@ import {
 } from './shared';
 
 const log = createLogger();
+
+/**
+ * Stable guard check ids, used in `wa_guard_blocks_total{check}` and in
+ * message traces. Renaming one breaks dashboards and alerts — add, don't rename.
+ */
+export type SendGuardCheck =
+  | 'empty_body'
+  | 'opted_out'
+  | 'holding_message'
+  | 'order_confirmation_claim'
+  | 'order_summary'
+  | 'inventory_disclosure'
+  | 'refund_completion_claim'
+  | 'sensitive_action_wording'
+  | 'support_upsell'
+  | 'checkout_collection'
+  | 'reply_script'
+  | 'payment_instruction'
+  | 'unconfigured_payment_method'
+  | 'handoff_claim'
+  | 'internal_disclosure'
+  | 'pacing'
+  | 'spinning'
+  | 'discount';
+
+/**
+ * Tags a veto with its stable check id (the optional `check` field) and
+ * records it for observability. The teaching text is returned unchanged.
+ */
+export function guardBlocked<T extends { ok: false }>(
+  check: SendGuardCheck,
+  result: T,
+  body?: unknown,
+): T & { check: SendGuardCheck } {
+  traceGuardBlock(check, body);
+  return { ...result, check };
+}
 
 // Sent exactly once per customer, prepended to their first-ever reply.
 const DISCLOSURE_TEXT =
@@ -108,50 +147,74 @@ export function makeSendMessageTool(
       properties: { body: { type: 'string', description: 'the message text' } },
       required: ['body'],
     },
-    execute: async ({ body }, ctx) => {
+    execute: async (input, ctx) => {
+      // FIX4: the single normalisation point (literal \n, blank-line cap,
+      // emojis). Everything below — guards, idempotency hashes, spinning,
+      // the stored transcript and the wire — sees only the final text.
+      // Authorized server bodies are normalised the same way so exact-match
+      // authorisation still holds.
+      const { body, authorized } = normalizeSendInput(input?.body, options);
       if (typeof body !== 'string' || body.trim() === '') {
-        return { ok: false, error: 'Message text must be a non-empty string.' };
+        return guardBlocked('empty_body', { ok: false, error: 'Message text must be a non-empty string.' });
       }
 
       const consentCheck = checkAutomatedCustomerSendAllowed(ctx.customerId, options.allowOptedOut === true);
-      if (!consentCheck.ok) return consentCheck;
+      if (!consentCheck.ok) return guardBlocked('opted_out', consentCheck, body);
 
-      const confirmationClaim = checkOrderConfirmationReply(body, ctx);
-      if (!confirmationClaim.ok) return confirmationClaim;
+      // Fix round 2: a holding-only message ("Ek minute, main dekhta hoon")
+      // would be the event's single visible reply, and the real answer after
+      // it would be dropped as already_sent. Exact server-authored bodies are
+      // never holding messages and are exempt.
+      const isAuthorizedBody =
+        body === authorized.payment || body === authorized.handoff || body === authorized.orderSummary;
+      const holdingCheck = isAuthorizedBody ? { ok: true as const } : checkHoldingMessageReply(body);
+      if (!holdingCheck.ok) return guardBlocked('holding_message', holdingCheck, body);
+
+      // The exact server order summary ("ORDER SUMMARY — NOT BOOKED YET")
+      // states the opposite of a success claim but matches its "order …
+      // booked" pattern; it was vetoed on every real turn (FIX2). Only the
+      // byte-identical server-authored body is exempt.
+      const isAuthorizedServerSummary =
+        authorized.orderSummary !== undefined && body === authorized.orderSummary;
+      const confirmationClaim = isAuthorizedServerSummary ? { ok: true as const } : checkOrderConfirmationReply(body, ctx);
+      if (!confirmationClaim.ok) return guardBlocked('order_confirmation_claim', confirmationClaim, body);
 
       const orderSummaryCheck = checkDeterministicOrderSummaryReply(
         body,
         Boolean(getPendingOrderDraft(ctx.customerId)),
-        options.authorizedOrderSummaryBody,
+        authorized.orderSummary,
       );
-      if (!orderSummaryCheck.ok) return orderSummaryCheck;
+      if (!orderSummaryCheck.ok) return guardBlocked('order_summary', orderSummaryCheck, body);
 
       const inventoryDisclosure = checkInventoryDisclosureReply(body, ctx.inboundText);
-      if (!inventoryDisclosure.ok) return inventoryDisclosure;
+      if (!inventoryDisclosure.ok) return guardBlocked('inventory_disclosure', inventoryDisclosure, body);
 
       const refundClaim = checkRefundCompletionClaim(body);
-      if (!refundClaim.ok) return refundClaim;
+      if (!refundClaim.ok) return guardBlocked('refund_completion_claim', refundClaim, body);
 
       const sensitiveActionCheck = checkSensitiveActionReply(body, options.sensitiveActionFacts);
-      if (!sensitiveActionCheck.ok) return sensitiveActionCheck;
+      if (!sensitiveActionCheck.ok) return guardBlocked('sensitive_action_wording', sensitiveActionCheck, body);
 
       const supportUpsell = checkSupportUpsellReply(ctx.inboundText, body);
-      if (!supportUpsell.ok) return supportUpsell;
+      if (!supportUpsell.ok) return guardBlocked('support_upsell', supportUpsell, body);
 
       const checkoutCollection = checkCheckoutCollectionReply(ctx.inboundText, body);
-      if (!checkoutCollection.ok) return checkoutCollection;
+      if (!checkoutCollection.ok) return guardBlocked('checkout_collection', checkoutCollection, body);
 
       const scriptConsistency = checkCustomerReplyScript(ctx.inboundText, body);
-      if (!scriptConsistency.ok) return scriptConsistency;
+      if (!scriptConsistency.ok) return guardBlocked('reply_script', scriptConsistency, body);
 
-      const paymentInstructionCheck = checkPaymentInstructionReply(body, options.authorizedPaymentBody);
-      if (!paymentInstructionCheck.ok) return paymentInstructionCheck;
+      const paymentInstructionCheck = checkPaymentInstructionReply(body, authorized.payment);
+      if (!paymentInstructionCheck.ok) return guardBlocked('payment_instruction', paymentInstructionCheck, body);
 
-      const handoffClaimCheck = checkHandoffClaimReply(body, options.authorizedHandoffBody);
-      if (!handoffClaimCheck.ok) return handoffClaimCheck;
+      const paymentMethodCheck = checkUnconfiguredPaymentMethodReply(body, process.env, ctx.inboundText);
+      if (!paymentMethodCheck.ok) return guardBlocked('unconfigured_payment_method', paymentMethodCheck, body);
+
+      const handoffClaimCheck = checkHandoffClaimReply(body, authorized.handoff);
+      if (!handoffClaimCheck.ok) return guardBlocked('handoff_claim', handoffClaimCheck, body);
 
       const disclosureCheck = checkInternalDisclosureReply(body);
-      if (!disclosureCheck.ok) return disclosureCheck;
+      if (!disclosureCheck.ok) return guardBlocked('internal_disclosure', disclosureCheck, body);
 
       const sendId = createHash('sha256').update(`${turnKey}:${body}`).digest('hex');
       const bodyHash = createHash('sha256').update(body).digest('hex');
@@ -196,7 +259,7 @@ export function makeSendMessageTool(
             getPacingState(PACING_DEFAULTS.timezone, now),
           );
           if (!pacingDecision.allow) {
-            return { ok: false, error: `Not sending right now — ${pacingDecision.reason}` };
+            return guardBlocked('pacing', { ok: false, error: `Not sending right now — ${pacingDecision.reason}` }, body);
           }
           if (pacingDecision.waitMs > 0) {
             await sleep(pacingDecision.waitMs);
@@ -213,7 +276,7 @@ export function makeSendMessageTool(
               knobs: SPINNING_DEFAULTS,
             });
             if (!spinningDecision.allow) {
-              return { ok: false, error: spinningDecision.reason };
+              return guardBlocked('spinning', { ok: false, error: spinningDecision.reason }, body);
             }
           }
 
@@ -222,7 +285,7 @@ export function makeSendMessageTool(
           // here, so the model can reformulate instead of the turn crashing.
           const discountCheck = checkDiscountRule(body, getKnownDiscountPercents(ctx.customerId));
           if (!discountCheck.ok) {
-            return { ok: false, error: discountCheck.reason };
+            return guardBlocked('discount', { ok: false, error: discountCheck.reason }, body);
           }
 
           // One-time "I'm a virtual assistant" disclosure on this customer's
@@ -284,6 +347,32 @@ export function makeSendMessageTool(
       }
     },
   };
+}
+
+function normalizeSendInput(
+  rawBody: unknown,
+  options: { authorizedPaymentBody?: string; authorizedHandoffBody?: string; authorizedOrderSummaryBody?: string },
+): {
+  body: unknown;
+  authorized: { payment?: string; handoff?: string; orderSummary?: string };
+} {
+  const normalize = (text: string | undefined) => (text === undefined ? undefined : normalizeOutgoingBody(text));
+  return {
+    body: typeof rawBody === 'string' ? normalizeOutgoingBody(rawBody) : rawBody,
+    authorized: {
+      payment: normalize(options.authorizedPaymentBody),
+      handoff: normalize(options.authorizedHandoffBody),
+      orderSummary: normalize(options.authorizedOrderSummaryBody),
+    },
+  };
+}
+
+export const HOLDING_MESSAGE_ERROR =
+  'Do not send a holding message. Call the tools you need first, then send one complete reply.';
+
+/** Vetoes a reply that is only a holding/stalling message ("ek minute, main dekhta hoon"). */
+export function checkHoldingMessageReply(body: string): { ok: true } | { ok: false; error: string } {
+  return isHoldingOnlyMessage(body) ? { ok: false, error: HOLDING_MESSAGE_ERROR } : { ok: true };
 }
 
 export function checkAutomatedCustomerSendAllowed(
