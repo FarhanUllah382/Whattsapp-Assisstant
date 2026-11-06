@@ -1,6 +1,13 @@
 {
   "name": "ahmed-assistant",
   "version": "0.1.0",
+  "description": "A single-tenant WhatsApp AI sales assistant for one clothing/footwear shop: customer conversations, orders and bookkeeping, owner mode, and production-hardening guardrails.",
+  "license": "MIT",
+  "author": "FarhanUllah382",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FarhanUllah382/Whattsapp-Assisstant.git"
+  },
   "private": true,
   "engines": {
     "node": ">=24 <25"
