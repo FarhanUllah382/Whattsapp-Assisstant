@@ -1,4 +1,4 @@
-# Ahmed's WhatsApp Assistant
+# whatsapp-shop-agent
 
 ![Node](https://img.shields.io/badge/node-24%20LTS-339933?logo=node.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?logo=typescript&logoColor=white)
