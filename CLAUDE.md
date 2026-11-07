@@ -25,7 +25,7 @@ Stack: Node 24 LTS, TypeScript strict, Express, SQLite (`better-sqlite3`
 12.10.0), Google Gemini via raw REST (`gemini-flash-lite-latest`), WAHA
 (unofficial WhatsApp Web HTTP gateway, run in Docker). No other runtime deps.
 
-GitHub remote: `https://github.com/FarhanUllah382/Whattsapp-Assisstant.git`
+GitHub remote: `https://github.com/FarhanUllah382/whatsapp-shop-agent.git`
 (branch `main`).
 
 ## 2. Current status (verified 2026-11-01)
