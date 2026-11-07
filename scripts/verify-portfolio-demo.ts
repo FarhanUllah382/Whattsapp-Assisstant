@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -7,10 +8,28 @@ const root = path.resolve(__dirname, '..');
 const demoDbPath = path.join(root, 'portfolio-demo', 'data', 'portfolio-demo.db');
 const runtimeRoot = path.join(root, '.portfolio-runtime');
 const realDbPath = path.join(root, 'ahmed.db');
+const realDatabaseFiles = [realDbPath, `${realDbPath}-wal`, `${realDbPath}-shm`];
 
-assert.ok(fs.existsSync(realDbPath), 'The real database should remain present and separate.');
-assert.ok(fs.existsSync(demoDbPath), 'The synthetic demo database should exist after the build.');
+// ahmed.db is gitignored and legitimately absent in a clean checkout (e.g.
+// CI). This step must never create it — it only proves that if one is
+// present on disk, this script leaves it untouched and distinct from the
+// synthetic demo database.
+type FileFingerprint = { exists: boolean; sha256?: string; size?: number };
+
+function fingerprint(filePath: string): FileFingerprint {
+  if (!fs.existsSync(filePath)) return { exists: false };
+  const bytes = fs.readFileSync(filePath);
+  return { exists: true, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+}
+
+function snapshotRealDatabase(): Record<string, FileFingerprint> {
+  return Object.fromEntries(realDatabaseFiles.map((filePath) => [path.basename(filePath), fingerprint(filePath)]));
+}
+
+const realDbBefore = snapshotRealDatabase();
 assert.notEqual(path.resolve(demoDbPath), path.resolve(realDbPath));
+
+assert.ok(fs.existsSync(demoDbPath), 'The synthetic demo database should exist after the build.');
 
 const demoDb = new Database(demoDbPath, { readonly: true, fileMustExist: true });
 const phones = demoDb.prepare('select phone from customers order by id').pluck().all() as string[];
@@ -51,4 +70,11 @@ for (const forbidden of ['send_message', 'record_order', 'update_order_status', 
   assert.ok(!sourceText.includes(forbidden), `Public runtime must not contain ${forbidden}.`);
 }
 
-process.stdout.write('Portfolio demo verification passed: synthetic data, all statuses, real readers, and read-only enforcement.\n');
+const realDbAfter = snapshotRealDatabase();
+assert.deepEqual(realDbAfter, realDbBefore, 'ahmed.db must remain untouched by the portfolio demo build/verify.');
+
+process.stdout.write(
+  realDbBefore['ahmed.db'].exists
+    ? 'Portfolio demo verification passed: synthetic data, all statuses, real readers, read-only enforcement, and ahmed.db left unchanged.\n'
+    : 'Portfolio demo verification passed: synthetic data, all statuses, real readers, and read-only enforcement (ahmed.db absent, as expected in a clean checkout).\n',
+);
