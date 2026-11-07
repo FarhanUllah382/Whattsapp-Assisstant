@@ -156,7 +156,7 @@ src/
           handoff.ts          recordHandoff, notify_owner
           owner-analytics.ts  inventory_overview, sales_today, unpaid_customers, top_selling_product, pending_followups
   llm.ts                  Gemini REST seam
-  db.ts  ../db/schema.sql SQLite singleton + startup migrations (28 tables)
+  db.ts  ../db/schema.sql SQLite singleton + startup migrations (31 tables)
   orders.ts order-access.ts order-summary.ts   FSM, sender-bound lookup, summaries
   inventory.ts inventory-visibility.ts catalog.ts business-grounding.ts
   ledger.ts money.ts payments.ts payment-resolution.ts payment-instructions.ts
