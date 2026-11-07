@@ -64,6 +64,26 @@ async function renderConversations(customers) {
   if (customers[0]) await showConversation(customers[0]);
 }
 
+function renderSampleConversations(data) {
+  document.querySelector('#sample-label').textContent = data.label;
+  document.querySelector('#sample-note').textContent = data.note;
+  document.querySelector('#sample-conversations-grid').innerHTML = data.conversations.map((convo) => `
+    <article class="panel sample-card">
+      <div class="sample-card-heading">
+        <h3>${convo.title}</h3>
+        <span class="data-chip">${convo.subtitle}</span>
+      </div>
+      <div class="sample-thread">
+        ${convo.messages.map((message) => `
+          <div class="bubble-row ${message.from === 'assistant' ? 'outbound' : 'inbound'}">
+            <span class="sample-sender">${message.from}</span>
+            <div class="bubble">${message.text}</div>
+            ${message.basis ? `<small class="sample-basis">${message.basis}</small>` : ''}
+          </div>`).join('')}
+      </div>
+    </article>`).join('');
+}
+
 async function init() {
   try {
     const [summary, orders, conversations] = await Promise.all([
@@ -78,6 +98,12 @@ async function init() {
     document.querySelector('#metrics').innerHTML = '<article class="metric-card"><strong>Demo data unavailable</strong><span class="metric-sub">Please refresh in a moment.</span></article>';
     document.querySelector('#orders').innerHTML = '<tr><td colspan="5" class="loading-row">Unable to load demo data.</td></tr>';
     document.querySelector('#chat-body').innerHTML = '<div class="chat-placeholder">Unable to load conversations.</div>';
+  }
+
+  try {
+    renderSampleConversations(await getJson('/sample-conversations.json'));
+  } catch (error) {
+    document.querySelector('#sample-conversations-grid').innerHTML = '<article class="panel sample-card"><strong>Sample conversations unavailable</strong></article>';
   }
 }
 

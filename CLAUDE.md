@@ -25,7 +25,7 @@ Stack: Node 24 LTS, TypeScript strict, Express, SQLite (`better-sqlite3`
 12.10.0), Google Gemini via raw REST (`gemini-flash-lite-latest`), WAHA
 (unofficial WhatsApp Web HTTP gateway, run in Docker). No other runtime deps.
 
-GitHub remote: `https://github.com/FarhanUllah382/Whattsapp-Assisstant.git`
+GitHub remote: `https://github.com/FarhanUllah382/whatsapp-shop-agent.git`
 (branch `main`).
 
 ## 2. Current status (verified 2026-11-01)
@@ -156,7 +156,7 @@ src/
           handoff.ts          recordHandoff, notify_owner
           owner-analytics.ts  inventory_overview, sales_today, unpaid_customers, top_selling_product, pending_followups
   llm.ts                  Gemini REST seam
-  db.ts  ../db/schema.sql SQLite singleton + startup migrations (28 tables)
+  db.ts  ../db/schema.sql SQLite singleton + startup migrations (31 tables)
   orders.ts order-access.ts order-summary.ts   FSM, sender-bound lookup, summaries
   inventory.ts inventory-visibility.ts catalog.ts business-grounding.ts
   ledger.ts money.ts payments.ts payment-resolution.ts payment-instructions.ts
