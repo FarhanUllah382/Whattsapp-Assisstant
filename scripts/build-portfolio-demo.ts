@@ -19,6 +19,7 @@ fs.mkdirSync(path.join(runtimeSrc, 'guardrails', 'pacing'), { recursive: true })
 fs.mkdirSync(path.join(runtime, 'public'), { recursive: true });
 
 const copies: Array<[string, string]> = [
+  ['src/money.ts', 'src/money.ts'],
   ['src/analytics.ts', 'src/analytics.ts'],
   ['src/followups.ts', 'src/followups.ts'],
   ['portfolio-demo/runtime-ledger.ts', 'src/ledger.ts'],
@@ -29,6 +30,7 @@ const copies: Array<[string, string]> = [
   ['portfolio-demo/public/index.html', 'public/index.html'],
   ['portfolio-demo/public/styles.css', 'public/styles.css'],
   ['portfolio-demo/public/app.js', 'public/app.js'],
+  ['portfolio-demo/sample-conversations.json', 'public/sample-conversations.json'],
   ['portfolio-demo/data/portfolio-demo.db', 'portfolio-demo.db'],
 ];
 

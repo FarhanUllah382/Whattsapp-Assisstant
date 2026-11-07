@@ -3,6 +3,7 @@ import path from 'node:path';
 import { getSalesToday, getTopSellingProduct, getUnpaidCustomers } from './src/analytics';
 import { getPendingFollowups } from './src/followups';
 import { db } from './src/db';
+import { minorToRupees } from './src/money';
 
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
@@ -44,7 +45,7 @@ app.get('/api/summary', (_req, res) => {
 app.get('/api/orders', (_req, res) => {
   const rows = db
     .prepare(
-      `select o.id, c.name as customer, o.items_json, o.total, o.status, o.created_at
+      `select o.id, c.name as customer, o.items_json, o.total_minor, o.status, o.created_at
        from orders o join customers c on c.id = o.customer_id
        order by o.created_at desc, o.id desc`,
     )
@@ -52,7 +53,7 @@ app.get('/api/orders', (_req, res) => {
       id: number;
       customer: string;
       items_json: string;
-      total: number;
+      total_minor: number;
       status: string;
       created_at: string;
     }>;
@@ -60,8 +61,9 @@ app.get('/api/orders', (_req, res) => {
     (db.prepare('select id, name from products').all() as Array<{ id: number; name: string }>).map((p) => [p.id, p.name]),
   );
   res.json(
-    rows.map(({ items_json, ...row }) => ({
+    rows.map(({ items_json, total_minor, ...row }) => ({
       ...row,
+      total: minorToRupees(total_minor, 'order total'),
       items: (JSON.parse(items_json) as Array<{ product_id: number; qty: number }>).map((item) => ({
         name: productNames.get(item.product_id) ?? 'Product',
         quantity: item.qty,

@@ -48,56 +48,59 @@ const seed = db.transaction(() => {
   ] as const;
   for (const customer of customers) insertCustomer.run(...customer);
 
+  // All money is stored as integer paisa (price_minor / total_minor /
+  // amount_minor), matching db/schema.sql. Rupee literals below are
+  // multiplied by 100 at the point they're written.
   const insertProduct = db.prepare(
-    'insert into products (name, size, color, price, stock) values (?, ?, ?, ?, ?)',
+    'insert into products (name, size, color, price_minor, stock) values (?, ?, ?, ?, ?)',
   );
   const productIds = [
-    insertProduct.run('Classic Cotton Kurta', 'M', 'Navy', 3200, 18).lastInsertRowid,
-    insertProduct.run('Linen Summer Shirt', 'L', 'White', 2800, 11).lastInsertRowid,
-    insertProduct.run('Premium Chinos', '32', 'Sand', 3600, 9).lastInsertRowid,
-    insertProduct.run('Everyday Polo', 'M', 'Olive', 2200, 24).lastInsertRowid,
+    insertProduct.run('Classic Cotton Kurta', 'M', 'Navy', 3200 * 100, 18).lastInsertRowid,
+    insertProduct.run('Linen Summer Shirt', 'L', 'White', 2800 * 100, 11).lastInsertRowid,
+    insertProduct.run('Premium Chinos', '32', 'Sand', 3600 * 100, 9).lastInsertRowid,
+    insertProduct.run('Everyday Polo', 'M', 'Olive', 2200 * 100, 24).lastInsertRowid,
   ].map(Number);
 
   const insertOrder = db.prepare(
-    'insert into orders (customer_id, items_json, total, status, created_at) values (?, ?, ?, ?, ?)',
+    'insert into orders (customer_id, items_json, total_minor, status, created_at) values (?, ?, ?, ?, ?)',
   );
   const orderRows = [
-    [1, [{ product_id: productIds[0], qty: 2, price: 3200 }], 6400, 'delivered', daysAgo(12, 8,)],
-    [2, [{ product_id: productIds[1], qty: 1, price: 2800 }], 2800, 'cancelled', daysAgo(9, 10)],
-    [3, [{ product_id: productIds[3], qty: 2, price: 2200 }], 4400, 'placed', daysAgo(8, 11)],
-    [1, [{ product_id: productIds[0], qty: 1, price: 3200 }], 3200, 'confirmed', daysAgo(4, 9)],
-    [2, [{ product_id: productIds[2], qty: 1, price: 3600 }], 3600, 'paid', daysAgo(3, 12)],
-    [3, [{ product_id: productIds[3], qty: 1, price: 2200 }], 2200, 'shipped', daysAgo(2, 8)],
-    [1, [{ product_id: productIds[0], qty: 1, price: 3200 }], 3200, 'delivered', daysAgo(1, 13)],
-    [2, [{ product_id: productIds[1], qty: 1, price: 2800 }], 2800, 'placed', todayAt(11, 15)],
-    [3, [{ product_id: productIds[3], qty: 2, price: 2200 }], 4400, 'confirmed', todayAt(14, 35)],
+    [1, [{ product_id: productIds[0], qty: 2, price_minor: 3200 * 100 }], 6400 * 100, 'delivered', daysAgo(12, 8,)],
+    [2, [{ product_id: productIds[1], qty: 1, price_minor: 2800 * 100 }], 2800 * 100, 'cancelled', daysAgo(9, 10)],
+    [3, [{ product_id: productIds[3], qty: 2, price_minor: 2200 * 100 }], 4400 * 100, 'placed', daysAgo(8, 11)],
+    [1, [{ product_id: productIds[0], qty: 1, price_minor: 3200 * 100 }], 3200 * 100, 'confirmed', daysAgo(4, 9)],
+    [2, [{ product_id: productIds[2], qty: 1, price_minor: 3600 * 100 }], 3600 * 100, 'paid', daysAgo(3, 12)],
+    [3, [{ product_id: productIds[3], qty: 1, price_minor: 2200 * 100 }], 2200 * 100, 'shipped', daysAgo(2, 8)],
+    [1, [{ product_id: productIds[0], qty: 1, price_minor: 3200 * 100 }], 3200 * 100, 'delivered', daysAgo(1, 13)],
+    [2, [{ product_id: productIds[1], qty: 1, price_minor: 2800 * 100 }], 2800 * 100, 'placed', todayAt(11, 15)],
+    [3, [{ product_id: productIds[3], qty: 2, price_minor: 2200 * 100 }], 4400 * 100, 'confirmed', todayAt(14, 35)],
   ] as const;
 
   const orderIds: number[] = [];
-  for (const [customerId, items, total, status, createdAt] of orderRows) {
-    const result = insertOrder.run(customerId, JSON.stringify(items), total, status, createdAt);
+  for (const [customerId, items, totalMinor, status, createdAt] of orderRows) {
+    const result = insertOrder.run(customerId, JSON.stringify(items), totalMinor, status, createdAt);
     orderIds.push(Number(result.lastInsertRowid));
   }
 
   const insertLedger = db.prepare(
-    'insert into ledger (customer_id, order_id, kind, amount, created_at) values (?, ?, ?, ?, ?)',
+    'insert into ledger (customer_id, order_id, kind, amount_minor, created_at) values (?, ?, ?, ?, ?)',
   );
   // Sara owes Rs.3,200; Hamza owes Rs.2,800; Ayesha owes Rs.4,400.
-  insertLedger.run(1, orderIds[0], 'debit', 6400, daysAgo(12));
-  insertLedger.run(1, null, 'credit', 6400, daysAgo(11));
-  insertLedger.run(1, orderIds[3], 'debit', 3200, daysAgo(4));
-  insertLedger.run(1, orderIds[6], 'debit', 3200, daysAgo(1));
-  insertLedger.run(1, null, 'credit', 3200, daysAgo(1));
-  insertLedger.run(2, orderIds[1], 'debit', 2800, daysAgo(9));
-  insertLedger.run(2, orderIds[1], 'credit', 2800, daysAgo(9));
-  insertLedger.run(2, orderIds[4], 'debit', 3600, daysAgo(3));
-  insertLedger.run(2, null, 'credit', 3600, daysAgo(3));
-  insertLedger.run(2, orderIds[7], 'debit', 2800, todayAt(11, 15));
-  insertLedger.run(3, orderIds[2], 'debit', 4400, daysAgo(8));
-  insertLedger.run(3, orderIds[5], 'debit', 2200, daysAgo(2));
-  insertLedger.run(3, null, 'credit', 2200, daysAgo(1));
-  insertLedger.run(3, orderIds[8], 'debit', 4400, todayAt(14, 35));
-  insertLedger.run(3, null, 'credit', 4400, todayAt(15, 10));
+  insertLedger.run(1, orderIds[0], 'debit', 6400 * 100, daysAgo(12));
+  insertLedger.run(1, null, 'credit', 6400 * 100, daysAgo(11));
+  insertLedger.run(1, orderIds[3], 'debit', 3200 * 100, daysAgo(4));
+  insertLedger.run(1, orderIds[6], 'debit', 3200 * 100, daysAgo(1));
+  insertLedger.run(1, null, 'credit', 3200 * 100, daysAgo(1));
+  insertLedger.run(2, orderIds[1], 'debit', 2800 * 100, daysAgo(9));
+  insertLedger.run(2, orderIds[1], 'credit', 2800 * 100, daysAgo(9));
+  insertLedger.run(2, orderIds[4], 'debit', 3600 * 100, daysAgo(3));
+  insertLedger.run(2, null, 'credit', 3600 * 100, daysAgo(3));
+  insertLedger.run(2, orderIds[7], 'debit', 2800 * 100, todayAt(11, 15));
+  insertLedger.run(3, orderIds[2], 'debit', 4400 * 100, daysAgo(8));
+  insertLedger.run(3, orderIds[5], 'debit', 2200 * 100, daysAgo(2));
+  insertLedger.run(3, null, 'credit', 2200 * 100, daysAgo(1));
+  insertLedger.run(3, orderIds[8], 'debit', 4400 * 100, todayAt(14, 35));
+  insertLedger.run(3, null, 'credit', 4400 * 100, todayAt(15, 10));
 
   const insertMessage = db.prepare(
     'insert into messages (customer_id, direction, body, created_at) values (?, ?, ?, ?)',
